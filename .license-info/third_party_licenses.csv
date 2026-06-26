@@ -1,0 +1,217 @@
+Name,Version,License,URL
+Cartopy,0.25.0,BSD-3-Clause,https://github.com/SciTools/cartopy
+GitPython,3.1.46,BSD-3-Clause,https://github.com/gitpython-developers/GitPython
+ImageIO,2.37.3,BSD-2-Clause,https://github.com/imageio/imageio
+Jinja2,3.1.6,BSD License,https://github.com/pallets/jinja/
+Markdown,3.10.2,BSD-3-Clause,https://Python-Markdown.github.io/
+MarkupSafe,3.0.3,BSD-3-Clause,https://github.com/pallets/markupsafe/
+NATTEN,0.21.5,MIT,https://natten.org
+PyYAML,6.0.3,MIT License,https://pyyaml.org/
+Pygments,2.20.0,BSD-2-Clause,https://pygments.org
+Werkzeug,3.1.8,BSD-3-Clause,https://github.com/pallets/werkzeug/
+absl-py,2.4.0,Apache-2.0,https://github.com/abseil/abseil-py
+aiobotocore,3.4.0,Apache-2.0,https://github.com/aio-libs/aiobotocore
+aiohappyeyeballs,2.6.1,Python Software Foundation License,https://github.com/aio-libs/aiohappyeyeballs
+aiohttp,3.13.5,Apache-2.0 AND MIT,https://github.com/aio-libs/aiohttp
+aioitertools,0.13.0,MIT,https://aioitertools.omnilib.dev/en/latest/changelog.html
+aiosignal,1.4.0,Apache Software License,https://github.com/aio-libs/aiosignal
+altair,6.0.0,BSD License,https://github.com/vega/altair
+annotated-doc,0.0.4,MIT,https://github.com/fastapi/annotated-doc
+annotated-types,0.7.0,MIT License,https://github.com/annotated-types/annotated-types
+antlr4-python3-runtime,4.9.3,BSD,http://www.antlr.org
+anyio,4.13.0,MIT,https://anyio.readthedocs.io/en/stable/versionhistory.html
+asttokens,3.0.1,Apache 2.0,https://github.com/gristlabs/asttokens
+astunparse,1.6.3,BSD License,https://github.com/simonpercivall/astunparse
+attrs,26.1.0,MIT,https://www.attrs.org/en/stable/changelog.html
+bokeh,3.9.0,BSD-3-Clause,https://bokeh.org
+botocore,1.42.84,Apache-2.0,https://github.com/boto/botocore
+bracex,2.6,MIT,https://github.com/facelessuser/bracex
+certifi,2026.2.25,Mozilla Public License 2.0 (MPL 2.0),https://github.com/certifi/python-certifi
+cffi,2.0.0,MIT,https://cffi.readthedocs.io/en/latest/whatsnew.html
+cftime,1.6.5,MIT,https://pypi.org/project/cftime/1.6.5/
+charset-normalizer,3.4.7,MIT,https://github.com/jawah/charset_normalizer/blob/master/CHANGELOG.md
+click,8.3.1,BSD-3-Clause,https://github.com/pallets/click/
+cloudpickle,3.1.2,BSD License,https://github.com/cloudpipe/cloudpickle
+contourpy,1.3.3,BSD License,https://github.com/contourpy/contourpy
+cryptography,46.0.6,Apache-2.0 OR BSD-3-Clause,https://github.com/pyca/cryptography
+cycler,0.12.1,BSD License,https://matplotlib.org/cycler/
+dacite,1.9.2,MIT License,https://github.com/konradhalas/dacite
+dask,2026.3.0,BSD-3-Clause,https://github.com/dask/dask/
+decorator,5.2.1,BSD License,https://pypi.org/project/decorator/5.2.1/
+distributed,2026.3.0,BSD-3-Clause,https://distributed.dask.org
+dm-tree,0.1.9,Apache Software License,https://github.com/deepmind/tree
+docutils,0.22.4,BSD License; GNU General Public License (GPL); Public Domain,https://docutils.sourceforge.io
+donfig,0.8.1.post1,MIT License,https://github.com/pytroll/donfig
+earth2grid,2025.11.1+torch211,Apache-2.0,https://github.com/NVlabs/earth2grid
+earth2studio,0.13.0,Apache-2.0,https://github.com/NVIDIA/earth2studio
+einops,0.8.2,MIT License,https://github.com/arogozhnikov/einops
+executing,2.2.1,MIT License,https://github.com/alexmojaki/executing
+filelock,3.25.2,MIT,https://github.com/tox-dev/py-filelock
+fme,2026.1.1,Apache Software License,https://github.com/ai2cm/ace
+fonttools,4.62.1,MIT,http://github.com/fonttools/fonttools
+frozenlist,1.8.0,Apache-2.0,https://github.com/aio-libs/frozenlist
+fsspec,2026.3.0,BSD-3-Clause,https://github.com/fsspec/filesystem_spec
+gast,0.7.0,BSD License,https://github.com/serge-sans-paille/gast/
+gcsfs,2026.3.0,BSD License,https://github.com/fsspec/gcsfs
+gitdb,4.0.12,BSD License,https://github.com/gitpython-developers/gitdb
+google-api-core,2.30.2,Apache Software License,https://github.com/googleapis/google-cloud-python/tree/main/packages/google-api-core
+google-auth,2.49.1,Apache Software License,https://github.com/googleapis/google-auth-library-python
+google-auth-oauthlib,1.3.1,Apache Software License,https://github.com/googleapis/google-cloud-python/tree/main/packages/google-auth-oauthlib
+google-cloud-core,2.5.1,Apache Software License,https://github.com/googleapis/google-cloud-python/tree/main/packages/google-cloud-core
+google-cloud-storage,3.10.1,Apache Software License,https://github.com/googleapis/python-storage
+google-cloud-storage-control,1.11.0,Apache Software License,https://github.com/googleapis/google-cloud-python/tree/main/packages/google-cloud-storage-control
+google-crc32c,1.8.0,Apache-2.0,https://github.com/googleapis/python-crc32c
+google-resumable-media,2.8.2,Apache Software License,https://github.com/googleapis/google-resumable-media-python
+googleapis-common-protos,1.74.0,Apache Software License,https://github.com/googleapis/google-cloud-python/tree/main/packages/googleapis-common-protos
+grpc-google-iam-v1,0.14.4,Apache Software License,https://github.com/googleapis/google-cloud-python
+grpcio,1.80.0,Apache-2.0,https://grpc.io
+grpcio-status,1.80.0,Apache-2.0,https://grpc.io
+h11,0.16.0,MIT License,https://github.com/python-hyper/h11
+h5netcdf,1.8.1,BSD License,https://h5netcdf.org
+h5py,3.16.0,BSD-3-Clause,https://www.h5py.org/
+hf-xet,1.4.3,Apache-2.0,https://github.com/huggingface/xet-core
+httpcore,1.0.9,BSD-3-Clause,https://www.encode.io/httpcore/
+httpx,0.28.1,BSD License,https://github.com/encode/httpx
+huggingface_hub,1.9.1,Apache Software License,https://github.com/huggingface/huggingface_hub
+idna,3.11,BSD-3-Clause,https://github.com/kjd/idna
+imageio-ffmpeg,0.6.0,BSD License,https://github.com/imageio/imageio-ffmpeg
+importlib_metadata,8.7.1,Apache-2.0,https://github.com/python/importlib_metadata
+iniconfig,2.3.0,MIT,https://github.com/pytest-dev/iniconfig
+ipython,9.12.0,BSD-3-Clause,https://ipython.org
+ipython_pygments_lexers,1.1.1,BSD License,https://github.com/ipython/ipython-pygments-lexers
+itsdangerous,2.2.0,BSD License,https://github.com/pallets/itsdangerous/
+jedi,0.19.2,MIT License,https://github.com/davidhalter/jedi
+jmespath,1.1.0,MIT License,https://github.com/jmespath/jmespath.py
+joblib,1.5.3,BSD-3-Clause,https://joblib.readthedocs.io
+jsonschema,4.26.0,MIT,https://github.com/python-jsonschema/jsonschema
+jsonschema-specifications,2025.9.1,MIT,https://github.com/python-jsonschema/jsonschema-specifications
+kiwisolver,1.5.0,BSD License,https://github.com/nucleic/kiwi
+lark,1.3.1,MIT License,https://github.com/lark-parser/lark
+lightning,2.6.1,Apache Software License,https://github.com/Lightning-AI/lightning
+lightning-utilities,0.15.3,Apache-2.0,https://github.com/Lightning-AI/utilities
+llvmlite,0.47.0,BSD-2-Clause AND Apache-2.0 WITH LLVM-exception,http://llvmlite.readthedocs.io
+lmdb,2.2.0,OLDAP-2.8,http://github.com/jnwatson/py-lmdb/
+locket,1.0.0,BSD License,http://github.com/mwilliamson/locket.py
+loguru,0.7.3,MIT License,https://github.com/Delgan/loguru
+loro,1.10.3,MIT,https://loro.dev
+lz4,4.4.5,BSD License,https://github.com/python-lz4/python-lz4
+makefun,1.16.0,BSD License,https://github.com/smarie/python-makefun
+marimo,0.22.0,Apache Software License,https://github.com/marimo-team/marimo
+markdown-it-py,4.0.0,MIT License,https://github.com/executablebooks/markdown-it-py
+matplotlib,3.10.8,Python Software Foundation License,https://matplotlib.org
+matplotlib-inline,0.2.1,BSD-3-Clause,https://github.com/ipython/matplotlib-inline
+mdurl,0.1.2,MIT License,https://github.com/executablebooks/mdurl
+ml_dtypes,0.5.4,Apache-2.0,https://github.com/jax-ml/ml_dtypes
+moviepy,2.2.1,MIT License,https://pypi.org/project/moviepy/2.2.1/
+mpmath,1.3.0,BSD License,http://mpmath.org/
+msgpack,1.1.2,Apache-2.0,https://msgpack.org/
+msgspec,0.20.0,BSD-3-Clause,https://jcristharif.com/msgspec/
+multi-storage-client,0.45.1,Apache-2.0,https://github.com/NVIDIA/multi-storage-client
+multidict,6.7.1,Apache License 2.0,https://github.com/aio-libs/multidict
+narwhals,2.18.1,MIT License,https://github.com/narwhals-dev/narwhals
+nest-asyncio,1.6.0,BSD License,https://github.com/erdewit/nest_asyncio
+netCDF4,1.7.2,MIT License,https://github.com/Unidata/netcdf4-python
+networkx,3.6.1,BSD-3-Clause,https://networkx.org/
+numba,0.65.0,BSD License,https://numba.pydata.org
+numcodecs,0.16.5,MIT,https://github.com/zarr-developers/numcodecs
+numpy,2.4.4,BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0,https://numpy.org
+nvdlfw_inspect,0.2.2,Apache2,https://github.com/NVIDIA/nvidia-dlfw-inspect
+oauthlib,3.3.1,BSD-3-Clause,https://github.com/oauthlib/oauthlib
+omegaconf,2.3.0,BSD License,https://github.com/omry/omegaconf
+onnx,1.21.0,Apache-2.0,https://onnx.ai/
+onnx-ir,0.2.0,Apache-2.0,https://onnx.ai/ir-py
+onnxscript,0.6.2,MIT License,https://microsoft.github.io/onnxscript/
+opentelemetry-api,1.40.0,Apache-2.0,https://github.com/open-telemetry/opentelemetry-python/tree/main/opentelemetry-api
+packaging,25.0,Apache Software License; BSD License,https://github.com/pypa/packaging
+pandas,2.3.3,BSD License,https://pandas.pydata.org
+parso,0.8.6,MIT License,https://github.com/davidhalter/parso
+partd,1.4.2,BSD,http://github.com/dask/partd/
+pexpect,4.9.0,ISC License (ISCL),https://pexpect.readthedocs.io/
+pillow,11.3.0,MIT-CMU,https://python-pillow.github.io
+platformdirs,4.9.4,MIT,https://github.com/tox-dev/platformdirs
+plotly,6.6.0,MIT License,https://plotly.com/python/
+pluggy,1.6.0,MIT License,https://pypi.org/project/pluggy/1.6.0/
+proglog,0.1.12,MIT,https://github.com/Edinburgh-Genome-Foundry/proglog
+prompt_toolkit,3.0.52,BSD License,https://github.com/prompt-toolkit/python-prompt-toolkit
+propcache,0.4.1,Apache Software License,https://github.com/aio-libs/propcache
+proto-plus,1.27.2,Apache Software License,https://github.com/googleapis/google-cloud-python/tree/main/packages/proto-plus
+protobuf,6.33.6,3-Clause BSD License,https://developers.google.com/protocol-buffers/
+psutil,7.2.2,BSD-3-Clause,https://github.com/giampaolo/psutil
+ptyprocess,0.7.0,ISC License (ISCL),https://github.com/pexpect/ptyprocess
+pure_eval,0.2.3,MIT License,http://github.com/alexmojaki/pure_eval
+pyarrow,23.0.1,Apache-2.0,https://arrow.apache.org/
+pyasn1,0.6.3,BSD-2-Clause,https://github.com/pyasn1/pyasn1
+pyasn1_modules,0.4.2,BSD License,https://github.com/pyasn1/pyasn1-modules
+pycparser,3.0,BSD-3-Clause,https://github.com/eliben/pycparser
+pydantic,2.12.5,MIT,https://github.com/pydantic/pydantic
+pydantic_core,2.41.5,MIT,https://github.com/pydantic/pydantic-core
+pygrib,2.1.8,MIT AND (Apache-2.0 OR BSD-2-Clause),https://github.com/jswhit/pygrib
+pymdown-extensions,10.21.2,MIT,https://github.com/facelessuser/pymdown-extensions
+pyparsing,3.3.2,MIT,https://github.com/pyparsing/pyparsing/
+pyproj,3.7.2,MIT,https://pyproj4.github.io/pyproj/
+pyshp,3.0.3,MIT,https://github.com/GeospatialPython/pyshp
+pytest,9.0.3,MIT,https://docs.pytest.org/en/latest/
+pytest-regtest,2.3.7,MIT,https://gitlab.com/uweschmitt/pytest-regtest
+python-dateutil,2.9.0.post0,Apache Software License; BSD License,https://github.com/dateutil/dateutil
+python-dotenv,1.2.2,BSD-3-Clause,https://github.com/theskumar/python-dotenv
+pytorch-lightning,2.6.1,Apache Software License,https://github.com/Lightning-AI/lightning
+pytorch_optimizer,3.10.0,Apache Software License,https://pypi.org/project/pytorch-optimizer/3.10.0/
+pytz,2026.1.post1,MIT License,http://pythonhosted.org/pytz
+pyzmq,27.1.0,BSD License,https://pyzmq.readthedocs.org
+rdkit,2026.3.1,BSD-3-Clause,https://github.com/kuelumbus/rdkit-pypi
+referencing,0.37.0,MIT,https://github.com/python-jsonschema/referencing
+requests,2.33.1,Apache Software License,https://github.com/psf/requests
+requests-oauthlib,2.0.0,BSD License,https://github.com/requests/requests-oauthlib
+rich,14.3.3,MIT License,https://github.com/Textualize/rich
+rpds-py,0.30.0,MIT,https://github.com/crate-py/rpds
+s3fs,2026.3.0,BSD License,http://github.com/fsspec/s3fs/
+safetensors,0.7.0,Apache Software License,https://github.com/huggingface/safetensors
+scipy,1.17.1,BSD License,https://scipy.org/
+screamcast,2025.1.1,Apache Software License,https://pypi.org/project/screamcast/2025.1.1/
+screamcast,2025.1.1,Apache Software License,https://pypi.org/project/screamcast/2025.1.1/
+seaborn,0.13.2,BSD License,https://github.com/mwaskom/seaborn
+sentry-sdk,2.57.0,BSD License,https://github.com/getsentry/sentry-python
+shapely,2.1.2,BSD License,https://github.com/shapely/shapely
+shellingham,1.5.4,ISC License (ISCL),https://github.com/sarugaku/shellingham
+six,1.17.0,MIT License,https://github.com/benjaminp/six
+smmap,5.0.3,BSD License,https://github.com/gitpython-developers/smmap
+sortedcontainers,2.4.0,Apache Software License,http://www.grantjenks.com/docs/sortedcontainers/
+soundfile,0.13.1,BSD License,https://github.com/bastibe/python-soundfile
+stack-data,0.6.3,MIT License,http://github.com/alexmojaki/stack_data
+starlette,1.0.0,BSD-3-Clause,https://github.com/Kludex/starlette
+sympy,1.14.0,BSD License,https://sympy.org
+tblib,3.2.2,BSD-2-Clause,https://python-tblib.readthedocs.io/en/latest/changelog.html
+tensorboard,2.20.0,Apache Software License,https://github.com/tensorflow/tensorboard
+tensorboard-data-server,0.7.2,Apache Software License,https://github.com/tensorflow/tensorboard/tree/master/tensorboard/data/server
+tensorly,0.9.0,BSD License,https://github.com/tensorly/tensorly
+tensorly-torch,0.5.0,BSD License,https://github.com/tensorly/tensorly-torch
+timm,1.0.26,Apache Software License,https://github.com/huggingface/pytorch-image-models
+tomlkit,0.14.0,MIT License,https://github.com/sdispater/tomlkit
+toolz,1.1.0,BSD-3-Clause,https://github.com/pytoolz/toolz
+torch,2.11.0a0+git70d99e9,BSD-3-Clause,https://pytorch.org
+torch_harmonics,0.8.0,BSD License,https://pypi.org/project/torch-harmonics/0.8.0/
+torchmetrics,1.9.0,Apache Software License,https://github.com/Lightning-AI/torchmetrics
+torchvision,0.26.0,BSD,https://github.com/pytorch/vision
+tornado,6.5.5,Apache Software License,http://www.tornadoweb.org/
+tqdm,4.67.3,MPL-2.0 AND MIT,https://tqdm.github.io
+traitlets,5.14.3,BSD License,https://github.com/ipython/traitlets
+transformer_engine,2.12.0+bd89e94f,Apache-2.0,https://pypi.org/project/transformer-engine/2.12.0+bd89e94f/
+treelib,1.8.0,Apache Software License,https://github.com/caesar0301/treelib
+triton,3.6.0,MIT License,https://github.com/triton-lang/triton/
+typer,0.24.1,MIT,https://github.com/fastapi/typer
+typing-inspection,0.4.2,MIT,https://github.com/pydantic/typing-inspection
+typing_extensions,4.15.0,PSF-2.0,https://github.com/python/typing_extensions
+tzdata,2025.3,Apache-2.0,https://github.com/python/tzdata
+urllib3,2.6.3,MIT,https://github.com/urllib3/urllib3/blob/main/CHANGES.rst
+uvicorn,0.42.0,BSD-3-Clause,https://uvicorn.dev/
+wandb,0.25.1,MIT License,https://github.com/wandb/wandb
+wcmatch,10.1,MIT,https://github.com/facelessuser/wcmatch
+websockets,16.0,BSD-3-Clause,https://github.com/python-websockets/websockets
+wrapt,2.1.2,BSD-2-Clause,https://github.com/GrahamDumpleton/wrapt
+xarray,2026.2.0,Apache-2.0,https://xarray.dev/
+xattr,1.3.0,MIT,https://github.com/xattr/xattr
+xyzservices,2026.3.0,BSD-3-Clause,https://github.com/geopandas/xyzservices
+yarl,1.23.0,Apache-2.0,https://github.com/aio-libs/yarl
+zarr,3.1.6,MIT,https://github.com/zarr-developers/zarr-python
+zict,3.0.0,BSD License,http://zict.readthedocs.io/en/latest/
+zipp,3.23.0,MIT,https://github.com/jaraco/zipp

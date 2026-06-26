@@ -1,0 +1,107 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "screamcast"
+authors = [
+  { name="Noah Brenowitz"},
+]
+description = "A SCREAM Emulator"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Apache 2.0"}
+dependencies = [
+    "torch>=2.0.0",
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "xarray",
+    "zarr>=3",
+    "earth2grid>=2025.11.1",
+    "earth2studio",
+    "einops",
+    "scipy",
+    "cftime",
+    "cartopy",
+    "fme==2026.1.1",
+    "python-dotenv",
+    "pyyaml",
+    "nvtx",
+    "natten",
+    "transformer-engine[pytorch]",
+    "typer",
+    "tqdm",
+    "torchmetrics>=1.9.0",
+    "lightning>=2.6.1",
+    "pytorch-optimizer>=3.10.0",
+    "tensorboard>=2.20.0",
+    "lmdb>=2.2.0",
+    "nvidia-modulus",
+    "h5netcdf",
+    "netCDF4",
+    "h5py",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+analysis = [
+    "altair",
+    "fsspec",
+    "joblib",
+    "plotly",
+    "seaborn",
+    "wandb",
+]
+s3 = [
+    "multi-storage-client[boto3]",
+    "s3fs",
+]
+cu12 = [
+    "nvidia-dali-cuda120",
+]
+cu13 = [
+    "nvidia-dali-cuda130",
+]
+dev = [
+    "pytest-regtest",
+    "pytest",
+]
+notebooks = [
+    "marimo",
+]
+
+[tool.setuptools.dynamic]
+version = {attr = "screamcast.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["screamcast", "screamcast.*"]
+
+[tool.ruff]
+# Enable flake8/pycodestyle (`E`), Pyflakes (`F`), flake8-bandit (`S`),
+# isort (`I`), and performance 'PERF' rules.
+select = ["E", "F", "S", "I", "PERF"]
+fixable = ["I"]
+
+# Never enforce `E402`, `E501` (line length violations),
+# and `S311` (random number generators)
+ignore = ["E501", "S311"]
+
+# Exclude the examples and experimental folders
+exclude = ["examples", "modulus/experimental"]
+
+[tool.ruff.per-file-ignores]
+# Ignore `F401` (import violations) in all `__init__.py` files, and in `docs/*.py`.
+"__init__.py" = ["F401"]
+"docs/*.py" = ["F401"]
+
+# Ignore `S101` (assertions) in all `test` files.
+"tests/*.py" = ["S101"]
+
+[tool.uv.sources]
+nvidia-modulus = { url = "https://github.com/nbren12/modulus/archive/refs/heads/screamcast.tar.gz" }

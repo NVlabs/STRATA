@@ -1,0 +1,18 @@
+lightning==2.4.0
+multi-storage-client[boto3]
+torchmetrics
+earth2grid
+# to avoid errors
+boto3==1.35.23
+python-dotenv
+s3fs
+xarray
+natten==0.21.0+torch270cu128
+https://github.com/NVIDIA/modulus/archive/90c8f68ae4a4065109b8af26ae9b097f292f1564.tar.gz # main on 1/23
+guildai
+cartopy
+lmdb
+pytorch-optimizer
+netCDF4
+numba
+zarr>=3

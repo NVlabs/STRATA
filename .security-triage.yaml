@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Persists security-skill triage decisions and classifications across runs.
+# Safe to commit; keep checked into version control so decisions are shared.
+version: "1.0"
+project: "screamcast"
+last_updated: "2026-06-26T07:23:42Z"
+
+repository_exposure_classification:
+  visibility: "Public"
+  basis: "open-source project distributed on public GitHub; SECURITY.md written to public-safe detail"
+  confirmed_by: "zeyuanh"
+  date: "2026-06-26"
+
+service_exposure_classification:
+  tier: "External / Regulated"
+  confidence: "medium"
+  basis: "externally distributed open-source research release (Apache-2.0); not customer-facing/commercial/regulated; handles public scientific data with operator-supplied credentials; external distribution rules out the internal tiers"
+  confirmed_by: "zeyuanh"
+  date: "2026-06-26"
