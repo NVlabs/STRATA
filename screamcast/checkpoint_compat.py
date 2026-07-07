@@ -23,9 +23,10 @@ The wrapper classes in ``strata_wrappers.py`` hold the physicsnemo model under
 ones deterministically; it is a no-op on already-migrated state dicts, so it
 is safe to apply unconditionally at every network checkpoint load.
 
-NOTE on optimizer state: this module remaps NETWORK weights only. Optimizer
-state saved before the migration is index-based and does not survive the
-module reordering — resuming an old run must reinitialize the optimizer.
+NOTE on optimizer state: this module remaps NETWORK weights only. The
+migrated module tree preserves the legacy named_parameters() ORDER exactly
+(verified across the cross-attn / adaln / dealias variants), so index-based
+optimizer state from pre-migration checkpoints continues to map correctly.
 """
 
 import logging

@@ -605,6 +605,13 @@ class ScreamcastStrata(_ScreamcastStrataBase):
         self.strata.width = width
         if self.strata.rope_mode_pixel != "axial":
             return
+        # The cross-attention model owns extra axial buffers (cross Q/K
+        # tables) and rebuilds all of them itself; the plain Strata falls
+        # through to the generic pixel-table rebuild below.
+        retile = getattr(self.strata, "retile_axial_rope_buffers", None)
+        if retile is not None:
+            retile(height, width)
+            return
         coords = build_axial_token_coords(self.strata.depth, height, width)
         cos, sin = build_axial_rope_cos_sin_2d_continuous(
             coords[:, 0],

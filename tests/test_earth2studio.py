@@ -78,7 +78,6 @@ def _make_screamcast_model(tile_size: int = _TILE_SIZE) -> ScreamcastModel:
         attn_kernel=3,
         do_rope_2d=False,
         do_concat_latitude=False,
-        frequency_embed_dim=tile_size,
         grid_type="healpix",
     )
 

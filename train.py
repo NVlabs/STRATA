@@ -240,8 +240,16 @@ def _pixel_blocks_adaln_changed(checkpoint_path: str, model: torch.nn.Module) ->
     if not ckpt_keys:
         return False
 
+    def _strip_wrapper(name: str) -> str:
+        # Under torch.compile the model's parameter names carry _orig_mod.
+        # while the remapped checkpoint keys never do; compare bare names.
+        for prefix in ("_orig_mod.", "module.", "_forward_module."):
+            while name.startswith(prefix):
+                name = name[len(prefix) :]
+        return name
+
     current_adaln_keys = {
-        name
+        _strip_wrapper(name)
         for name, _ in model.named_parameters()
         if "pixel_blocks" in name and "adaln" in name
     }
