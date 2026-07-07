@@ -22,13 +22,13 @@ repos:
       # 3.12 avoids the crash without reformatting code. Ideally, upgrade black
       # to a newer version instead of pinning the language version here.
       language_version: python3.12
-      exclude: "(docs|modulus/experimental)"
+      exclude: "(docs)"
 -   repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.0.290
     hooks:
     - id: ruff
       args: [--fix]
-      exclude: (^docs/|^modulus_vendorized/)
+      exclude: (^docs/)
 
 -   repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0

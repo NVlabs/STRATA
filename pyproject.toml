@@ -12,7 +12,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "Apache 2.0"}
 dependencies = [
-    "torch>=2.0.0",
+    "torch>=2.10.0",
     "numpy",
     "pandas",
     "matplotlib",
@@ -37,7 +37,7 @@ dependencies = [
     "pytorch-optimizer>=3.10.0",
     "tensorboard>=2.20.0",
     "lmdb>=2.2.0",
-    "nvidia-modulus",
+    "nvidia-physicsnemo",
     "h5netcdf",
     "netCDF4",
     "h5py",
@@ -92,8 +92,8 @@ fixable = ["I"]
 # and `S311` (random number generators)
 ignore = ["E501", "S311"]
 
-# Exclude the examples and experimental folders
-exclude = ["examples", "modulus/experimental"]
+# Exclude the examples folder
+exclude = ["examples"]
 
 [tool.ruff.per-file-ignores]
 # Ignore `F401` (import violations) in all `__init__.py` files, and in `docs/*.py`.
@@ -104,4 +104,6 @@ exclude = ["examples", "modulus/experimental"]
 "tests/*.py" = ["S101"]
 
 [tool.uv.sources]
-nvidia-modulus = { url = "https://github.com/nbren12/modulus/archive/refs/heads/screamcast.tar.gz" }
+# Pinned to physicsnemo main including the Strata models + stereographic RoPE
+# (PR #1750). Switch to `nvidia-physicsnemo>=2.2` on PyPI once 2.2.0 is released.
+nvidia-physicsnemo = { url = "https://github.com/NVIDIA/physicsnemo/archive/07cdcc8b65f10bee733a32a77b4b76e20c70c54c.tar.gz" }

@@ -7,8 +7,8 @@ boto3==1.35.23
 python-dotenv
 s3fs
 xarray
-natten==0.21.0+torch270cu128
-https://github.com/NVIDIA/modulus/archive/90c8f68ae4a4065109b8af26ae9b097f292f1564.tar.gz # main on 1/23
+natten>=0.21.5  # build must match the installed torch (>=2.10)
+https://github.com/NVIDIA/physicsnemo/archive/07cdcc8b65f10bee733a32a77b4b76e20c70c54c.tar.gz # main 2026-07, includes Strata models (PR #1750)
 guildai
 cartopy
 lmdb

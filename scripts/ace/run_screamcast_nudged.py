@@ -64,7 +64,7 @@ import numpy as np
 import torch
 import xarray as xr
 import zarr
-from modulus.distributed import DistributedManager
+from physicsnemo.distributed import DistributedManager
 from scipy.signal.windows import kaiser_bessel_derived
 
 import data_catalog
