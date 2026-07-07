@@ -48,7 +48,10 @@ from screamcast.constructors import (
     get_warmup_constant_schedule,
 )
 from screamcast.dali_ext_src import ScreamV2
-from screamcast.dit_3d import DiT
+from screamcast.strata_wrappers import (
+    ScreamcastStrata,
+    ScreamcastStrataBackbone,
+)
 from screamcast.normalization import RunningNorm2d
 from screamcast.pipelines import get_dataloader
 
@@ -98,7 +101,6 @@ def _dit_common_kwargs(
     do_bf16_mixed: bool,
     depth_levels: int,
     wind_channel_indices: tuple[int, int] | None = None,
-    wind_channel_indices_dual: tuple[int, int] | None = None,
     grid_type: str = "healpix",
     cubesphere_latlon_path: str | None = None,
 ) -> dict:
@@ -117,7 +119,6 @@ def _dit_common_kwargs(
         in_chans=in_channels,
         base_out_chans=out_channels,
         nside=nside,
-        frequency_embed_dim=tile_size,
         do_alt_depthwise_attn=dit_cfg.do_alt_depthwise_attn,
         do_interleaved_dilation=dit_cfg.do_interleaved_dilation,
         na_dilations=dit_cfg.na_dilations,
@@ -137,7 +138,6 @@ def _dit_common_kwargs(
         gated_attention=dit_cfg.gated_attention,
         grid_type=grid_type,
         cubesphere_latlon_path=cubesphere_latlon_path,
-        wind_channel_indices_dual=wind_channel_indices_dual,
         index_is_latlon=dit_cfg.index_is_latlon,
         na3d_backend=dit_cfg.na3d_backend or None,
         use_dealiased_patch_embed=dit_cfg.use_dealiased_patch_embed,
@@ -154,11 +154,10 @@ def DiT3D(
     do_bf16_mixed: bool,
     depth_levels: int,
     wind_channel_indices: tuple[int, int] | None = None,
-    wind_channel_indices_dual: tuple[int, int] | None = None,
     grid_type: str = "healpix",
     cubesphere_latlon_path: str | None = None,
 ):
-    return DiT(
+    return ScreamcastStrataBackbone(
         **_dit_common_kwargs(
             in_channels,
             out_channels,
@@ -168,7 +167,6 @@ def DiT3D(
             do_bf16_mixed,
             depth_levels,
             wind_channel_indices,
-            wind_channel_indices_dual,
             grid_type,
             cubesphere_latlon_path,
         )
@@ -185,13 +183,10 @@ def DiT3DPixel(
     do_bf16_mixed: bool,
     depth_levels: int,
     wind_channel_indices: tuple[int, int] | None = None,
-    wind_channel_indices_dual: tuple[int, int] | None = None,
     grid_type: str = "healpix",
     cubesphere_latlon_path: str | None = None,
 ):
-    from screamcast.dit_3d_pixel import DiT_Pixel
-
-    return DiT_Pixel(
+    return ScreamcastStrata(
         **_dit_common_kwargs(
             in_channels,
             out_channels,
@@ -201,7 +196,6 @@ def DiT3DPixel(
             do_bf16_mixed,
             depth_levels,
             wind_channel_indices,
-            wind_channel_indices_dual,
             grid_type,
             cubesphere_latlon_path,
         ),
@@ -231,9 +225,15 @@ def _pixel_blocks_adaln_changed(checkpoint_path: str, model: torch.nn.Module) ->
     have co-adapted to different conditioning and should be reinitialized.
     Only called on foreign checkpoint loads (not latest.pth resume).
     """
+    from screamcast.checkpoint_compat import remap_legacy_state_dict
+
     try:
         ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-        ckpt_keys = set(ckpt.get("network", {}).keys())
+        network_sd = ckpt.get("network", {})
+        # Compare in migrated key space so legacy checkpoints (semantic./
+        # _pixel_blocks./_orig_mod. keys) are judged correctly.
+        network_sd, _ = remap_legacy_state_dict(dict(network_sd))
+        ckpt_keys = set(network_sd.keys())
     except Exception:
         return False
 
@@ -243,7 +243,7 @@ def _pixel_blocks_adaln_changed(checkpoint_path: str, model: torch.nn.Module) ->
     current_adaln_keys = {
         name
         for name, _ in model.named_parameters()
-        if "_pixel_blocks" in name and "adaln" in name
+        if "pixel_blocks" in name and "adaln" in name
     }
 
     if not current_adaln_keys:
@@ -261,7 +261,7 @@ def _reinit_pixel_blocks(model: torch.nn.Module) -> None:
     fresh init avoids a stale prior. After reinit, adaln-zero is re-applied so blocks
     start as identity regardless of the new conditioning signal.
     """
-    for block in model._pixel_blocks:
+    for block in model.strata.pixel_blocks:
         for m in block.modules():
             if hasattr(m, "reset_parameters"):
                 m.reset_parameters()
