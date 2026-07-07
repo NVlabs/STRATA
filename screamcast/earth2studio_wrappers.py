@@ -815,7 +815,6 @@ class ScreamcastModel(torch.nn.Module):
                     do_bf16_mixed=bf16,
                     depth_levels=num_depth_levels,
                     wind_channel_indices=wind_channel_indices,
-                    wind_channel_indices_dual=None,
                     grid_type="cubesphere",
                     cubesphere_latlon_path=data_cfg.latlon_path,
                 )
@@ -829,7 +828,6 @@ class ScreamcastModel(torch.nn.Module):
                     do_bf16_mixed=bf16,
                     depth_levels=num_depth_levels,
                     wind_channel_indices=wind_channel_indices,
-                    wind_channel_indices_dual=None,
                     grid_type="cubesphere",
                     cubesphere_latlon_path=data_cfg.latlon_path,
                 )
