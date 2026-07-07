@@ -39,7 +39,13 @@ except ImportError as exc:  # pragma: no cover - environment guard
         "update your container."
     ) from exc
 
+from screamcast.tile_geometry import TileGeometry
+
 BACKBONE_CLS = StrataTransformer3D
 STRATA_CLS = Strata
 # Cross-attention pixel conditioning is an internal-only feature.
 CROSSATTN_CLS = None
+# Tile-center function used by the wind rotation. The internal repo swaps in
+# a domain-parallel-aware version (global DTensor reductions); the math on
+# plain tensors is identical.
+TILE_CENTER_FN = TileGeometry.tile_center

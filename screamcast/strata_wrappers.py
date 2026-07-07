@@ -49,9 +49,29 @@ from physicsnemo.nn.module.mlp_layers import Mlp
 
 from screamcast.checkpoint_compat import remap_legacy_state_dict
 from screamcast.dealias import DealiasedPatchEmbed3D
-from screamcast.strata_backend import BACKBONE_CLS, CROSSATTN_CLS, STRATA_CLS
+from screamcast.strata_backend import (
+    BACKBONE_CLS,
+    CROSSATTN_CLS,
+    STRATA_CLS,
+    TILE_CENTER_FN,
+)
 from screamcast.tile_geometry import TileGeometry
 from screamcast.wind_rotation import forward_uv_to_tile, inverse_tile_to_uv
+
+
+def _replace_channels(x, replacements: dict) -> torch.Tensor:
+    """Rebuild the channel dim with slice + cat instead of in-place writes.
+
+    Mathematically identical to ``x.clone(); x[:, c] = v`` on plain tensors.
+    Required form under domain parallelism: in-place channel assignment on a
+    sharded DTensor is unreliable across PyTorch versions, and cat's backward
+    slices the incoming grad instead of stacking plain zeros into it.
+    """
+    pieces = [
+        replacements[c].unsqueeze(1) if c in replacements else x[:, c : c + 1]
+        for c in range(x.shape[1])
+    ]
+    return torch.cat(pieces, dim=1)
 
 
 def _use_tanh_gelu(model: nn.Module) -> None:
@@ -174,21 +194,19 @@ class _ScreamcastStrataBase(nn.Module):
 
         lat_lon_data = None
         if self._do_rotate_wind:
-            lat0, lon0 = TileGeometry.tile_center(lat, lon)
+            lat0, lon0 = TILE_CENTER_FN(lat, lon)
             lat_lon_data = (lat, lon, lat0, lon0)
             u_idx, v_idx = self._wind_channel_indices
             u_rot, v_rot = forward_uv_to_tile(
                 x[:, u_idx], x[:, v_idx], lat, lon, lat0, lon0
             )
-            x = x.clone()
-            x[:, u_idx] = u_rot
-            x[:, v_idx] = v_rot
+            x = _replace_channels(x, {u_idx: u_rot, v_idx: v_rot})
 
         if self._do_concat_latitude:
             lat_e = lat.unsqueeze(1).unsqueeze(2).expand(-1, 1, dd, -1, -1)
             x = torch.cat([x, torch.cos(lat_e), torch.sin(lat_e)], dim=1)
 
-        pos = torch.stack([lat, lon], dim=1)  # [B, 2, H, W]
+        pos = torch.cat([lat.unsqueeze(1), lon.unsqueeze(1)], dim=1)  # [B, 2, H, W]
         return x, pos, lat_lon_data
 
     def _postprocess(
@@ -201,9 +219,7 @@ class _ScreamcastStrataBase(nn.Module):
             u_geo, v_geo = inverse_tile_to_uv(
                 x[:, u_idx], x[:, v_idx], lat, lon, lat0, lon0
             )
-            x = x.clone()
-            x[:, u_idx] = u_geo
-            x[:, v_idx] = v_geo
+            x = _replace_channels(x, {u_idx: u_geo, v_idx: v_geo})
         return x
 
 
