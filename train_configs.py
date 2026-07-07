@@ -576,7 +576,7 @@ CONFIGS[_S1_K9_HP4_D1024] = dataclasses.replace(
 #   dim768/14:  hp4vp1_k9 (new anchor) ↔ hp2vp4_k9 (new, iso-FLOPs)
 #
 # hp2vp4 uses asymmetric NA3D kernel (6,9,9) — full depth, spatial=9.
-# Requires the tuple-kernel fix in dit_3d.py (Attention.forward).
+# Requires tuple-kernel support in the attention (physicsnemo Natten3DSelfAttention).
 # ---------------------------------------------------------------------------
 
 # Shared overrides for all 3 new runs
