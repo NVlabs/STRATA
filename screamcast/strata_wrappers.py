@@ -389,6 +389,7 @@ class ScreamcastStrata(_ScreamcastStrataBase):
         gated_attention_pixel: bool = False,
         qk_norm_pixel: bool = False,
         qk_norm_elementwise_affine_pixel: bool = False,
+        na3d_backend_pixel: Optional[str] = None,
         do_bf16_mixed_pixel: bool = False,
         freeze_semantic: bool = False,
         freeze_pixel_blocks: bool = False,
@@ -456,6 +457,7 @@ class ScreamcastStrata(_ScreamcastStrataBase):
             gated_attention_pixel=gated_attention_pixel,
             qk_norm_pixel=qk_norm_pixel,
             qk_norm_affine_pixel=qk_norm_elementwise_affine_pixel,
+            na3d_backend_pixel=na3d_backend_pixel,
             adaln_mode=(
                 "bilinear_dw"
                 if use_bilinear_dw_gelu_project_adaln_pixel
