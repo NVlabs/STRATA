@@ -2,9 +2,16 @@
 
 Strata is a deep-learning weather emulator for the
 [SCREAM](https://e3sm.org/scream/) global atmosphere model. It trains
-transformer-based neural networks (DiT3D / PixelDiT) to emulate SCREAM
-atmospheric physics on the cubed-sphere grid and supports multi-day global
-forecasting.
+transformer-based neural networks to emulate SCREAM atmospheric physics on
+the cubed-sphere grid and supports multi-day global forecasting.
+
+The Strata architecture (a two-stage 3D neighborhood-attention transformer
+with stereographic rotary position embeddings) lives in
+[NVIDIA PhysicsNeMo](https://github.com/NVIDIA/physicsnemo) as
+`physicsnemo.experimental.models.strata`. This repository adds the
+SCREAM-specific pieces around it: spherical tile geometry, tile-local wind
+rotation, data pipelines, training configs, and rollout/inference tooling
+(see `screamcast/strata_wrappers.py`).
 
 The public release is named *Strata*, but the Python package, command-line
 scripts, and environment variables keep the project's original name: you import
