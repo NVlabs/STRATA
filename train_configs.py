@@ -275,103 +275,6 @@ CONFIGS["pytest_diagomega"] = dataclasses.replace(
 
 
 # ---------------------------------------------------------------------------
-# sweep1 dim1024 — 4-step fine-tune, continued from 2-step pretrain
-# ---------------------------------------------------------------------------
-_EXP_2STEP = "sweep1_nodilation_gated_tile64_kernel3_lr1em4_dim1024_hpatch2_depth32_r3_cos_step1610k_2stepft"
-_EXP_4STEP = "sweep1_nodilation_gated_tile64_kernel3_lr1em4_dim1024_hpatch2_depth32_r3_cos_step1610k_4stepft"
-
-CONFIGS[_EXP_4STEP] = TrainConfig(
-    experiment=ExperimentConfig(
-        name=_EXP_4STEP,
-        rundir="output",
-        model_type="dit3d",
-        resume_from=_ckpt(_EXP_2STEP),
-        reset_scheduler_state=True,
-        reset_best_valid_loss=True,
-    ),
-    dit=DiTConfig(
-        embed_dim=1024,
-        n_layers=32,
-        num_heads=16,
-        attn_kernel=3,
-        patch_size_horiz=2,
-        patch_size_vert=1,
-        do_rope_2d=False,
-        do_rope_2d_stereographic=True,
-        do_rotate_wind=True,
-        qk_norm=True,
-        gated_attention=True,
-        do_interleaved_dilation=False,
-        index_is_latlon=True,
-        do_alt_depthwise_attn=True,
-    ),
-    pipeline=PipelineConfig(target_type="mixed_state_diff"),
-    compute=ComputeConfig(do_bf16_mixed=True, do_torch_compile=True),
-    training=TrainingConfig(
-        lr=1e-5,
-        epochs=50,
-        batch_size=1,
-        loss_type="smooth_l1",
-        optimizer="adamw",
-        beta2=0.999,
-        scheduler_type="constant",
-        cosine_t_max=200,
-        cosine_n_cycles=10,
-        cosine_decay=0.5,
-        do_tf32=True,
-        num_workers=2,
-        num_workers_inference=2,
-        validate_steps=400,
-        validate_min_samples=1024,
-        backup_every_steps=100,
-        fit_batches_for_norm=1280,
-        save_ckpt_every_epoch=True,
-        num_steps=4,
-        multistep_training_mode="final_only",
-        use_time_variation_seed=True,
-        do_backtest_inference=False,
-    ),
-    data=DataConfig(
-        grid_type="cubesphere",
-        tile_size=64,
-        level_start=8,
-        level_end=32,
-        plevel=1,
-        cross_face_tiles=False,
-        split_by_time=True,
-        train_start_index=144,
-        train_end_index=1435,
-        test_start_index=1872,
-        test_end_index=2016,
-        test_stride=72,
-        inference_start_index=1872,
-        latlon_path=os.path.join(_AUX, "latlon_ne1024pg2.nc"),
-        variables_prognostic=(
-            "PotentialTemperature",
-            "U",
-            "V",
-            "z_mid",
-            "omega",
-            "qv",
-            "T_2m",
-        ),
-        variables_prognostic_state=("omega",),
-        variables_forcing=("coszr", "phis", "sgh30", "landfrac"),
-        variables_diagnostic=(
-            "precip_ice_surf_mass_flux",
-            "precip_liq_surf_mass_flux",
-            "ps",
-        ),
-    ),
-    debug=DebugConfig(
-        print_steps=5,
-        skip_india_ocean_eval=True,
-        use_full_test_set=True,
-        recreate_dataloader_each_validation=True,
-    ),
-)
-
-# ---------------------------------------------------------------------------
 # sweep1 — DiT architecture sweep (cosine LR finetunes from pretrained r3 ckpts)
 #
 # All four experiments share the same data, pipeline, compute, and most
@@ -543,293 +446,6 @@ CONFIGS[_S1_K3_HP4_D768] = dataclasses.replace(
         num_workers=4,
         cosine_decay=0.8,
     ),
-)
-
-# kernel9 / hpatch4 / dim1024  — wider receptive field, lower lr,
-# branches from the cos-finetuned kernel3_hpatch4 checkpoint
-_S1_K9_HP4_D1024 = (
-    "sweep1_nodilation_gated_tile64_kernel9_lr1em4_dim1024_hpatch4_depth32_r3_cos"
-)
-CONFIGS[_S1_K9_HP4_D1024] = dataclasses.replace(
-    _SWEEP1_BASE,
-    experiment=dataclasses.replace(
-        _SWEEP1_BASE.experiment,
-        name=_S1_K9_HP4_D1024,
-        resume_from=_ckpt(_S1_K3_HP4_D1024),
-        reset_best_valid_loss=True,
-    ),
-    dit=dataclasses.replace(
-        _SWEEP1_BASE.dit,
-        attn_kernel=9,
-    ),
-    training=dataclasses.replace(
-        _SWEEP1_BASE.training,
-        lr=5e-5,
-    ),
-)
-
-# ---------------------------------------------------------------------------
-# sweep1 vertical patch-size ablation — k9, all NA3D (no alt_depthwise_attn),
-#
-# Pairs:
-#   dim1024/32: hp4vp1_k9 (existing ↑) ↔ hp2vp4_k9 (new, iso-FLOPs)
-#   dim768/14:  hp4vp1_k9 (new anchor) ↔ hp2vp4_k9 (new, iso-FLOPs)
-#
-# hp2vp4 uses asymmetric NA3D kernel (6,9,9) — full depth, spatial=9.
-# Requires tuple-kernel support in the attention (physicsnemo Natten3DSelfAttention).
-# ---------------------------------------------------------------------------
-
-# Shared overrides for all 3 new runs
-_SWEEP1_K9_PATCH_TRAINING = dataclasses.replace(
-    _SWEEP1_BASE.training,
-    lr=5e-5,
-    cosine_t_max=400,
-)
-
-# dim768/14 / hp4vp1 / k9 — anchor baseline; restarts from k3 cos ckpt
-# (kernel change k3→k9 doesn't affect weight shapes)
-_S1_K9_HP4_D768 = "sweep1_k9_hp4vp1_d768"
-CONFIGS[_S1_K9_HP4_D768] = dataclasses.replace(
-    _SWEEP1_BASE,
-    experiment=dataclasses.replace(
-        _SWEEP1_BASE.experiment,
-        name=_S1_K9_HP4_D768,
-        resume_from=_ckpt(_S1_K3_HP4_D768),
-        reset_scheduler_state=True,
-        reset_best_valid_loss=True,
-    ),
-    dit=dataclasses.replace(
-        _SWEEP1_BASE.dit,
-        embed_dim=768,
-        n_layers=14,
-        num_heads=12,
-        attn_kernel=9,
-        do_alt_depthwise_attn=False,
-    ),
-    training=dataclasses.replace(
-        _SWEEP1_K9_PATCH_TRAINING,
-        num_workers=4,  # dim=768
-    ),
-)
-
-# dim1024/32 / hp2vp4 / k9 — iso-FLOPs ablation vs existing _S1_K9_HP4_D1024
-# kernel=(6,9,9): full depth (6 tokens), spatial=9
-_S1_K9_HP2_VP4_D1024 = "sweep1_k9_hp2vp4_d1024"
-CONFIGS[_S1_K9_HP2_VP4_D1024] = dataclasses.replace(
-    _SWEEP1_BASE,
-    experiment=dataclasses.replace(
-        _SWEEP1_BASE.experiment,
-        name=_S1_K9_HP2_VP4_D1024,
-    ),
-    dit=dataclasses.replace(
-        _SWEEP1_BASE.dit,
-        attn_kernel=(6, 9, 9),
-        patch_size_horiz=2,
-        patch_size_vert=4,
-        do_alt_depthwise_attn=False,
-    ),
-    training=dataclasses.replace(
-        _SWEEP1_BASE.training,
-        lr=5e-4,
-        warmup_steps=2000,
-        cosine_t_max=100,
-        cosine_n_cycles=5,
-        cosine_decay=0.3162,
-        validate_steps=20000,
-    ),
-    data=dataclasses.replace(
-        _SWEEP1_BASE.data,
-        test_stride=48,
-    ),
-)
-
-# dim768/14 / hp2vp4 / k9 — iso-FLOPs ablation vs _S1_K9_HP4_D768
-_S1_K9_HP2_VP4_D768 = "sweep1_k9_hp2vp4_d768"
-CONFIGS[_S1_K9_HP2_VP4_D768] = dataclasses.replace(
-    _SWEEP1_BASE,
-    experiment=dataclasses.replace(
-        _SWEEP1_BASE.experiment,
-        name=_S1_K9_HP2_VP4_D768,
-    ),
-    dit=dataclasses.replace(
-        _SWEEP1_BASE.dit,
-        embed_dim=768,
-        n_layers=14,
-        num_heads=12,
-        attn_kernel=(6, 9, 9),
-        patch_size_horiz=2,
-        patch_size_vert=4,
-        do_alt_depthwise_attn=False,
-    ),
-    data=dataclasses.replace(
-        _SWEEP1_BASE.data,
-        test_stride=48,
-    ),
-    training=dataclasses.replace(
-        _SWEEP1_BASE.training,
-        lr=5e-4,
-        warmup_steps=2000,
-        cosine_t_max=200,
-        cosine_n_cycles=4,
-        cosine_decay=0.3162,
-        validate_steps=20000,
-        num_workers=4,  # dim=768
-    ),
-)
-
-# ---------------------------------------------------------------------------
-# sweep1 diagomega — fine-tunes from each cosine ckpt with omega input zeroed,
-# constant lr scheduler, resets best valid loss
-# ---------------------------------------------------------------------------
-
-_S1_K3_HP4_D1024 = (
-    "sweep1_nodilation_gated_tile64_kernel3_lr1em4_dim1024_hpatch4_depth32_r3_cos"
-)
-_S1_K3_HP4_D1024_DIAG = "sweep1_k3_hp4_d1024_diagomega"
-CONFIGS[_S1_K3_HP4_D1024_DIAG] = dataclasses.replace(
-    CONFIGS[_S1_K3_HP4_D1024],
-    experiment=dataclasses.replace(
-        CONFIGS[_S1_K3_HP4_D1024].experiment,
-        name=_S1_K3_HP4_D1024_DIAG,
-        resume_from=_ckpt(_S1_K3_HP4_D1024),
-        reset_scheduler_state=True,
-        reset_best_valid_loss=True,
-    ),
-    pipeline=dataclasses.replace(
-        CONFIGS[_S1_K3_HP4_D1024].pipeline,
-        variables_input_zeroed=("omega",),
-    ),
-    training=dataclasses.replace(
-        CONFIGS[_S1_K3_HP4_D1024].training,
-        scheduler_type="constant",
-        lr=1e-5,
-    ),
-)
-
-_S1_K3_HP2_D1024 = (
-    "sweep1_nodilation_gated_tile64_kernel3_lr1em4_dim1024_hpatch2_depth32_r3_cos"
-)
-_S1_K3_HP2_D1024_DIAG = "sweep1_k3_hp2_d1024_diagomega"
-CONFIGS[_S1_K3_HP2_D1024_DIAG] = dataclasses.replace(
-    CONFIGS[_S1_K3_HP2_D1024],
-    experiment=dataclasses.replace(
-        CONFIGS[_S1_K3_HP2_D1024].experiment,
-        name=_S1_K3_HP2_D1024_DIAG,
-        resume_from=_ckpt(_S1_K3_HP2_D1024),
-        reset_scheduler_state=True,
-        reset_best_valid_loss=True,
-    ),
-    pipeline=dataclasses.replace(
-        CONFIGS[_S1_K3_HP2_D1024].pipeline,
-        variables_input_zeroed=("omega",),
-    ),
-    training=dataclasses.replace(
-        CONFIGS[_S1_K3_HP2_D1024].training,
-        scheduler_type="constant",
-        lr=1e-5,
-    ),
-)
-
-_S1_K3_HP4_D768 = (
-    "sweep1_nodilation_gated_tile64_kernel3_lr1em4_dim768_hpatch4_depth14_r3_cos"
-)
-_S1_K3_HP4_D768_DIAG = "sweep1_k3_hp4_d768_diagomega"
-CONFIGS[_S1_K3_HP4_D768_DIAG] = dataclasses.replace(
-    CONFIGS[_S1_K3_HP4_D768],
-    experiment=dataclasses.replace(
-        CONFIGS[_S1_K3_HP4_D768].experiment,
-        name=_S1_K3_HP4_D768_DIAG,
-        resume_from=_ckpt(_S1_K3_HP4_D768),
-        reset_scheduler_state=True,
-        reset_best_valid_loss=True,
-    ),
-    pipeline=dataclasses.replace(
-        CONFIGS[_S1_K3_HP4_D768].pipeline,
-        variables_input_zeroed=("omega",),
-    ),
-    training=dataclasses.replace(
-        CONFIGS[_S1_K3_HP4_D768].training,
-        scheduler_type="constant",
-        lr=1e-5,
-    ),
-)
-
-_S1_K9_HP4_D1024 = (
-    "sweep1_nodilation_gated_tile64_kernel9_lr1em4_dim1024_hpatch4_depth32_r3_cos"
-)
-_S1_K9_HP4_D1024_DIAG = "sweep1_k9_hp4_d1024_diagomega"
-CONFIGS[_S1_K9_HP4_D1024_DIAG] = dataclasses.replace(
-    CONFIGS[_S1_K9_HP4_D1024],
-    experiment=dataclasses.replace(
-        CONFIGS[_S1_K9_HP4_D1024].experiment,
-        name=_S1_K9_HP4_D1024_DIAG,
-        resume_from=_ckpt(_S1_K9_HP4_D1024),
-        reset_scheduler_state=True,
-        reset_best_valid_loss=True,
-    ),
-    pipeline=dataclasses.replace(
-        CONFIGS[_S1_K9_HP4_D1024].pipeline,
-        variables_input_zeroed=("omega",),
-    ),
-    training=dataclasses.replace(
-        CONFIGS[_S1_K9_HP4_D1024].training,
-        scheduler_type="constant",
-        lr=1e-5,
-    ),
-)
-
-# ---------------------------------------------------------------------------
-# sweep1 diagomega cosine variants — same as constant-lr diagomega but with
-# cosine LR for faster adaptation (concern: lr=1e-5 constant too slow).
-# lr=5e-5 + warmup 2000 + dampened cosine.
-# hp4/d1024 pairs: cosine_t_max=80 / 4 cycles
-# hp2/d1024:       cosine_t_max=40 / 4 cycles (shorter cycle for slower model)
-# ---------------------------------------------------------------------------
-_S1_DIAG_COS_HP4 = dataclasses.replace(
-    _SWEEP1_BASE.training,
-    scheduler_type="dampened_cosine_with_hard_restarts",
-    lr=5e-5,
-    warmup_steps=2000,
-    cosine_t_max=80,
-    cosine_n_cycles=4,
-)
-_S1_DIAG_COS_HP2 = dataclasses.replace(
-    _SWEEP1_BASE.training,
-    scheduler_type="dampened_cosine_with_hard_restarts",
-    lr=5e-5,
-    warmup_steps=2000,
-    cosine_t_max=40,
-    cosine_n_cycles=4,
-)
-
-_S1_K9_HP4_D1024_DIAG_COS = "sweep1_k9_hp4_d1024_diagomega_lr5em5_cos80"
-CONFIGS[_S1_K9_HP4_D1024_DIAG_COS] = dataclasses.replace(
-    CONFIGS[_S1_K9_HP4_D1024_DIAG],
-    experiment=dataclasses.replace(
-        CONFIGS[_S1_K9_HP4_D1024_DIAG].experiment,
-        name=_S1_K9_HP4_D1024_DIAG_COS,
-    ),
-    training=_S1_DIAG_COS_HP4,
-)
-
-_S1_K3_HP4_D1024_DIAG_COS = "sweep1_k3_hp4_d1024_diagomega_lr5em5_cos80"
-CONFIGS[_S1_K3_HP4_D1024_DIAG_COS] = dataclasses.replace(
-    CONFIGS[_S1_K3_HP4_D1024_DIAG],
-    experiment=dataclasses.replace(
-        CONFIGS[_S1_K3_HP4_D1024_DIAG].experiment,
-        name=_S1_K3_HP4_D1024_DIAG_COS,
-    ),
-    training=_S1_DIAG_COS_HP4,
-)
-
-_S1_K3_HP2_D1024_DIAG_COS = "sweep1_k3_hp2_d1024_diagomega_lr5em5_cos40"
-CONFIGS[_S1_K3_HP2_D1024_DIAG_COS] = dataclasses.replace(
-    CONFIGS[_S1_K3_HP2_D1024_DIAG],
-    experiment=dataclasses.replace(
-        CONFIGS[_S1_K3_HP2_D1024_DIAG].experiment,
-        name=_S1_K3_HP2_D1024_DIAG_COS,
-    ),
-    training=_S1_DIAG_COS_HP2,
 )
 
 # ---------------------------------------------------------------------------
@@ -1025,40 +641,6 @@ CONFIGS[_EXP_PIXELDIT_3SRC_COS] = dataclasses.replace(
     ),
 )
 
-# ---------------------------------------------------------------------------
-# pixeldit_sem1024d24l_pix128d4l_qvfix
-#   Resumes from pixeldit_sem1024d24l_pix128d4l with warmup→constant LR at 1e-5,
-#   do_qv_softplus and do_precip_relu enabled.
-# ---------------------------------------------------------------------------
-_EXP_PIXELDIT_QVFIX = "pixeldit_sem1024d24l_pix128d4l_qvfix"
-
-CONFIGS[_EXP_PIXELDIT_QVFIX] = dataclasses.replace(
-    CONFIGS[_EXP_PIXELDIT_PROD],
-    experiment=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_PROD].experiment,
-        name=_EXP_PIXELDIT_QVFIX,
-        resume_from=_ckpt(_EXP_PIXELDIT_PROD),
-        reset_scheduler_state=True,
-        reset_best_valid_loss=True,
-    ),
-    pipeline=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_PROD].pipeline,
-        do_qv_softplus=True,
-        do_precip_relu=True,
-    ),
-    training=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_PROD].training,
-        lr=1e-5,
-        scheduler_type="warmup_constant",
-        warmup_steps=10000,
-        grad_clip_max_norm=0.5,
-    ),
-    debug=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_PROD].debug,
-        recreate_dataloader_each_validation=True,
-    ),
-)
-
 _EXP_PIXELDIT_3SRC_COS_QVFIX = "pixeldit_sem1024d24l_pix128d4l_3src_lr5e5cos_qvfix"
 CONFIGS[_EXP_PIXELDIT_3SRC_COS_QVFIX] = dataclasses.replace(
     CONFIGS[_EXP_PIXELDIT_3SRC_COS],
@@ -1083,55 +665,6 @@ CONFIGS[_EXP_PIXELDIT_3SRC_COS_QVFIX] = dataclasses.replace(
     debug=dataclasses.replace(
         CONFIGS[_EXP_PIXELDIT_3SRC_COS].debug,
         recreate_dataloader_each_validation=True,
-    ),
-)
-
-_EXP_PIXELDIT_3SRC_COS_QVFIX_T256 = (
-    "pixeldit_sem1024d24l_pix128d4l_3src_lr5e5cos_qvfix_t256"
-)
-CONFIGS[_EXP_PIXELDIT_3SRC_COS_QVFIX_T256] = dataclasses.replace(
-    CONFIGS[_EXP_PIXELDIT_3SRC_COS_QVFIX],
-    experiment=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_3SRC_COS_QVFIX].experiment,
-        name=_EXP_PIXELDIT_3SRC_COS_QVFIX_T256,
-        resume_from=_ckpt(_EXP_PIXELDIT_3SRC_COS_QVFIX),
-        reset_best_valid_loss=True,
-        skip_optimizer_reloading=True,
-        reset_scheduler_state=True,
-    ),
-    training=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_3SRC_COS_QVFIX].training,
-        lr=1e-5,
-        scheduler_type="warmup_constant",
-        validate_steps=5000,
-        backup_every_steps=500,
-    ),
-    data=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_3SRC_COS_QVFIX].data,
-        tile_size=256,
-    ),
-    dit=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_3SRC_COS_QVFIX].dit,
-        do_activation_checkpointing=1.0,
-    ),
-)
-
-_EXP_PIXELDIT_3SRC_COS_QVFIX_T128 = (
-    "pixeldit_sem1024d24l_pix128d4l_3src_lr5e5cos_qvfix_t128"
-)
-CONFIGS[_EXP_PIXELDIT_3SRC_COS_QVFIX_T128] = dataclasses.replace(
-    CONFIGS[_EXP_PIXELDIT_3SRC_COS_QVFIX_T256],
-    experiment=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_3SRC_COS_QVFIX_T256].experiment,
-        name=_EXP_PIXELDIT_3SRC_COS_QVFIX_T128,
-        resume_from=_ckpt(_EXP_PIXELDIT_3SRC_COS_QVFIX),
-        reset_best_valid_loss=True,
-        skip_optimizer_reloading=True,
-        reset_scheduler_state=True,
-    ),
-    data=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_3SRC_COS_QVFIX_T256].data,
-        tile_size=128,
     ),
 )
 
@@ -1173,12 +706,6 @@ CONFIGS[_EXP_PIXELDIT_3SRC_COS_QVFIX_WSPINUP] = dataclasses.replace(
     ),
 )
 
-# ---------------------------------------------------------------------------
-# pixeldit_sem1024d24l_pix128d4l_3src_lr5e5cos_qvfix_wspinup_convadaln
-#   Fine-tunes Stage 2 pixel pathway with ConvTranspose3d AdaLN (use_conv_adaln=True)
-#   to eliminate 4×4 patch-boundary artifacts in T2m / surface pressure rollouts.
-#   Resumes from wspinup best.pth; old adaln_pixel_proj weights are dropped (strict=False),
-#   new adaln_pixel_conv starts zero-initialized. Semantic stage is frozen.
 # ---------------------------------------------------------------------------
 # pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject
 #   bilinear upsample → DWConv2d(1×5×5, replicate, identity-init) → GeLU → Linear at pixel res.
@@ -1263,128 +790,60 @@ CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC] = dataclasses.repl
 _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST = (
     "pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_unfreeze_3src_const1em5"
 )
-CONFIGS[
-    _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST
-] = dataclasses.replace(
-    CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC],
-    experiment=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC].experiment,
-        name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST,
-        resume_from=_ckpt(_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC),
-        reset_scheduler_state=True,
-        reset_best_valid_loss=True,
-    ),
-    training=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC].training,
-        lr=1e-5,
-        scheduler_type="constant",
-    ),
-)
-
-_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T256 = (
-    "pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_unfreeze_3src_const1em5_t256"
-)
-CONFIGS[
-    _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T256
-] = dataclasses.replace(
-    CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST],
-    experiment=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST].experiment,
-        name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T256,
-        resume_from=_ckpt(_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST),
-        reset_best_valid_loss=True,
-        reset_scheduler_state=True,
-        skip_optimizer_reloading=True,
-    ),
-    training=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST].training,
-        lr=1e-5,
-        scheduler_type="warmup_constant",
-        validate_steps=5000,
-        backup_every_steps=500,
-    ),
-    data=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST].data,
-        tile_size=256,
-    ),
-    dit=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST].dit,
-        do_activation_checkpointing=1.0,
-    ),
+CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST] = (
+    dataclasses.replace(
+        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC],
+        experiment=dataclasses.replace(
+            CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC].experiment,
+            name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST,
+            resume_from=_ckpt(_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC),
+            reset_scheduler_state=True,
+            reset_best_valid_loss=True,
+        ),
+        training=dataclasses.replace(
+            CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC].training,
+            lr=1e-5,
+            scheduler_type="constant",
+        ),
+    )
 )
 
 _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128 = (
     "pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_unfreeze_3src_const1em5_t128"
 )
-CONFIGS[
-    _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
-] = dataclasses.replace(
-    CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T256],
-    experiment=dataclasses.replace(
-        CONFIGS[
-            _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T256
-        ].experiment,
-        name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128,
-        resume_from=_ckpt(_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST),
-        reset_best_valid_loss=True,
-        reset_scheduler_state=True,
-        skip_optimizer_reloading=True,
-    ),
-    data=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T256].data,
-        tile_size=128,
-    ),
-)
-
-_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_T256 = "pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_unfreeze_3src_const1em5_t128_t256"
-CONFIGS[
-    _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_T256
-] = dataclasses.replace(
-    CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T256],
-    experiment=dataclasses.replace(
-        CONFIGS[
-            _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T256
-        ].experiment,
-        name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_T256,
-        resume_from=_ckpt(
-            _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
+CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128] = (
+    dataclasses.replace(
+        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST],
+        experiment=dataclasses.replace(
+            CONFIGS[
+                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST
+            ].experiment,
+            name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128,
+            resume_from=_ckpt(
+                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST
+            ),
+            reset_best_valid_loss=True,
+            reset_scheduler_state=True,
+            skip_optimizer_reloading=True,
         ),
-        reset_best_valid_loss=True,
-        reset_scheduler_state=True,
-        skip_optimizer_reloading=True,
-    ),
-)
-
-# ---------------------------------------------------------------------------
-# ..._const1em5_t128_rope
-#   Experiment A (warm-start): continue the T128 baseline but enable stereographic
-#   2-D RoPE in the pixel pathway (do_rope_2d_stereographic on PixelDiTConfig).
-#   No new parameters are introduced, so pixel-block weights load cleanly.
-#   Keeps T128's constant lr=1e-5 fine-tune schedule and 3-source data.
-# ---------------------------------------------------------------------------
-_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_ROPE = "pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_unfreeze_3src_const1em5_t128_rope"
-CONFIGS[
-    _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_ROPE
-] = dataclasses.replace(
-    CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128],
-    experiment=dataclasses.replace(
-        CONFIGS[
-            _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
-        ].experiment,
-        name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_ROPE,
-        resume_from=_ckpt(
-            _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
+        training=dataclasses.replace(
+            CONFIGS[
+                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST
+            ].training,
+            lr=1e-5,
+            scheduler_type="warmup_constant",
+            validate_steps=5000,
+            backup_every_steps=500,
         ),
-        reset_best_valid_loss=True,
-        reset_scheduler_state=True,
-        skip_optimizer_reloading=True,
-    ),
-    pixel_dit=dataclasses.replace(
-        CONFIGS[
-            _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
-        ].pixel_dit,
-        do_rope_2d_stereographic=True,
-    ),
+        data=dataclasses.replace(
+            CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST].data,
+            tile_size=128,
+        ),
+        dit=dataclasses.replace(
+            CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST].dit,
+            do_activation_checkpointing=1.0,
+        ),
+    )
 )
 
 # ---------------------------------------------------------------------------
@@ -1396,33 +855,35 @@ CONFIGS[
 #   proj weights transfer exactly (only the stride/padding scheme changes).
 # ---------------------------------------------------------------------------
 _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS = "pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_unfreeze_3src_const1em5_t128_dealias"
-CONFIGS[
-    _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS
-] = dataclasses.replace(
-    CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128],
-    experiment=dataclasses.replace(
-        CONFIGS[
-            _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
-        ].experiment,
-        name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS,
-        resume_from=_ckpt(
-            _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
+CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS] = (
+    dataclasses.replace(
+        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128],
+        experiment=dataclasses.replace(
+            CONFIGS[
+                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
+            ].experiment,
+            name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS,
+            resume_from=_ckpt(
+                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
+            ),
+            reset_best_valid_loss=True,
+            reset_scheduler_state=True,
+            skip_optimizer_reloading=True,
         ),
-        reset_best_valid_loss=True,
-        reset_scheduler_state=True,
-        skip_optimizer_reloading=True,
-    ),
-    dit=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128].dit,
-        use_dealiased_patch_embed=True,
-        dealias_resample_filter=(1, 4, 6, 4, 1),
-    ),
-    pixel_dit=dataclasses.replace(
-        CONFIGS[
-            _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
-        ].pixel_dit,
-        use_chunked_depthwise_conv=False,
-    ),
+        dit=dataclasses.replace(
+            CONFIGS[
+                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
+            ].dit,
+            use_dealiased_patch_embed=True,
+            dealias_resample_filter=(1, 4, 6, 4, 1),
+        ),
+        pixel_dit=dataclasses.replace(
+            CONFIGS[
+                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
+            ].pixel_dit,
+            use_chunked_depthwise_conv=False,
+        ),
+    )
 )
 
 # ---------------------------------------------------------------------------
@@ -1435,19 +896,21 @@ CONFIGS[
 _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS_R2 = (
     _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS + "_r2"
 )
-CONFIGS[
-    _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS_R2
-] = dataclasses.replace(
-    CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS],
-    experiment=dataclasses.replace(
+CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS_R2] = (
+    dataclasses.replace(
         CONFIGS[
             _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS
-        ].experiment,
-        name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS_R2,
-        resume_from=_ckpt(
-            _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS
+        ],
+        experiment=dataclasses.replace(
+            CONFIGS[
+                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS
+            ].experiment,
+            name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS_R2,
+            resume_from=_ckpt(
+                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS
+            ),
         ),
-    ),
+    )
 )
 
 # ---------------------------------------------------------------------------
@@ -1462,46 +925,50 @@ CONFIGS[
 #   Training: warmup_constant, lr=1e-4, warmup_steps=5000.
 # ---------------------------------------------------------------------------
 _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_3SRC_T64_PIXSTEREO_CONST1EM4 = "pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_3src_t64_pixstereorope_const1em4"
-CONFIGS[
-    _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_3SRC_T64_PIXSTEREO_CONST1EM4
-] = dataclasses.replace(
-    CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128],
-    experiment=dataclasses.replace(
-        CONFIGS[
-            _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
-        ].experiment,
-        name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_3SRC_T64_PIXSTEREO_CONST1EM4,
-        resume_from=None,
-        reset_best_valid_loss=False,
-        reset_scheduler_state=False,
-        skip_optimizer_reloading=False,
-    ),
-    data=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128].data,
-        tile_size=64,
-        train_zarr_weights=(1.0, 1.0, 1.0),
-        test_stride=48,
-    ),
-    training=dataclasses.replace(
-        CONFIGS[
-            _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
-        ].training,
-        lr=1e-4,
-        scheduler_type="warmup_constant",
-        warmup_steps=5000,
-        validate_steps=20000,
-    ),
-    pixel_dit=dataclasses.replace(
-        CONFIGS[
-            _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
-        ].pixel_dit,
-        do_rope_2d_stereographic=True,
-        use_chunked_depthwise_conv=False,
-    ),
-    dit=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128].dit,
-        do_activation_checkpointing=0.0,
-    ),
+CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_3SRC_T64_PIXSTEREO_CONST1EM4] = (
+    dataclasses.replace(
+        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128],
+        experiment=dataclasses.replace(
+            CONFIGS[
+                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
+            ].experiment,
+            name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_3SRC_T64_PIXSTEREO_CONST1EM4,
+            resume_from=None,
+            reset_best_valid_loss=False,
+            reset_scheduler_state=False,
+            skip_optimizer_reloading=False,
+        ),
+        data=dataclasses.replace(
+            CONFIGS[
+                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
+            ].data,
+            tile_size=64,
+            train_zarr_weights=(1.0, 1.0, 1.0),
+            test_stride=48,
+        ),
+        training=dataclasses.replace(
+            CONFIGS[
+                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
+            ].training,
+            lr=1e-4,
+            scheduler_type="warmup_constant",
+            warmup_steps=5000,
+            validate_steps=20000,
+        ),
+        pixel_dit=dataclasses.replace(
+            CONFIGS[
+                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
+            ].pixel_dit,
+            do_rope_2d_stereographic=True,
+            use_chunked_depthwise_conv=False,
+        ),
+        dit=dataclasses.replace(
+            CONFIGS[
+                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
+            ].dit,
+            do_activation_checkpointing=0.0,
+        ),
+    )
 )
 
 # ---------------------------------------------------------------------------
@@ -1561,277 +1028,6 @@ CONFIGS[
         use_chunked_depthwise_conv=False,
     ),
 )
-
-# ---------------------------------------------------------------------------
-# ..._bilineardwgeluproject_rope_first1adaln_3src
-#   Experiment A+B stage 1 (from scratch, tile_size=64): train the bilinear-DW-GeLU
-#   PixelDiT with BOTH interventions enabled from random init —
-#     - do_rope_2d_stereographic=True on pixel_dit  (RoPE in pixel attention)
-#     - first_block_only_adaln=True on pixel_dit    (AdaLN only in block 0;
-#                                                    blocks 1..N-1 are plain DiTBlocks)
-#   Uses 3-source zarr data (from _EXP_PIXELDIT_3SRC.data) and a warmup_constant
-#   schedule (lr=1e-3). Normalization refs inherit _NORM_REF from PROD unchanged.
-# ---------------------------------------------------------------------------
-_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_3SRC = (
-    "pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_rope_first1adaln_3src"
-)
-CONFIGS[
-    _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_3SRC
-] = dataclasses.replace(
-    CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT],
-    experiment=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT].experiment,
-        name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_3SRC,
-        resume_from=None,
-    ),
-    data=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_3SRC].data,
-        tile_size=128,
-    ),
-    training=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT].training,
-        lr=1e-3,
-        scheduler_type="warmup_constant",
-    ),
-    pixel_dit=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT].pixel_dit,
-        do_rope_2d_stereographic=True,
-        first_block_only_adaln=True,
-    ),
-)
-
-_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_3SRC_T64 = (
-    "pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_rope_first1adaln_3src_t64"
-)
-CONFIGS[
-    _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_3SRC_T64
-] = dataclasses.replace(
-    CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT],
-    experiment=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT].experiment,
-        name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_3SRC_T64,
-        resume_from=None,
-    ),
-    data=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_3SRC].data,
-        tile_size=64,
-        train_zarr_weights=(1.0, 1.0, 1.0),
-    ),
-    training=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT].training,
-        lr=5e-4,
-        scheduler_type="warmup_constant",
-    ),
-    pixel_dit=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT].pixel_dit,
-        do_rope_2d_stereographic=True,
-        first_block_only_adaln=True,
-    ),
-)
-
-_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_3SRC_T64_COS = (
-    "pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_rope_first1adaln_3src_t64_cos"
-)
-CONFIGS[
-    _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_3SRC_T64_COS
-] = dataclasses.replace(
-    CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_3SRC_T64],
-    experiment=dataclasses.replace(
-        CONFIGS[
-            _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_3SRC_T64
-        ].experiment,
-        name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_3SRC_T64_COS,
-        resume_from=_ckpt(
-            _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_3SRC_T64
-        ),
-        reset_best_valid_loss=True,
-        reset_scheduler_state=True,
-    ),
-    training=dataclasses.replace(
-        CONFIGS[
-            _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_3SRC_T64
-        ].training,
-        lr=1e-4,
-        scheduler_type="dampened_cosine_with_hard_restarts",
-        cosine_t_max=48,
-        cosine_n_cycles=4,
-        cosine_decay=0.3162,
-    ),
-)
-
-# ---------------------------------------------------------------------------
-# pixeldit_sem768d12l_pix128d4l_bilineardwgeluproject_rope_first1adaln_3src
-#   Smaller/cheaper from-scratch ablation of A+B:
-#     - dit.embed_dim: 1024 → 768
-#     - dit.n_layers:  24   → 12
-#     - dit.num_heads: 16   → 12   (keeps head_dim = 768/12 = 64 as in the baseline)
-#     - pixel_dit unchanged (embed_dim=128, n_layers=4)
-#   Training: lr=1e-3, batch_size=2, from-scratch (resume_from=None), 3-source zarr,
-#   tile_size=64, PROD schedule (dampened_cosine_with_hard_restarts, warmup=2000).
-# ---------------------------------------------------------------------------
-_EXP_PIXELDIT_SMALL_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_3SRC = (
-    "pixeldit_sem768d12l_pix128d4l_bilineardwgeluproject_rope_first1adaln_3src"
-)
-CONFIGS[
-    _EXP_PIXELDIT_SMALL_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_3SRC
-] = dataclasses.replace(
-    CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT],
-    experiment=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT].experiment,
-        name=_EXP_PIXELDIT_SMALL_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_3SRC,
-        resume_from=None,
-    ),
-    data=CONFIGS[_EXP_PIXELDIT_3SRC].data,
-    training=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT].training,
-        lr=1e-3,
-        batch_size=2,
-    ),
-    dit=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT].dit,
-        embed_dim=768,
-        n_layers=12,
-        num_heads=12,
-    ),
-    pixel_dit=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT].pixel_dit,
-        do_rope_2d_stereographic=True,
-        first_block_only_adaln=True,
-    ),
-)
-
-# ---------------------------------------------------------------------------
-# pixeldit_sem768d12l_pix128d4l_bilineardwgeluproject_rope_first1adaln_dealias_3src
-#   Same small-model A+B config as above, plus dealiased patch embedding on the
-#   semantic stem (DiTConfig.use_dealiased_patch_embed=True). This is the ablation
-#   run for "does the dealiased patch embedding add value on top of A+B?"
-# ---------------------------------------------------------------------------
-_EXP_PIXELDIT_SMALL_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_DEALIAS_3SRC = (
-    "pixeldit_sem768d12l_pix128d4l_bilineardwgeluproject_rope_first1adaln_dealias_3src"
-)
-CONFIGS[
-    _EXP_PIXELDIT_SMALL_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_DEALIAS_3SRC
-] = dataclasses.replace(
-    CONFIGS[_EXP_PIXELDIT_SMALL_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_3SRC],
-    experiment=dataclasses.replace(
-        CONFIGS[
-            _EXP_PIXELDIT_SMALL_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_3SRC
-        ].experiment,
-        name=_EXP_PIXELDIT_SMALL_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_DEALIAS_3SRC,
-    ),
-    dit=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_SMALL_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_3SRC].dit,
-        use_dealiased_patch_embed=True,
-    ),
-)
-
-_EXP_PIXELDIT_SMALL_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_DEALIAS_3SRC_FIXED = "pixeldit_sem768d12l_pix128d4l_bilineardwgeluproject_rope_first1adaln_dealias_3src_fixed"
-CONFIGS[
-    _EXP_PIXELDIT_SMALL_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_DEALIAS_3SRC_FIXED
-] = dataclasses.replace(
-    CONFIGS[_EXP_PIXELDIT_SMALL_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_3SRC],
-    experiment=dataclasses.replace(
-        CONFIGS[
-            _EXP_PIXELDIT_SMALL_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_3SRC
-        ].experiment,
-        name=_EXP_PIXELDIT_SMALL_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_DEALIAS_3SRC_FIXED,
-    ),
-    dit=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_SMALL_BILINEAR_DW_GELU_PROJECT_ROPE_FIRST1ADALN_3SRC].dit,
-        use_dealiased_patch_embed=True,
-        dealias_resample_filter=(1, 4, 6, 4, 1),
-    ),
-)
-
-_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_FREEZESEM_TEST = (
-    "pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_freezesem_test"
-)
-CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_FREEZESEM_TEST] = dataclasses.replace(
-    CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_FREEZESEM],
-    experiment=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_FREEZESEM].experiment,
-        name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_FREEZESEM_TEST,
-        resume_from=_ckpt(_EXP_PIXELDIT_3SRC_COS_QVFIX_WSPINUP),
-    ),
-    training=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_FREEZESEM].training,
-        validate_steps=2000,
-        validate_min_samples=10,
-    ),
-    debug=dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_FREEZESEM].debug,
-        skip_india_ocean_eval=True,
-        recreate_dataloader_each_validation=False,
-    ),
-)
-
-# ---------------------------------------------------------------------------
-# pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_unfreeze_3src_4stepft_dealias
-#   Fine-tune from the 4-step checkpoint with the dealiased patch embedding.
-#   Replaces PatchEmbed3D → DealiasedPatchEmbed3D (Bin-5 filter, same proj weights).
-#   skip_optimizer_reloading=True because the patch-embed parameters are unchanged
-#   (only the stride/padding scheme changes, proj weights transfer exactly), but
-#   we want a clean optimizer state for this new training phase.
-# ---------------------------------------------------------------------------
-_EXP_PIXELDIT_UNFREEZE_3SRC_DEALIAS = (
-    "pixeldit_sem1024d24l_pix128d4l_bilinear_3src_dealiasemb"
-)
-_base_unfreeze_3src = CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC]
-CONFIGS[_EXP_PIXELDIT_UNFREEZE_3SRC_DEALIAS] = dataclasses.replace(
-    _base_unfreeze_3src,
-    experiment=dataclasses.replace(
-        _base_unfreeze_3src.experiment,
-        name=_EXP_PIXELDIT_UNFREEZE_3SRC_DEALIAS,
-        rundir=os.path.join(_ROOT, _EXP_PIXELDIT_UNFREEZE_3SRC_DEALIAS, "output"),
-        resume_from=_ckpt(_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC),
-        skip_optimizer_reloading=True,
-        reset_scheduler_state=True,
-        reset_best_valid_loss=True,
-    ),
-    training=dataclasses.replace(
-        _base_unfreeze_3src.training,
-        lr=1e-5,
-        scheduler_type="warmup_constant",
-        warmup_steps=10000,
-        grad_clip_max_norm=0.5,
-    ),
-    dit=dataclasses.replace(
-        _base_unfreeze_3src.dit,
-        use_dealiased_patch_embed=True,
-        dealias_resample_filter=(1, 4, 6, 4, 1),
-    ),
-)
-
-_EXP_PIXELDIT_UNFREEZE_3SRC_DEALIAS_TEST = (
-    "pixeldit_sem1024d24l_pix128d4l_bilinear_3src_dealiasemb_test"
-)
-CONFIGS[_EXP_PIXELDIT_UNFREEZE_3SRC_DEALIAS_TEST] = dataclasses.replace(
-    _base_unfreeze_3src,
-    experiment=dataclasses.replace(
-        _base_unfreeze_3src.experiment,
-        name=_EXP_PIXELDIT_UNFREEZE_3SRC_DEALIAS_TEST,
-        rundir=os.path.join(_ROOT, _EXP_PIXELDIT_UNFREEZE_3SRC_DEALIAS_TEST, "output"),
-        resume_from=_ckpt(_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC),
-        skip_optimizer_reloading=True,
-        reset_scheduler_state=True,
-        reset_best_valid_loss=True,
-    ),
-    training=dataclasses.replace(
-        _base_unfreeze_3src.training,
-        lr=1e-5,
-        scheduler_type="warmup_constant",
-        warmup_steps=10000,
-        grad_clip_max_norm=0.5,
-        validate_steps=2000,
-        validate_min_samples=10,
-    ),
-    dit=dataclasses.replace(
-        _base_unfreeze_3src.dit,
-        use_dealiased_patch_embed=True,
-        dealias_resample_filter=(1, 4, 6, 4, 1),
-    ),
-)
-
 
 # ---------------------------------------------------------------------------
 # pixeldit_sem768d12l_pix64d2l
@@ -2067,47 +1263,8 @@ for _sfx in ("_2stepft", "_4stepft"):
         CONFIGS[_k],
         training=dataclasses.replace(CONFIGS[_k].training, num_workers=2),
     )
-add_multistep_finetune_configs("sweep1_k9_hp4vp1_d768")
-add_multistep_finetune_configs("sweep1_k9_hp2vp4_d768")
-add_multistep_finetune_configs("sweep1_k9_hp2vp4_d1024")
-add_multistep_finetune_configs("sweep1_k9_hp4_d1024_diagomega_lr5em5_cos80")
-add_multistep_finetune_configs("sweep1_k3_hp4_d1024_diagomega_lr5em5_cos80")
-add_multistep_finetune_configs("sweep1_k3_hp2_d1024_diagomega_lr5em5_cos40")
 
-add_multistep_finetune_configs("pixeldit_sem1024d24l_pix128d4l_qvfix")
-add_multistep_finetune_configs(
-    "pixeldit_sem1024d24l_pix128d4l_3src_lr5e5cos_qvfix", ckpt_name="latest.pth"
-)
-add_multistep_finetune_configs(
-    "pixeldit_sem1024d24l_pix128d4l_3src_lr5e5cos_qvfix_wspinup", ckpt_name="best.pth"
-)
-
-add_multistep_finetune_configs(
-    "pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_unfreeze_3src",
-    ckpt_name="best.pth",
-)
 add_multistep_finetune_configs(
     "pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_unfreeze_3src_const1em5_t128",
     ckpt_name="best.pth",
-)
-
-_BASE_T128 = (
-    "pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_unfreeze_3src_const1em5_t128"
-)
-_NAME_T128_3STEPFT = f"{_BASE_T128}_3stepft"
-CONFIGS[_NAME_T128_3STEPFT] = dataclasses.replace(
-    CONFIGS[f"{_BASE_T128}_4stepft"],
-    experiment=dataclasses.replace(
-        CONFIGS[f"{_BASE_T128}_4stepft"].experiment,
-        name=_NAME_T128_3STEPFT,
-        rundir=os.path.join(_ROOT, _NAME_T128_3STEPFT, "output"),
-        resume_from=_ckpt(f"{_BASE_T128}_2stepft"),
-    ),
-    training=dataclasses.replace(
-        CONFIGS[f"{_BASE_T128}_4stepft"].training,
-        num_steps=3,
-    ),
-)
-add_multistep_finetune_configs(
-    "pixeldit_sem1024d24l_pix128d4l_3src_lr5e5cos_qvfix_t128",
 )
