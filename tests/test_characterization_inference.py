@@ -26,8 +26,8 @@ For each production config we build a **small stand-in** of the real
 architecture: the exact ``DiTConfig`` / ``PixelDiTConfig`` flags from
 ``train_configs.CONFIGS[name]`` (so every production code path is exercised),
 with only the sizes shrunk (``embed_dim``/``n_layers``/``tile``/``depth``) so the
-test is fast. The model is built through the real ``train.DiT3D`` /
-``train.DiT3DPixel`` builders, so it tracks the production construction path.
+test is fast. The model is built through the real ``train.build_backbone`` /
+``train.build_strata`` builders, so it tracks the production construction path.
 
 Two subtleties make the guard reliable:
 
@@ -137,9 +137,9 @@ def _build_small(name: str) -> torch.nn.Module:
             n_layers=SMALL_PIXEL_LAYERS,
             num_heads=SMALL_PIXEL_HEADS,
         )
-        net = train.DiT3DPixel(**common, pixel_cfg=pix)
+        net = train.build_strata(**common, pixel_cfg=pix)
     else:
-        net = train.DiT3D(**common)
+        net = train.build_backbone(**common)
     return net.cuda(), dit.index_is_latlon
 
 

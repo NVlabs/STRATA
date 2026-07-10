@@ -12,12 +12,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""SCREAMCast wrappers around the physicsnemo Strata architecture.
+"""The Strata model: SCREAM-specific assembly of the physicsnemo architecture.
 
-The transformer architecture (3D neighborhood-attention DiT backbone + pixel
-stage) lives in physicsnemo (``physicsnemo.experimental.models.strata``); see
-``strata_backend.py`` for the class selection. These wrappers keep the
-SCREAMCast-specific concerns local:
+SCREAMCast and Strata are the same model. The grid-agnostic transformer
+architecture (3D neighborhood-attention backbone + pixel stage +
+stereographic RoPE) lives in physicsnemo
+(``physicsnemo.experimental.models.strata``); everything that is specific to
+emulating SCREAM stays in this repository, and these wrapper classes are the
+assembly point (see ``strata_backend.py`` for the class selection). The
+SCREAM-specific pieces are:
 
 - deriving per-pixel lat/lon (``pos``) from the tile ``index`` for both
   HEALPix and CubeSphere grids (``tile_geometry.TileGeometry``),
@@ -25,18 +28,20 @@ SCREAMCast-specific concerns local:
 - latitude channel concatenation,
 - the optional dealiased patch embedding (``dealias.DealiasedPatchEmbed3D``),
 - freeze flags for staged fine-tuning,
-- loading legacy (pre-migration) checkpoints (``checkpoint_compat``),
+- loading checkpoints saved before the physicsnemo migration
+  (``checkpoint_compat``),
 - the tanh-GELU activation the shipped checkpoints were trained with.
 
-The forward contract is unchanged from the legacy models:
-``network(x, index)`` with ``x`` of shape ``[B, C, D, H, W]``.
+The forward contract is ``network(x, index)`` with ``x`` of shape
+``[B, C, D, H, W]``; ``index`` carries either global column ids or explicit
+lat/lon tiles.
 
-Numerics note: the stereographic RoPE coordinates now come from physicsnemo
-(`spherical_centroid` tile centers / patch pooling) instead of the legacy
-mean-latitude + circular-mean-longitude math, which introduces a small,
+Numerics note: the stereographic RoPE coordinates come from physicsnemo
+(`spherical_centroid` tile centers / patch pooling) rather than the
+pre-migration mean-latitude + circular-mean-longitude math — a small,
 accepted numerical difference for ``do_rope_2d_stereographic`` models. The
-wind rotation keeps the legacy mean-based center, so its numerics are
-unchanged. Everything else is bit-compatible modulo op ordering.
+wind rotation keeps the mean-based center, so its numerics are unchanged.
+Everything else is bit-compatible modulo op ordering.
 """
 
 from typing import Mapping, Optional, Tuple
@@ -122,6 +127,25 @@ def _remap_legacy_pre_hook(module, state_dict, prefix, *args) -> None:
         state_dict[prefix + k] = v
 
 
+def _resolve_rope_base(rope_length_scale: Optional[float]) -> float:
+    """Resolve the per-pixel stereographic RoPE length scale.
+
+    ``None`` / ``0`` (the config sentinel) selects the historical default —
+    computed here from the same formula every shipped checkpoint was trained
+    with, so pre-migration checkpoints reproduce bit-exactly without anyone
+    writing the constant out. An explicit positive value overrides it (e.g.
+    the pixel spacing of a coarser grid); the backbone stage multiplies the
+    base by its horizontal patch size, the pixel/cross-attention stages use
+    it directly, so all stages stay in one consistent unit system.
+    """
+    if rope_length_scale is not None and rope_length_scale < 0:
+        raise ValueError(
+            f"rope_length_scale must be positive (or 0/None for the default); "
+            f"got {rope_length_scale}"
+        )
+    return rope_length_scale or TileGeometry.default_rope_length_scale(1)
+
+
 def _rope_mode(do_rope_2d: bool, do_rope_2d_stereographic: bool) -> str:
     if do_rope_2d and do_rope_2d_stereographic:
         raise ValueError(
@@ -134,7 +158,7 @@ def _rope_mode(do_rope_2d: bool, do_rope_2d_stereographic: bool) -> str:
     return "none"
 
 
-class _ScreamcastStrataBase(nn.Module):
+class _StrataModelBase(nn.Module):
     """Shared geometry/wind/lat-concat plumbing for both wrappers."""
 
     def __init__(
@@ -224,12 +248,12 @@ class _ScreamcastStrataBase(nn.Module):
 
 
 
-class ScreamcastStrataBackbone(_ScreamcastStrataBase):
-    """Single-stage model (legacy ``DiT`` / model_type ``dit3d``).
+class StrataBackboneModel(_StrataModelBase):
+    """Single-stage model (replaces the pre-migration ``DiT`` / model_type ``dit3d``).
 
     Composes a physicsnemo ``StrataTransformer3D`` under ``self.strata`` and
     adds the SCREAMCast geometry/wind/lat-concat plumbing around it. All
-    constructor argument names match the legacy ``DiT`` so the train factories
+    constructor argument names match the pre-migration ``DiT`` so the train factories
     and configs are unchanged.
     """
 
@@ -267,7 +291,7 @@ class ScreamcastStrataBackbone(_ScreamcastStrataBase):
         na3d_backend: Optional[str] = None,
         grid_type: str = "healpix",
         cubesphere_latlon_path: str = "data/latlon_ne1024pg2.nc",
-        use_hpx_pe_scaling: bool = True,
+        rope_length_scale: Optional[float] = None,
         index_is_latlon: bool = False,
         use_dealiased_patch_embed: bool = False,
         dealias_resample_filter: tuple = (1, 4, 6, 4, 1),
@@ -284,6 +308,7 @@ class ScreamcastStrataBackbone(_ScreamcastStrataBase):
         pv = patch_size_vert if patch_size_vert is not None else patch_size
         ph = patch_size_horiz if patch_size_horiz is not None else patch_size
         rope_mode = _rope_mode(do_rope_2d, do_rope_2d_stereographic)
+        self._rope_length_scale_base = _resolve_rope_base(rope_length_scale)
 
         self.strata = BACKBONE_CLS(
             in_channels=in_chans + (2 if do_concat_latitude else 0),
@@ -306,7 +331,7 @@ class ScreamcastStrataBackbone(_ScreamcastStrataBase):
             rope_mode=rope_mode,
             rope_base=100.0,
             rope_length_scale=(
-                self.geometry.rope_length_scale(ph, use_hpx_pe_scaling)
+                self._rope_length_scale_base * ph
                 if rope_mode == "stereographic"
                 else 1.0
             ),
@@ -358,6 +383,23 @@ class ScreamcastStrataBackbone(_ScreamcastStrataBase):
         """Reconfigure the expected spatial tile size (all RoPE modes)."""
         self.strata.set_tile_size(height, width)
 
+    def set_rope_length_scale(self, base: float) -> None:
+        """Experimental: retarget the stereographic RoPE unit system in place.
+
+        ``base`` is the per-pixel length scale (see ``_resolve_rope_base``);
+        the backbone table is rebuilt from the attribute on every forward, so
+        the change takes effect immediately — useful for eval-time scale
+        sensitivity scans. Raises for non-stereographic RoPE modes.
+        """
+        if base <= 0:
+            raise ValueError(f"rope length scale base must be positive, got {base}")
+        if self.strata.rope_mode != "stereographic":
+            raise ValueError(
+                "set_rope_length_scale is only meaningful for stereographic RoPE"
+            )
+        self._rope_length_scale_base = base
+        self.strata.rope_length_scale = base * self.strata.patch_size[1]
+
     def forward(
         self,
         x: torch.Tensor,
@@ -368,11 +410,11 @@ class ScreamcastStrataBackbone(_ScreamcastStrataBase):
         return self._postprocess(x, lat_lon_data)
 
 
-class ScreamcastStrata(_ScreamcastStrataBase):
-    """Two-stage model (legacy ``DiT_Pixel`` / model_type ``pixeldit``).
+class StrataModel(_StrataModelBase):
+    """Two-stage model (replaces the pre-migration ``DiT_Pixel`` / model_type ``pixeldit``).
 
     Composes a physicsnemo ``Strata`` (backbone + pixel stage) under
-    ``self.strata``. Pixel-stage argument names match the legacy ``DiT_Pixel``
+    ``self.strata``. Pixel-stage argument names match the pre-migration ``DiT_Pixel``
     (``*_pixel``); backbone args are passed through ``**semantic_kwargs``
     exactly as before.
     """
@@ -435,6 +477,9 @@ class ScreamcastStrata(_ScreamcastStrataBase):
                 "pixel_cond_mode='adaln'"
             )
 
+        self._rope_length_scale_base = _resolve_rope_base(
+            semantic_kwargs.get("rope_length_scale")
+        )
         backbone_config = self._backbone_config(semantic_kwargs)
         pv = backbone_config["patch_size"][0]
         if use_bilinear_dw_gelu_project_adaln_pixel and pv != 1:
@@ -445,7 +490,6 @@ class ScreamcastStrata(_ScreamcastStrataBase):
             )
 
         rope_mode_pixel = _rope_mode(do_rope_2d_pixel, do_rope_2d_stereographic_pixel)
-        use_hpx_pe_scaling = semantic_kwargs.get("use_hpx_pe_scaling", True)
 
         strata_kwargs = dict(
             backbone_config=backbone_config,
@@ -468,7 +512,7 @@ class ScreamcastStrata(_ScreamcastStrataBase):
             rope_mode_pixel=rope_mode_pixel,
             rope_base_pixel=100.0,
             rope_length_scale_pixel=(
-                self.geometry.rope_length_scale(1, use_hpx_pe_scaling)
+                self._rope_length_scale_base
                 if rope_mode_pixel == "stereographic"
                 else 1.0
             ),
@@ -511,7 +555,7 @@ class ScreamcastStrata(_ScreamcastStrataBase):
     def _backbone_config(self, semantic_kwargs: dict) -> dict:
         """Translate legacy DiT kwargs into a StrataTransformer3D config."""
         sk = dict(semantic_kwargs)
-        # Wrapper-level concerns already consumed by _ScreamcastStrataBase.
+        # Wrapper-level concerns already consumed by _StrataModelBase.
         for consumed in (
             "do_concat_latitude",
             "do_rotate_wind",
@@ -520,12 +564,12 @@ class ScreamcastStrata(_ScreamcastStrataBase):
             "nside",
             "cubesphere_latlon_path",
             "index_is_latlon",
-            "use_hpx_pe_scaling",
             "use_dealiased_patch_embed",
             "dealias_resample_filter",
         ):
             sk.pop(consumed, None)
 
+        sk.pop("rope_length_scale", None)  # resolved into the shared base
         depth = sk.pop("depth")
         height = sk.pop("height")
         width = sk.pop("width")
@@ -559,9 +603,7 @@ class ScreamcastStrata(_ScreamcastStrataBase):
             rope_mode=rope_mode,
             rope_base=100.0,
             rope_length_scale=(
-                self.geometry.rope_length_scale(
-                    ph, semantic_kwargs.get("use_hpx_pe_scaling", True)
-                )
+                self._rope_length_scale_base * ph
                 if rope_mode == "stereographic"
                 else 1.0
             ),
@@ -628,6 +670,32 @@ class ScreamcastStrata(_ScreamcastStrataBase):
         self.strata.register_buffer(
             "_rope_sin_pixel", sin.to(device), persistent=False
         )
+
+    def set_rope_length_scale(self, base: float) -> None:
+        """Experimental: retarget the stereographic RoPE unit system in place.
+
+        ``base`` is the per-pixel length scale (see ``_resolve_rope_base``);
+        the backbone stage is set to ``base * patch_size_horiz`` and the
+        pixel/cross-attention stages to ``base``, keeping every stage in one
+        unit system. Stereographic tables are rebuilt from these attributes
+        on every forward, so the change takes effect immediately. Raises when
+        neither stage uses stereographic RoPE.
+        """
+        if base <= 0:
+            raise ValueError(f"rope length scale base must be positive, got {base}")
+        backbone_stereo = self.strata.backbone.rope_mode == "stereographic"
+        pixel_stereo = self.strata.rope_mode_pixel == "stereographic"
+        if not (backbone_stereo or pixel_stereo):
+            raise ValueError(
+                "set_rope_length_scale is only meaningful for stereographic RoPE"
+            )
+        self._rope_length_scale_base = base
+        if backbone_stereo:
+            self.strata.backbone.rope_length_scale = (
+                base * self.strata.backbone.patch_size[1]
+            )
+        if pixel_stereo:
+            self.strata.rope_length_scale_pixel = base
 
     def forward(
         self,

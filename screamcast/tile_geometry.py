@@ -154,16 +154,17 @@ class TileGeometry(nn.Module):
         lon0 = mean_longitude(lon)
         return lat0, lon0
 
-    def rope_length_scale(
-        self, patch_size_horiz: int, use_hpx_pe_scaling: bool = True
-    ) -> float:
-        """Coordinate normalization for the stereographic RoPE.
+    @staticmethod
+    def default_rope_length_scale(patch_size_horiz: int) -> float:
+        """Default coordinate normalization for the stereographic RoPE.
 
-        Each token covers ``patch_size_horiz**2`` fine pixels; the length scale
-        is the sqrt of the approximate token area so coordinates are comparable
-        across tiles and grids. ``use_hpx_pe_scaling=True`` (the production
-        setting) pins the reference to the HEALPix nside=1024 pixel area.
+        Each token covers ``patch_size_horiz**2`` fine pixels; the length
+        scale is the sqrt of the approximate token area so coordinates are
+        comparable across tiles. The reference pixel area is pinned to a
+        HEALPix nside=1024 grid — a historical unit choice every shipped
+        checkpoint (including the cubed-sphere ones) was trained with, NOT a
+        statement about the input grid. Override it per model via the
+        ``rope_length_scale`` config field / constructor argument when
+        training on grids of a different density (e.g. coarse ERA5).
         """
-        if use_hpx_pe_scaling:
-            return math.sqrt(math.pi * patch_size_horiz**2 / (3.0 * 1024**2))
-        return math.sqrt(4.0 * math.pi * patch_size_horiz**2 / float(self.ncol_total))
+        return math.sqrt(math.pi * patch_size_horiz**2 / (3.0 * 1024**2))

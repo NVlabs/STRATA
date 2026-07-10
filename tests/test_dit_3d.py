@@ -18,15 +18,15 @@ import pytest
 import torch
 
 from screamcast.dealias import DealiasedPatchEmbed3D
-from screamcast.strata_wrappers import ScreamcastStrata, ScreamcastStrataBackbone
+from screamcast.strata_wrappers import StrataModel, StrataBackboneModel
 
 
-def _make_pixel_dit(tile_size: int = 64) -> ScreamcastStrata:
+def _make_pixel_dit(tile_size: int = 64) -> StrataModel:
     # depth=12, patch_size_vert=2 → 6 depth tokens; attn_kernel=3 requires ≥3.
     # do_rope_2d=True precomputes RoPE for (tile_size/patch_horiz)^2 * depth tokens,
     # so feeding a larger spatial domain raises RuntimeError (the bug we test).
     D, PH, PV = 12, 4, 2
-    return ScreamcastStrata(
+    return StrataModel(
         depth=D,
         height=tile_size,
         width=tile_size,
@@ -55,7 +55,7 @@ def _healpix_index(h: int, w: int) -> torch.Tensor:
 
 
 def test_pixel_dit_tile_size_passes():
-    """ScreamcastStrata forward works for the tile size it was built with."""
+    """StrataModel forward works for the tile size it was built with."""
     model = _make_pixel_dit(tile_size=64)
     x = torch.randn(1, 6, 12, 64, 64).cuda()
     y = model(x, _healpix_index(64, 64))
@@ -75,7 +75,7 @@ def test_pixel_dit_set_tile_size():
 def test_pixel_dit_set_tile_size_refreshes_pixel_rope():
     """set_tile_size refreshes the pixel-pathway RoPE buffer when do_rope_2d_pixel=True."""
     D, PH, PV = 12, 4, 2
-    model = ScreamcastStrata(
+    model = StrataModel(
         depth=D,
         height=64,
         width=64,
@@ -105,7 +105,7 @@ def test_pixel_dit_set_tile_size_refreshes_pixel_rope():
 
 
 def test_dit_3d():
-    model = ScreamcastStrataBackbone(
+    model = StrataBackboneModel(
         depth=32,
         height=64,
         width=64,
@@ -123,7 +123,7 @@ def test_dit_3d():
 
 
 def test_dit_3d_stereographic():
-    model = ScreamcastStrataBackbone(
+    model = StrataBackboneModel(
         depth=32,
         height=64,
         width=64,

@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Wrapper-level tests for the two-stage pixel model (ScreamcastStrata).
+"""Wrapper-level tests for the two-stage pixel model (StrataModel).
 
 Block-level behavior (AdaLN-zero init, DepthwiseConv chunking, ...) is tested
 upstream in physicsnemo's strata suite; these tests cover the wrapper
@@ -22,12 +22,12 @@ composition, config translation, and geometry plumbing.
 import pytest
 import torch
 
-from screamcast.strata_wrappers import ScreamcastStrata
+from screamcast.strata_wrappers import StrataModel
 
 
 def test_dit_pixel():
     D, H, W = 24, 64, 64
-    model = ScreamcastStrata(
+    model = StrataModel(
         depth=D,
         height=H,
         width=W,
@@ -52,7 +52,7 @@ def test_dit_pixel():
 
 def test_dit_pixel_stereographic():
     D, H, W = 24, 64, 64
-    model = ScreamcastStrata(
+    model = StrataModel(
         depth=D,
         height=H,
         width=W,
@@ -81,7 +81,7 @@ def test_dit_pixel_stereographic():
 
 def test_dit_pixel_bilinear_dw_gelu_project():
     D, H, W = 24, 64, 64
-    model = ScreamcastStrata(
+    model = StrataModel(
         depth=D,
         height=H,
         width=W,
@@ -113,7 +113,7 @@ def test_dit_pixel_first_block_only_adaln():
 
     D, H, W = 24, 64, 64
     n_layers_pixel = 3
-    model = ScreamcastStrata(
+    model = StrataModel(
         depth=D,
         height=H,
         width=W,
@@ -148,7 +148,7 @@ def test_dit_pixel_first_block_only_adaln():
 
 def test_dit_pixel_stereographic_rope_pixel():
     D, H, W = 24, 64, 64
-    model = ScreamcastStrata(
+    model = StrataModel(
         depth=D,
         height=H,
         width=W,
@@ -179,7 +179,7 @@ def test_dit_pixel_stereographic_rope_pixel():
 
 def test_dit_pixel_rope_2d_pixel():
     D, H, W = 24, 64, 64
-    model = ScreamcastStrata(
+    model = StrataModel(
         depth=D,
         height=H,
         width=W,
@@ -206,7 +206,7 @@ def test_dit_pixel_rope_2d_pixel():
 
 def test_dit_pixel_rope_2d_pixel_and_stereographic_conflict():
     with pytest.raises(ValueError, match="row/column RoPE and stereographic RoPE"):
-        ScreamcastStrata(
+        StrataModel(
             depth=24,
             height=64,
             width=64,
@@ -228,7 +228,7 @@ def test_dit_pixel_rope_2d_pixel_and_stereographic_conflict():
 
 def test_dit_pixel_cross_attn_not_available_in_public():
     with pytest.raises(NotImplementedError, match="cross_attn"):
-        ScreamcastStrata(
+        StrataModel(
             depth=24,
             height=64,
             width=64,
@@ -279,7 +279,7 @@ def test_factory_translation_production_shape():
         qk_norm=True,
         use_bilinear_dw_gelu_project_adaln=True,
     )
-    model = train_module.DiT3DPixel(
+    model = train_module.build_strata(
         6,
         6,
         1024,
@@ -302,7 +302,7 @@ def test_factory_translation_production_shape():
 
 def test_dit_pixel_freeze_pixel_blocks():
     D, H, W = 24, 64, 64
-    model = ScreamcastStrata(
+    model = StrataModel(
         depth=D,
         height=H,
         width=W,
@@ -324,3 +324,56 @@ def test_dit_pixel_freeze_pixel_blocks():
     for name, p in model.strata.pixel_final_layer.named_parameters():
         assert not p.requires_grad, f"pixel head param should be frozen: {name}"
     assert any(p.requires_grad for p in model.strata.backbone.parameters())
+
+
+def _tiny_kwargs(**over):
+    kw = dict(
+        depth=8, height=32, width=32, patch_size_horiz=4, patch_size_vert=1,
+        in_chans=5, base_out_chans=5, n_layers=1, embed_dim=64, num_heads=4,
+        attn_kernel=3, do_rope_2d_stereographic=True,
+        do_rope_2d_stereographic_pixel=True, index_is_latlon=True,
+        grid_type="healpix", nside=16, embed_dim_pixel=32, n_layers_pixel=1,
+        num_heads_pixel=2, attn_kernel_pixel=3,
+    )
+    kw.update(over)
+    return kw
+
+
+def test_rope_length_scale_default_matches_historical_constant():
+    """The 0/None sentinel reproduces the exact pre-migration constant."""
+    import math
+
+    model = StrataModel(**_tiny_kwargs())
+    ph = 4
+    expected_backbone = math.sqrt(math.pi * ph**2 / (3.0 * 1024**2))
+    expected_pixel = math.sqrt(math.pi / (3.0 * 1024**2))
+    assert model.strata.backbone.rope_length_scale == expected_backbone
+    assert model.strata.rope_length_scale_pixel == expected_pixel
+
+
+def test_rope_length_scale_override_propagates():
+    """An explicit per-pixel base reaches every stage in consistent units."""
+    base = 5.66e-3  # e.g. an ne128pg2 pixel spacing
+    model = StrataModel(**_tiny_kwargs(rope_length_scale=base))
+    assert model.strata.backbone.rope_length_scale == base * 4
+    assert model.strata.rope_length_scale_pixel == base
+    with pytest.raises(ValueError, match="must be positive"):
+        StrataModel(**_tiny_kwargs(rope_length_scale=-1.0))
+
+
+def test_set_rope_length_scale_live_update():
+    """The experimental setter retargets both stages; axial mode rejects it."""
+    model = StrataModel(**_tiny_kwargs())
+    model.set_rope_length_scale(1e-2)
+    assert model.strata.backbone.rope_length_scale == 4e-2
+    assert model.strata.rope_length_scale_pixel == 1e-2
+
+    axial = StrataModel(
+        **_tiny_kwargs(
+            do_rope_2d_stereographic=False,
+            do_rope_2d_stereographic_pixel=False,
+            do_rope_2d=True,
+        )
+    )
+    with pytest.raises(ValueError, match="stereographic"):
+        axial.set_rope_length_scale(1e-2)

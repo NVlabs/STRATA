@@ -49,8 +49,8 @@ from screamcast.constructors import (
 )
 from screamcast.dali_ext_src import ScreamV2
 from screamcast.strata_wrappers import (
-    ScreamcastStrata,
-    ScreamcastStrataBackbone,
+    StrataModel,
+    StrataBackboneModel,
 )
 from screamcast.normalization import RunningNorm2d
 from screamcast.pipelines import get_dataloader
@@ -104,7 +104,7 @@ def _dit_common_kwargs(
     grid_type: str = "healpix",
     cubesphere_latlon_path: str | None = None,
 ) -> dict:
-    """Return kwargs dict shared by DiT3D and DiT3DPixel."""
+    """Return kwargs dict shared by build_backbone and build_strata."""
     return dict(
         depth=depth_levels,
         height=tile_size,
@@ -127,6 +127,7 @@ def _dit_common_kwargs(
         num_heads=dit_cfg.num_heads,
         attn_kernel=dit_cfg.attn_kernel,
         do_rope_2d=dit_cfg.do_rope_2d,
+        rope_length_scale=dit_cfg.rope_length_scale or None,
         do_concat_latitude=True,
         qk_norm=dit_cfg.qk_norm,
         qk_norm_elementwise_affine=dit_cfg.qk_norm_elementwise_affine,
@@ -145,7 +146,7 @@ def _dit_common_kwargs(
     )
 
 
-def DiT3D(
+def build_backbone(
     in_channels: int,
     out_channels: int,
     nside: int,
@@ -157,7 +158,7 @@ def DiT3D(
     grid_type: str = "healpix",
     cubesphere_latlon_path: str | None = None,
 ):
-    return ScreamcastStrataBackbone(
+    return StrataBackboneModel(
         **_dit_common_kwargs(
             in_channels,
             out_channels,
@@ -173,7 +174,7 @@ def DiT3D(
     )
 
 
-def DiT3DPixel(
+def build_strata(
     in_channels: int,
     out_channels: int,
     nside: int,
@@ -186,7 +187,7 @@ def DiT3DPixel(
     grid_type: str = "healpix",
     cubesphere_latlon_path: str | None = None,
 ):
-    return ScreamcastStrata(
+    return StrataModel(
         **_dit_common_kwargs(
             in_channels,
             out_channels,
@@ -403,7 +404,7 @@ def train(
         if cfg.experiment.model_type == "pixeldit":
             if cfg.pixel_dit is None:
                 raise ValueError("model_type='pixeldit' requires pixel_dit config")
-            network = DiT3DPixel(
+            network = build_strata(
                 in_channels_3d,
                 out_channels_3d,
                 nside,
@@ -419,7 +420,7 @@ def train(
                 else None,
             )
         else:
-            network = DiT3D(
+            network = build_backbone(
                 in_channels_3d,
                 out_channels_3d,
                 nside,

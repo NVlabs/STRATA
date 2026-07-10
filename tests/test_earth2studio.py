@@ -31,7 +31,7 @@ if "PROJECT_ROOT" not in os.environ:
     pytest.skip("PROJECT_ROOT is not configured", allow_module_level=True)
 
 from screamcast.dali_ext_src import ScreamV2
-from screamcast.strata_wrappers import ScreamcastStrataBackbone
+from screamcast.strata_wrappers import StrataBackboneModel
 from screamcast.earth2studio_wrappers import ScreamcastModel
 from screamcast.model_pipelines import MixedPredictionAsymmetric
 from screamcast.normalization import RunningNorm2d
@@ -64,7 +64,7 @@ def _make_screamcast_model(tile_size: int = _TILE_SIZE) -> ScreamcastModel:
 
     # Build a tiny DiT (same factory as training) with do_concat_latitude=False
     # so no spatial index is needed for this untrained wrapper test.
-    network = ScreamcastStrataBackbone(
+    network = StrataBackboneModel(
         depth=num_depth_levels,
         height=tile_size,
         width=tile_size,

@@ -37,7 +37,7 @@ from screamcast.config import TrainConfig
 from screamcast.cubesphere_transforms import reorder_cubesphere_to_2d_tensor
 from screamcast.dali_ext_src import ScreamV2
 from screamcast.datetime import as_py_datetime
-from screamcast.strata_wrappers import ScreamcastStrata, ScreamcastStrataBackbone
+from screamcast.strata_wrappers import StrataModel, StrataBackboneModel
 from screamcast.model_registry import MixedPredictionAsymmetric_init
 
 
@@ -614,7 +614,7 @@ class ScreamcastModel(torch.nn.Module):
         inputs instead of the size it was trained on.
         """
         self.tile_size = tile_size
-        # Both DiT and DiT_Pixel expose set_tile_size(height, width); DiT_Pixel's
+        # Both wrapper classes expose set_tile_size(height, width); DiT_Pixel's
         # implementation delegates to the semantic stage and also refreshes its
         # own pixel-pathway RoPE buffers when applicable.
         self.pipeline.network.set_tile_size(tile_size, tile_size)
@@ -729,7 +729,7 @@ class ScreamcastModel(torch.nn.Module):
             True if a supported checkpointing knob was found and changed.
         """
         network = self.pipeline.network
-        if isinstance(network, (ScreamcastStrata, ScreamcastStrataBackbone)):
+        if isinstance(network, (StrataModel, StrataBackboneModel)):
             network.disable_activation_checkpointing()
             return True
         return False
@@ -805,7 +805,7 @@ class ScreamcastModel(torch.nn.Module):
 
         def _network_factory():
             if model_type == "pixeldit":
-                return _train_module.DiT3DPixel(
+                return _train_module.build_strata(
                     in_channels=in_channels_3d,
                     out_channels=out_channels_3d,
                     nside=nside,
@@ -819,7 +819,7 @@ class ScreamcastModel(torch.nn.Module):
                     cubesphere_latlon_path=data_cfg.latlon_path,
                 )
             else:
-                return _train_module.DiT3D(
+                return _train_module.build_backbone(
                     in_channels=in_channels_3d,
                     out_channels=out_channels_3d,
                     nside=nside,
