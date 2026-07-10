@@ -48,12 +48,12 @@ from screamcast.constructors import (
     get_warmup_constant_schedule,
 )
 from screamcast.dali_ext_src import ScreamV2
-from screamcast.strata_wrappers import (
-    StrataModel,
-    StrataBackboneModel,
-)
 from screamcast.normalization import RunningNorm2d
 from screamcast.pipelines import get_dataloader
+from screamcast.strata_wrappers import (
+    StrataBackboneModel,
+    StrataModel,
+)
 
 
 def print_network_info(model):

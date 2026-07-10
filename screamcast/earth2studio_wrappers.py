@@ -37,8 +37,8 @@ from screamcast.config import TrainConfig
 from screamcast.cubesphere_transforms import reorder_cubesphere_to_2d_tensor
 from screamcast.dali_ext_src import ScreamV2
 from screamcast.datetime import as_py_datetime
-from screamcast.strata_wrappers import StrataModel, StrataBackboneModel
 from screamcast.model_registry import MixedPredictionAsymmetric_init
+from screamcast.strata_wrappers import StrataBackboneModel, StrataModel
 
 
 class ScreamDataSource:

@@ -31,10 +31,10 @@ if "PROJECT_ROOT" not in os.environ:
     pytest.skip("PROJECT_ROOT is not configured", allow_module_level=True)
 
 from screamcast.dali_ext_src import ScreamV2
-from screamcast.strata_wrappers import StrataBackboneModel
 from screamcast.earth2studio_wrappers import ScreamcastModel
 from screamcast.model_pipelines import MixedPredictionAsymmetric
 from screamcast.normalization import RunningNorm2d
+from screamcast.strata_wrappers import StrataBackboneModel
 
 # ---------------------------------------------------------------------------
 # Minimal model parameters shared across wrapper tests

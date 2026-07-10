@@ -18,7 +18,7 @@ import pytest
 import torch
 
 from screamcast.dealias import DealiasedPatchEmbed3D
-from screamcast.strata_wrappers import StrataModel, StrataBackboneModel
+from screamcast.strata_wrappers import StrataBackboneModel, StrataModel
 
 
 def _make_pixel_dit(tile_size: int = 64) -> StrataModel:

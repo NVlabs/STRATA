@@ -273,9 +273,11 @@ def test_factory_translation_production_shape():
     assert model.strata.backbone.rope_mode == "stereographic"
     assert model.strata.rope_mode_pixel == "none"
     assert model.strata.adaln_mode == "bilinear_dw"
-    assert model.strata.backbone.gated_attention if hasattr(
-        model.strata.backbone, "gated_attention"
-    ) else True
+    assert (
+        model.strata.backbone.gated_attention
+        if hasattr(model.strata.backbone, "gated_attention")
+        else True
+    )
     assert model._index_is_latlon
 
 
@@ -307,12 +309,26 @@ def test_dit_pixel_freeze_pixel_blocks():
 
 def _tiny_kwargs(**over):
     kw = dict(
-        depth=8, height=32, width=32, patch_size_horiz=4, patch_size_vert=1,
-        in_chans=5, base_out_chans=5, n_layers=1, embed_dim=64, num_heads=4,
-        attn_kernel=3, do_rope_2d_stereographic=True,
-        do_rope_2d_stereographic_pixel=True, index_is_latlon=True,
-        grid_type="healpix", nside=16, embed_dim_pixel=32, n_layers_pixel=1,
-        num_heads_pixel=2, attn_kernel_pixel=3,
+        depth=8,
+        height=32,
+        width=32,
+        patch_size_horiz=4,
+        patch_size_vert=1,
+        in_chans=5,
+        base_out_chans=5,
+        n_layers=1,
+        embed_dim=64,
+        num_heads=4,
+        attn_kernel=3,
+        do_rope_2d_stereographic=True,
+        do_rope_2d_stereographic_pixel=True,
+        index_is_latlon=True,
+        grid_type="healpix",
+        nside=16,
+        embed_dim_pixel=32,
+        n_layers_pixel=1,
+        num_heads_pixel=2,
+        attn_kernel_pixel=3,
     )
     kw.update(over)
     return kw

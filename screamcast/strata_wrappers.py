@@ -47,14 +47,13 @@ from typing import Mapping, Optional, Tuple
 
 import torch
 import torch.nn as nn
+from physicsnemo.experimental.models.strata import Strata, StrataTransformer3D
 from physicsnemo.experimental.models.strata.coords import build_axial_token_coords
 from physicsnemo.experimental.nn import build_axial_rope_cos_sin_2d_continuous
 from physicsnemo.nn.module.mlp_layers import Mlp
 
 from screamcast.checkpoint_compat import remap_legacy_state_dict
 from screamcast.dealias import DealiasedPatchEmbed3D
-from physicsnemo.experimental.models.strata import Strata, StrataTransformer3D
-
 from screamcast.tile_geometry import TileGeometry
 from screamcast.wind_rotation import forward_uv_to_tile, inverse_tile_to_uv
 
@@ -228,9 +227,7 @@ class _StrataModelBase(nn.Module):
         pos = torch.cat([lat.unsqueeze(1), lon.unsqueeze(1)], dim=1)  # [B, 2, H, W]
         return x, pos, lat_lon_data
 
-    def _postprocess(
-        self, x: torch.Tensor, lat_lon_data: tuple | None
-    ) -> torch.Tensor:
+    def _postprocess(self, x: torch.Tensor, lat_lon_data: tuple | None) -> torch.Tensor:
         """Inverse wind rotation on the network output."""
         if self._do_rotate_wind and lat_lon_data is not None:
             lat, lon, lat0, lon0 = lat_lon_data
@@ -240,7 +237,6 @@ class _StrataModelBase(nn.Module):
             )
             x = _replace_channels(x, {u_idx: u_geo, v_idx: v_geo})
         return x
-
 
 
 class StrataBackboneModel(_StrataModelBase):
@@ -634,12 +630,8 @@ class StrataModel(_StrataModelBase):
             theta=self.strata.rope_base_pixel,
         )
         device = self.strata._rope_cos_pixel.device
-        self.strata.register_buffer(
-            "_rope_cos_pixel", cos.to(device), persistent=False
-        )
-        self.strata.register_buffer(
-            "_rope_sin_pixel", sin.to(device), persistent=False
-        )
+        self.strata.register_buffer("_rope_cos_pixel", cos.to(device), persistent=False)
+        self.strata.register_buffer("_rope_sin_pixel", sin.to(device), persistent=False)
 
     def set_rope_length_scale(self, base: float) -> None:
         """Experimental: retarget the stereographic RoPE unit system in place.
