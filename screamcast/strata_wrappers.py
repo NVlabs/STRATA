@@ -19,8 +19,7 @@ architecture (3D neighborhood-attention backbone + pixel stage +
 stereographic RoPE) lives in physicsnemo
 (``physicsnemo.experimental.models.strata``); everything that is specific to
 emulating SCREAM stays in this repository, and these wrapper classes are the
-assembly point (see ``strata_backend.py`` for the class selection). The
-SCREAM-specific pieces are:
+assembly point. The SCREAM-specific pieces are:
 
 - deriving per-pixel lat/lon (``pos``) from the tile ``index`` for both
   HEALPix and CubeSphere grids (``tile_geometry.TileGeometry``),
@@ -54,12 +53,8 @@ from physicsnemo.nn.module.mlp_layers import Mlp
 
 from screamcast.checkpoint_compat import remap_legacy_state_dict
 from screamcast.dealias import DealiasedPatchEmbed3D
-from screamcast.strata_backend import (
-    BACKBONE_CLS,
-    CROSSATTN_CLS,
-    STRATA_CLS,
-    TILE_CENTER_FN,
-)
+from physicsnemo.experimental.models.strata import Strata, StrataTransformer3D
+
 from screamcast.tile_geometry import TileGeometry
 from screamcast.wind_rotation import forward_uv_to_tile, inverse_tile_to_uv
 
@@ -218,7 +213,7 @@ class _StrataModelBase(nn.Module):
 
         lat_lon_data = None
         if self._do_rotate_wind:
-            lat0, lon0 = TILE_CENTER_FN(lat, lon)
+            lat0, lon0 = TileGeometry.tile_center(lat, lon)
             lat_lon_data = (lat, lon, lat0, lon0)
             u_idx, v_idx = self._wind_channel_indices
             u_rot, v_rot = forward_uv_to_tile(
@@ -310,7 +305,7 @@ class StrataBackboneModel(_StrataModelBase):
         rope_mode = _rope_mode(do_rope_2d, do_rope_2d_stereographic)
         self._rope_length_scale_base = _resolve_rope_base(rope_length_scale)
 
-        self.strata = BACKBONE_CLS(
+        self.strata = StrataTransformer3D(
             in_channels=in_chans + (2 if do_concat_latitude else 0),
             out_channels=base_out_chans,
             input_shape=(depth, height, width),
@@ -435,8 +430,6 @@ class StrataModel(_StrataModelBase):
         do_bf16_mixed_pixel: bool = False,
         freeze_semantic: bool = False,
         freeze_pixel_blocks: bool = False,
-        pixel_cond_mode: str = "adaln",
-        semantic_cross_attn_window_pixel: int = 3,
         use_bilinear_dw_gelu_project_adaln_pixel: bool = False,
         use_chunked_depthwise_conv_pixel: bool = True,
         first_block_only_adaln_pixel: bool = False,
@@ -459,23 +452,6 @@ class StrataModel(_StrataModelBase):
             ),
             index_is_latlon=semantic_kwargs.get("index_is_latlon", False),
         )
-
-        if pixel_cond_mode not in {"adaln", "cross_attn"}:
-            raise ValueError(
-                "pixel_cond_mode must be one of {'adaln', 'cross_attn'}, "
-                f"got {pixel_cond_mode!r}"
-            )
-        if pixel_cond_mode == "cross_attn" and CROSSATTN_CLS is None:
-            raise NotImplementedError(
-                "pixel_cond_mode='cross_attn' requires the internal screamcast "
-                "backend (strata_backend.CROSSATTN_CLS); it is not part of the "
-                "public STRATA release."
-            )
-        if pixel_cond_mode == "cross_attn" and use_bilinear_dw_gelu_project_adaln_pixel:
-            raise ValueError(
-                "use_bilinear_dw_gelu_project_adaln_pixel is only valid with "
-                "pixel_cond_mode='adaln'"
-            )
 
         self._rope_length_scale_base = _resolve_rope_base(
             semantic_kwargs.get("rope_length_scale")
@@ -519,13 +495,7 @@ class StrataModel(_StrataModelBase):
             bf16_mixed_pixel=do_bf16_mixed_pixel,
             activation_checkpointing_pixel=do_activation_checkpointing_pixel,
         )
-        if pixel_cond_mode == "cross_attn":
-            self.strata = CROSSATTN_CLS(
-                semantic_cross_attn_window=semantic_cross_attn_window_pixel,
-                **strata_kwargs,
-            )
-        else:
-            self.strata = STRATA_CLS(**strata_kwargs)
+        self.strata = Strata(**strata_kwargs)
         _use_tanh_gelu(self.strata)
 
         if semantic_kwargs.get("use_dealiased_patch_embed", False):

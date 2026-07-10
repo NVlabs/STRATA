@@ -226,27 +226,6 @@ def test_dit_pixel_rope_2d_pixel_and_stereographic_conflict():
         )
 
 
-def test_dit_pixel_cross_attn_not_available_in_public():
-    with pytest.raises(NotImplementedError, match="cross_attn"):
-        StrataModel(
-            depth=24,
-            height=64,
-            width=64,
-            patch_size_horiz=4,
-            patch_size_vert=2,
-            in_chans=6,
-            base_out_chans=6,
-            n_layers=2,
-            embed_dim=128,
-            num_heads=2,
-            attn_kernel=3,
-            embed_dim_pixel=64,
-            n_layers_pixel=2,
-            num_heads_pixel=1,
-            pixel_cond_mode="cross_attn",
-        )
-
-
 def test_factory_translation_production_shape():
     """The train factory maps a production-shaped config correctly.
 
