@@ -790,60 +790,54 @@ CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC] = dataclasses.repl
 _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST = (
     "pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_unfreeze_3src_const1em5"
 )
-CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST] = (
-    dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC],
-        experiment=dataclasses.replace(
-            CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC].experiment,
-            name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST,
-            resume_from=_ckpt(_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC),
-            reset_scheduler_state=True,
-            reset_best_valid_loss=True,
-        ),
-        training=dataclasses.replace(
-            CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC].training,
-            lr=1e-5,
-            scheduler_type="constant",
-        ),
-    )
+CONFIGS[
+    _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST
+] = dataclasses.replace(
+    CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC],
+    experiment=dataclasses.replace(
+        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC].experiment,
+        name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST,
+        resume_from=_ckpt(_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC),
+        reset_scheduler_state=True,
+        reset_best_valid_loss=True,
+    ),
+    training=dataclasses.replace(
+        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC].training,
+        lr=1e-5,
+        scheduler_type="constant",
+    ),
 )
 
 _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128 = (
     "pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_unfreeze_3src_const1em5_t128"
 )
-CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128] = (
-    dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST],
-        experiment=dataclasses.replace(
-            CONFIGS[
-                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST
-            ].experiment,
-            name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128,
-            resume_from=_ckpt(
-                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST
-            ),
-            reset_best_valid_loss=True,
-            reset_scheduler_state=True,
-            skip_optimizer_reloading=True,
-        ),
-        training=dataclasses.replace(
-            CONFIGS[
-                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST
-            ].training,
-            lr=1e-5,
-            scheduler_type="warmup_constant",
-            validate_steps=5000,
-            backup_every_steps=500,
-        ),
-        data=dataclasses.replace(
-            CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST].data,
-            tile_size=128,
-        ),
-        dit=dataclasses.replace(
-            CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST].dit,
-            do_activation_checkpointing=1.0,
-        ),
-    )
+CONFIGS[
+    _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
+] = dataclasses.replace(
+    CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST],
+    experiment=dataclasses.replace(
+        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST].experiment,
+        name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128,
+        resume_from=_ckpt(_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST),
+        reset_best_valid_loss=True,
+        reset_scheduler_state=True,
+        skip_optimizer_reloading=True,
+    ),
+    training=dataclasses.replace(
+        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST].training,
+        lr=1e-5,
+        scheduler_type="warmup_constant",
+        validate_steps=5000,
+        backup_every_steps=500,
+    ),
+    data=dataclasses.replace(
+        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST].data,
+        tile_size=128,
+    ),
+    dit=dataclasses.replace(
+        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST].dit,
+        do_activation_checkpointing=1.0,
+    ),
 )
 
 # ---------------------------------------------------------------------------
@@ -855,35 +849,33 @@ CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128] = (
 #   proj weights transfer exactly (only the stride/padding scheme changes).
 # ---------------------------------------------------------------------------
 _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS = "pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_unfreeze_3src_const1em5_t128_dealias"
-CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS] = (
-    dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128],
-        experiment=dataclasses.replace(
-            CONFIGS[
-                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
-            ].experiment,
-            name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS,
-            resume_from=_ckpt(
-                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
-            ),
-            reset_best_valid_loss=True,
-            reset_scheduler_state=True,
-            skip_optimizer_reloading=True,
+CONFIGS[
+    _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS
+] = dataclasses.replace(
+    CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128],
+    experiment=dataclasses.replace(
+        CONFIGS[
+            _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
+        ].experiment,
+        name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS,
+        resume_from=_ckpt(
+            _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
         ),
-        dit=dataclasses.replace(
-            CONFIGS[
-                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
-            ].dit,
-            use_dealiased_patch_embed=True,
-            dealias_resample_filter=(1, 4, 6, 4, 1),
-        ),
-        pixel_dit=dataclasses.replace(
-            CONFIGS[
-                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
-            ].pixel_dit,
-            use_chunked_depthwise_conv=False,
-        ),
-    )
+        reset_best_valid_loss=True,
+        reset_scheduler_state=True,
+        skip_optimizer_reloading=True,
+    ),
+    dit=dataclasses.replace(
+        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128].dit,
+        use_dealiased_patch_embed=True,
+        dealias_resample_filter=(1, 4, 6, 4, 1),
+    ),
+    pixel_dit=dataclasses.replace(
+        CONFIGS[
+            _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
+        ].pixel_dit,
+        use_chunked_depthwise_conv=False,
+    ),
 )
 
 # ---------------------------------------------------------------------------
@@ -896,21 +888,19 @@ CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS]
 _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS_R2 = (
     _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS + "_r2"
 )
-CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS_R2] = (
-    dataclasses.replace(
+CONFIGS[
+    _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS_R2
+] = dataclasses.replace(
+    CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS],
+    experiment=dataclasses.replace(
         CONFIGS[
             _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS
-        ],
-        experiment=dataclasses.replace(
-            CONFIGS[
-                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS
-            ].experiment,
-            name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS_R2,
-            resume_from=_ckpt(
-                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS
-            ),
+        ].experiment,
+        name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS_R2,
+        resume_from=_ckpt(
+            _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS
         ),
-    )
+    ),
 )
 
 # ---------------------------------------------------------------------------
@@ -925,50 +915,46 @@ CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128_DEALIAS_
 #   Training: warmup_constant, lr=1e-4, warmup_steps=5000.
 # ---------------------------------------------------------------------------
 _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_3SRC_T64_PIXSTEREO_CONST1EM4 = "pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_3src_t64_pixstereorope_const1em4"
-CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_3SRC_T64_PIXSTEREO_CONST1EM4] = (
-    dataclasses.replace(
-        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128],
-        experiment=dataclasses.replace(
-            CONFIGS[
-                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
-            ].experiment,
-            name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_3SRC_T64_PIXSTEREO_CONST1EM4,
-            resume_from=None,
-            reset_best_valid_loss=False,
-            reset_scheduler_state=False,
-            skip_optimizer_reloading=False,
-        ),
-        data=dataclasses.replace(
-            CONFIGS[
-                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
-            ].data,
-            tile_size=64,
-            train_zarr_weights=(1.0, 1.0, 1.0),
-            test_stride=48,
-        ),
-        training=dataclasses.replace(
-            CONFIGS[
-                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
-            ].training,
-            lr=1e-4,
-            scheduler_type="warmup_constant",
-            warmup_steps=5000,
-            validate_steps=20000,
-        ),
-        pixel_dit=dataclasses.replace(
-            CONFIGS[
-                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
-            ].pixel_dit,
-            do_rope_2d_stereographic=True,
-            use_chunked_depthwise_conv=False,
-        ),
-        dit=dataclasses.replace(
-            CONFIGS[
-                _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
-            ].dit,
-            do_activation_checkpointing=0.0,
-        ),
-    )
+CONFIGS[
+    _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_3SRC_T64_PIXSTEREO_CONST1EM4
+] = dataclasses.replace(
+    CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128],
+    experiment=dataclasses.replace(
+        CONFIGS[
+            _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
+        ].experiment,
+        name=_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_3SRC_T64_PIXSTEREO_CONST1EM4,
+        resume_from=None,
+        reset_best_valid_loss=False,
+        reset_scheduler_state=False,
+        skip_optimizer_reloading=False,
+    ),
+    data=dataclasses.replace(
+        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128].data,
+        tile_size=64,
+        train_zarr_weights=(1.0, 1.0, 1.0),
+        test_stride=48,
+    ),
+    training=dataclasses.replace(
+        CONFIGS[
+            _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
+        ].training,
+        lr=1e-4,
+        scheduler_type="warmup_constant",
+        warmup_steps=5000,
+        validate_steps=20000,
+    ),
+    pixel_dit=dataclasses.replace(
+        CONFIGS[
+            _EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128
+        ].pixel_dit,
+        do_rope_2d_stereographic=True,
+        use_chunked_depthwise_conv=False,
+    ),
+    dit=dataclasses.replace(
+        CONFIGS[_EXP_PIXELDIT_BILINEAR_DW_GELU_PROJECT_UNFREEZE_3SRC_CONST_T128].dit,
+        do_activation_checkpointing=0.0,
+    ),
 )
 
 # ---------------------------------------------------------------------------
