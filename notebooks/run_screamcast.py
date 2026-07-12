@@ -50,8 +50,8 @@ def _():
 
 @app.cell
 def _(ScreamcastModel):
-    # Point checkpoint_path at your local checkpoint copy — see "Global Rollout"
-    # in README.md for the rclone command that fetches the production checkpoint.
+    # Point checkpoint_path at your local copy of a trained checkpoint (see
+    # "Data, checkpoints, and auxiliary files" in README.md for availability).
     checkpoint_path = "../pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_unfreeze_3src_const1em5_t128_4stepft/output/best.pth"
     domain_size = 256
 

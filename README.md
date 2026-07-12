@@ -22,9 +22,40 @@ scripts, and environment variables keep the project's original name: you import
 
 ## Setup
 
-Install the dependencies that are not already in the base PyTorch image:
+The models need a recent NVIDIA GPU software stack that cannot come from PyPI
+alone: a CUDA-tuned PyTorch build, NVIDIA DALI (data pipelines), Transformer
+Engine, and a NATTEN build that matches the installed torch. The supported
+base environment is the [NGC PyTorch container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch)
+`nvcr.io/nvidia/pytorch:26.01-py3` (a free NGC account is required to pull it).
+
+### Docker (recommended)
+
+Build the training/inference image from the repository root:
+
+    docker build -f docker/Dockerfile -t strata .
+
+The image contains the complete environment, including a from-source NATTEN
+build (set `CUDA_ARCH` in [`docker/build_natten.sh`](docker/build_natten.sh)
+for non-Hopper GPUs) and PhysicsNeMo pinned to a commit that includes the
+Strata models.
+
+### Manual install
+
+Inside an NGC PyTorch `26.01` container (torch, DALI, and Transformer Engine
+ship with it):
 
     make install
+
+Besides `requirements.txt`, this installs three packages that need special
+handling — NATTEN from the per-torch wheel index at `https://whl.natten.org`
+(the wheel must match the installed torch; NGC images need the source build
+in `docker/build_natten.sh` instead), earth2grid from a pinned GitHub archive
+(it is not on PyPI), and PhysicsNeMo from a pinned GitHub archive with
+`--no-deps` (its `torch>=2.10.0` floor would otherwise replace a container's
+pre-release torch build). See the comments in
+[`docker/Dockerfile`](docker/Dockerfile) for the rationale behind each step.
+
+### Data, checkpoints, and auxiliary files
 
 Create a `.env` file at the repository root that points to your data and output
 locations. Copy the template and fill in the values:
@@ -40,6 +71,13 @@ the locations configured in `.env`. The auxiliary files used for training and
 cubed-sphere inference are `latlon_ne1024pg2.nc`, `ne1024pg2_scrip.nc`,
 `ne1024halo256pg2_scrip.nc`, `scream_vertical_coordinate.nc`, and (optionally,
 for the rollout qv-fixer) `ps_mean_cubesphere_day14_r2.nc`.
+
+> **Availability**: the SCREAM zarr dataset, trained model checkpoints, and
+> the auxiliary files other than the shipped
+> `data/scream_vertical_coordinate.nc` are not yet publicly distributed, so
+> the training and rollout workflows below cannot currently run end to end
+> outside NVIDIA. The environment build and the unit test suite (`pytest`)
+> work without them.
 
 ## Training
 
