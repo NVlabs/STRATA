@@ -7,7 +7,11 @@ install-linters:
 	pre-commit install
 
 install:
-	pip install --no-build-isolation -f https://whl.natten.org -r requirements.txt
+	pip install --no-build-isolation -r requirements.txt
+	pip install -f https://whl.natten.org "natten>=0.21.5"
+	pip install --no-deps --no-build-isolation https://github.com/NVlabs/earth2grid/archive/3415382a37e414a867d4c6ae2519e3e8afdbece1.tar.gz
+	pip install "warp-lang>=1.14" jaxtyping
+	pip install --no-deps https://github.com/NVIDIA/physicsnemo/archive/07cdcc8b65f10bee733a32a77b4b76e20c70c54c.tar.gz
 
 lint:
 	python3 ci/check_licenses.py

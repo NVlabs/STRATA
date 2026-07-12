@@ -1,18 +1,25 @@
+# Plain-pip dependencies. Three packages need flags a requirements file
+# cannot express and are installed as separate `make install` steps (see the
+# Makefile and docker/Dockerfile):
+#   - natten     (wheel must match the installed torch: -f https://whl.natten.org,
+#                 or the source build in docker/build_natten.sh on NGC images)
+#   - earth2grid (not on PyPI; pinned GitHub archive, --no-deps)
+#   - nvidia-physicsnemo (pinned GitHub archive with the Strata models;
+#                 --no-deps so its torch>=2.10.0 floor cannot replace a
+#                 container's pre-release torch build)
 lightning==2.4.0
 multi-storage-client[boto3]
 torchmetrics
-earth2grid
 # to avoid errors
 boto3==1.35.23
 python-dotenv
 s3fs
 xarray
-natten>=0.21.5  # build must match the installed torch (>=2.10)
-https://github.com/NVIDIA/physicsnemo/archive/07cdcc8b65f10bee733a32a77b4b76e20c70c54c.tar.gz # main 2026-07, includes Strata models (PR #1750)
-guildai
 cartopy
 lmdb
 pytorch-optimizer
 netCDF4
 numba
+typer
+wandb
 zarr>=3

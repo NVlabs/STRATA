@@ -15,4 +15,4 @@
 apt update
 apt install -y ffmpeg
 
-pip install --no-build-isolation -r ./requirements.txt
+make install
