@@ -21,8 +21,9 @@
 #
 # The NGC PyTorch base image provides the pieces that cannot come from PyPI:
 # a CUDA-tuned torch build, NVIDIA DALI (data pipelines), and Transformer
-# Engine. Everything below is layered on top of it. Pulling the base image
-# requires a (free) NGC account: https://catalog.ngc.nvidia.com
+# Engine. Everything below is layered on top of it. Anonymous pulls of the
+# base image generally work; a free NGC account may be required depending on
+# NGC policy: https://catalog.ngc.nvidia.com
 FROM nvcr.io/nvidia/pytorch:26.01-py3
 
 ENV PIP_NO_CACHE_DIR=1 \
@@ -85,10 +86,12 @@ RUN python3 -m pip install --no-cache-dir --prefer-binary \
     dask \
     gcsfs \
     h5netcdf \
+    h5py \
     imageio \
     imageio_ffmpeg \
     loguru \
     moviepy \
+    omegaconf \
     plotly \
     pygrib \
     "setuptools<81" \
@@ -107,10 +110,27 @@ RUN python3 -m pip install --no-cache-dir --prefer-binary marimo
 # not have it yet). --no-deps is REQUIRED: physicsnemo declares
 # torch>=2.10.0, and the NGC torch is a PEP 440 PRE-release that pip
 # considers older, so a plain install would replace the container's torch.
-# warp-lang >= 1.14 and jaxtyping are the runtime deps that --no-deps skips.
+# The import of physicsnemo.experimental.models.strata transitively pulls in
+# all of physicsnemo.nn, which needs warp, tensordict and timm at import
+# time; tensordict/timm declare their own torch/torchvision floors, so they
+# get the same --no-deps treatment, with their pure-Python runtime deps
+# installed explicitly first.
 RUN python3 -m pip install --no-cache-dir --prefer-binary \
     "warp-lang>=1.14" \
-    jaxtyping
+    jaxtyping \
+    cloudpickle \
+    importlib_metadata \
+    packaging \
+    pyvers \
+    huggingface_hub \
+    safetensors \
+    pyyaml
+# NB: tensordict declares orjson, but only as an optional accelerated JSON
+# backend imported lazily (stdlib json is the registered default) — verified
+# import-clean without it, so it is deliberately NOT installed (MPL-2.0).
+RUN python3 -m pip install --no-cache-dir --prefer-binary --no-deps \
+    tensordict \
+    timm
 RUN python3 -m pip uninstall -y nvidia-physicsnemo || true
 RUN python3 -m pip install --no-cache-dir --no-deps \
     https://github.com/NVIDIA/physicsnemo/archive/07cdcc8b65f10bee733a32a77b4b76e20c70c54c.tar.gz

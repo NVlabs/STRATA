@@ -160,6 +160,7 @@ python-dotenv,1.2.2,BSD-3-Clause,https://github.com/theskumar/python-dotenv
 pytorch-lightning,2.6.1,Apache Software License,https://github.com/Lightning-AI/lightning
 pytorch_optimizer,3.10.0,Apache Software License,https://pypi.org/project/pytorch-optimizer/3.10.0/
 pytz,2026.1.post1,MIT License,http://pythonhosted.org/pytz
+pyvers,0.2.3,MIT,https://pypi.org/project/pyvers/
 pyzmq,27.1.0,BSD License,https://pyzmq.readthedocs.org
 rdkit,2026.3.1,BSD-3-Clause,https://github.com/kuelumbus/rdkit-pypi
 referencing,0.37.0,MIT,https://github.com/python-jsonschema/referencing
@@ -186,6 +187,7 @@ sympy,1.14.0,BSD License,https://sympy.org
 tblib,3.2.2,BSD-2-Clause,https://python-tblib.readthedocs.io/en/latest/changelog.html
 tensorboard,2.20.0,Apache Software License,https://github.com/tensorflow/tensorboard
 tensorboard-data-server,0.7.2,Apache Software License,https://github.com/tensorflow/tensorboard/tree/master/tensorboard/data/server
+tensordict,0.13.0,BSD License,https://github.com/pytorch/tensordict
 tensorly,0.9.0,BSD License,https://github.com/tensorly/tensorly
 tensorly-torch,0.5.0,BSD License,https://github.com/tensorly/tensorly-torch
 timm,1.0.26,Apache Software License,https://github.com/huggingface/pytorch-image-models

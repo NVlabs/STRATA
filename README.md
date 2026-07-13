@@ -26,7 +26,8 @@ The models need a recent NVIDIA GPU software stack that cannot come from PyPI
 alone: a CUDA-tuned PyTorch build, NVIDIA DALI (data pipelines), Transformer
 Engine, and a NATTEN build that matches the installed torch. The supported
 base environment is the [NGC PyTorch container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch)
-`nvcr.io/nvidia/pytorch:26.01-py3` (a free NGC account is required to pull it).
+`nvcr.io/nvidia/pytorch:26.01-py3` (anonymous pulls generally work; a free
+NGC account may be required depending on NGC policy).
 
 ### Docker (recommended)
 
