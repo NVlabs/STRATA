@@ -85,8 +85,8 @@ including auxiliary/support code:
    (`screamcast/dali_ext_src.py`) and inference code open zarr/netCDF/`np.load`
    inputs and YAML. Crafted input files could trigger parser or deserialization
    flaws, or cause resource exhaustion.
-4. **Supply-chain compromise of dependencies:** `nvidia-modulus` is installed from
-   a third-party source archive and `natten` from a custom wheel index. A
+4. **Supply-chain compromise of dependencies:** `nvidia-physicsnemo` is installed
+   from a pinned GitHub source archive and `natten` from a custom wheel index. A
    compromised or relocated upstream could inject code at install time.
 5. **Credential exposure via configuration or telemetry:** experiment-logging and
    object-store credentials are supplied through the environment and a local

@@ -48,9 +48,12 @@ from screamcast.constructors import (
     get_warmup_constant_schedule,
 )
 from screamcast.dali_ext_src import ScreamV2
-from screamcast.dit_3d import DiT
 from screamcast.normalization import RunningNorm2d
 from screamcast.pipelines import get_dataloader
+from screamcast.strata_wrappers import (
+    StrataBackboneModel,
+    StrataModel,
+)
 
 
 def print_network_info(model):
@@ -98,26 +101,24 @@ def _dit_common_kwargs(
     do_bf16_mixed: bool,
     depth_levels: int,
     wind_channel_indices: tuple[int, int] | None = None,
-    wind_channel_indices_dual: tuple[int, int] | None = None,
     grid_type: str = "healpix",
     cubesphere_latlon_path: str | None = None,
 ) -> dict:
-    """Return kwargs dict shared by DiT3D and DiT3DPixel."""
+    """Return kwargs dict shared by build_backbone and build_strata."""
     return dict(
         depth=depth_levels,
         height=tile_size,
         width=tile_size,
         patch_size=dit_cfg.patch_size,
-        patch_size_vert=None
-        if dit_cfg.patch_size_vert < 0
-        else dit_cfg.patch_size_vert,
-        patch_size_horiz=None
-        if dit_cfg.patch_size_horiz < 0
-        else dit_cfg.patch_size_horiz,
+        patch_size_vert=(
+            None if dit_cfg.patch_size_vert < 0 else dit_cfg.patch_size_vert
+        ),
+        patch_size_horiz=(
+            None if dit_cfg.patch_size_horiz < 0 else dit_cfg.patch_size_horiz
+        ),
         in_chans=in_channels,
         base_out_chans=out_channels,
         nside=nside,
-        frequency_embed_dim=tile_size,
         do_alt_depthwise_attn=dit_cfg.do_alt_depthwise_attn,
         do_interleaved_dilation=dit_cfg.do_interleaved_dilation,
         na_dilations=dit_cfg.na_dilations,
@@ -126,6 +127,7 @@ def _dit_common_kwargs(
         num_heads=dit_cfg.num_heads,
         attn_kernel=dit_cfg.attn_kernel,
         do_rope_2d=dit_cfg.do_rope_2d,
+        rope_length_scale=dit_cfg.rope_length_scale or None,
         do_concat_latitude=True,
         qk_norm=dit_cfg.qk_norm,
         qk_norm_elementwise_affine=dit_cfg.qk_norm_elementwise_affine,
@@ -137,7 +139,6 @@ def _dit_common_kwargs(
         gated_attention=dit_cfg.gated_attention,
         grid_type=grid_type,
         cubesphere_latlon_path=cubesphere_latlon_path,
-        wind_channel_indices_dual=wind_channel_indices_dual,
         index_is_latlon=dit_cfg.index_is_latlon,
         na3d_backend=dit_cfg.na3d_backend or None,
         use_dealiased_patch_embed=dit_cfg.use_dealiased_patch_embed,
@@ -145,7 +146,7 @@ def _dit_common_kwargs(
     )
 
 
-def DiT3D(
+def build_backbone(
     in_channels: int,
     out_channels: int,
     nside: int,
@@ -154,11 +155,10 @@ def DiT3D(
     do_bf16_mixed: bool,
     depth_levels: int,
     wind_channel_indices: tuple[int, int] | None = None,
-    wind_channel_indices_dual: tuple[int, int] | None = None,
     grid_type: str = "healpix",
     cubesphere_latlon_path: str | None = None,
 ):
-    return DiT(
+    return StrataBackboneModel(
         **_dit_common_kwargs(
             in_channels,
             out_channels,
@@ -168,14 +168,13 @@ def DiT3D(
             do_bf16_mixed,
             depth_levels,
             wind_channel_indices,
-            wind_channel_indices_dual,
             grid_type,
             cubesphere_latlon_path,
         )
     )
 
 
-def DiT3DPixel(
+def build_strata(
     in_channels: int,
     out_channels: int,
     nside: int,
@@ -185,13 +184,10 @@ def DiT3DPixel(
     do_bf16_mixed: bool,
     depth_levels: int,
     wind_channel_indices: tuple[int, int] | None = None,
-    wind_channel_indices_dual: tuple[int, int] | None = None,
     grid_type: str = "healpix",
     cubesphere_latlon_path: str | None = None,
 ):
-    from screamcast.dit_3d_pixel import DiT_Pixel
-
-    return DiT_Pixel(
+    return StrataModel(
         **_dit_common_kwargs(
             in_channels,
             out_channels,
@@ -201,7 +197,6 @@ def DiT3DPixel(
             do_bf16_mixed,
             depth_levels,
             wind_channel_indices,
-            wind_channel_indices_dual,
             grid_type,
             cubesphere_latlon_path,
         ),
@@ -231,22 +226,50 @@ def _pixel_blocks_adaln_changed(checkpoint_path: str, model: torch.nn.Module) ->
     have co-adapted to different conditioning and should be reinitialized.
     Only called on foreign checkpoint loads (not latest.pth resume).
     """
+    from screamcast.checkpoint_compat import (
+        _strip_wrapper_prefixes,
+        remap_legacy_state_dict,
+    )
+
     try:
         ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-        ckpt_keys = set(ckpt.get("network", {}).keys())
+        network_sd = ckpt.get("network", {})
+        # Compare in migrated key space so legacy checkpoints (semantic./
+        # _pixel_blocks./_orig_mod. keys) are judged correctly.
+        network_sd, _ = remap_legacy_state_dict(dict(network_sd))
+        ckpt_keys = set(network_sd.keys())
     except Exception:
+        logging.exception(
+            "Could not read/remap %s to judge whether the pixel adaln path "
+            "changed; assuming it did NOT (pixel blocks keep their loaded "
+            "weights). If this checkpoint switches adaln modes, reinitialize "
+            "the pixel blocks manually.",
+            checkpoint_path,
+        )
         return False
 
     if not ckpt_keys:
         return False
 
+    # Under torch.compile the model's parameter names carry _orig_mod. while
+    # the remapped checkpoint keys never do; compare bare names.
+    stripped_names = [
+        _strip_wrapper_prefixes(name) for name, _ in model.named_parameters()
+    ]
     current_adaln_keys = {
-        name
-        for name, _ in model.named_parameters()
-        if "_pixel_blocks" in name and "adaln" in name
+        name for name in stripped_names if "pixel_blocks" in name and "adaln" in name
     }
 
     if not current_adaln_keys:
+        if any("pixel_blocks" in name for name in stripped_names):
+            # Every public pixel config (plain, bilinear_dw, first-block-only)
+            # has adaln-named params in its pixel blocks; matching none means
+            # the physicsnemo naming this heuristic relies on has changed.
+            raise RuntimeError(
+                "model has pixel_blocks parameters but none matched the "
+                "'adaln' naming pattern — the physicsnemo parameter naming "
+                "contract changed; update _pixel_blocks_adaln_changed."
+            )
         return False
 
     # If none of the current adaln keys exist in the checkpoint → path changed
@@ -261,7 +284,7 @@ def _reinit_pixel_blocks(model: torch.nn.Module) -> None:
     fresh init avoids a stale prior. After reinit, adaln-zero is re-applied so blocks
     start as identity regardless of the new conditioning signal.
     """
-    for block in model._pixel_blocks:
+    for block in model.strata.pixel_blocks:
         for m in block.modules():
             if hasattr(m, "reset_parameters"):
                 m.reset_parameters()
@@ -395,7 +418,7 @@ def train(
         if cfg.experiment.model_type == "pixeldit":
             if cfg.pixel_dit is None:
                 raise ValueError("model_type='pixeldit' requires pixel_dit config")
-            network = DiT3DPixel(
+            network = build_strata(
                 in_channels_3d,
                 out_channels_3d,
                 nside,
@@ -406,12 +429,12 @@ def train(
                 depth_levels=num_depth_levels,
                 wind_channel_indices=dit_wind_channel_indices,
                 grid_type=grid_type,
-                cubesphere_latlon_path=cfg.data.latlon_path
-                if grid_type == "cubesphere"
-                else None,
+                cubesphere_latlon_path=(
+                    cfg.data.latlon_path if grid_type == "cubesphere" else None
+                ),
             )
         else:
-            network = DiT3D(
+            network = build_backbone(
                 in_channels_3d,
                 out_channels_3d,
                 nside,
@@ -421,9 +444,9 @@ def train(
                 depth_levels=num_depth_levels,
                 wind_channel_indices=dit_wind_channel_indices,
                 grid_type=grid_type,
-                cubesphere_latlon_path=cfg.data.latlon_path
-                if grid_type == "cubesphere"
-                else None,
+                cubesphere_latlon_path=(
+                    cfg.data.latlon_path if grid_type == "cubesphere" else None
+                ),
             )
     else:
         raise ValueError(
@@ -1179,9 +1202,11 @@ def train(
                         )
                 writer.add_scalar(
                     "lr_per_step",
-                    cfg.training.lr
-                    if scheduler is None
-                    else optimizer.param_groups[0]["lr"],
+                    (
+                        cfg.training.lr
+                        if scheduler is None
+                        else optimizer.param_groups[0]["lr"]
+                    ),
                     global_step=nimg,
                 )
                 writer.add_scalar("grad_norm", grad_norm.item(), global_step=nimg)
@@ -1297,9 +1322,9 @@ def train(
                             loader=backtest_dataloader,
                             device=fabric.device,
                             channel_index=ds.channel_index_output(),
-                            output_dir=f"scores/{nimg}/"
-                            if fabric.global_rank == 0
-                            else "",
+                            output_dir=(
+                                f"scores/{nimg}/" if fabric.global_rank == 0 else ""
+                            ),
                             min_samples=cfg.training.validate_min_samples,
                             writer=writer,
                             nimg=nimg,

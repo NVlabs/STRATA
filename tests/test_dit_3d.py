@@ -17,16 +17,16 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from screamcast.dit_3d import DealiasedPatchEmbed3D, DiT, PatchEmbed3D
-from screamcast.dit_3d_pixel import DiT_Pixel
+from screamcast.dealias import DealiasedPatchEmbed3D
+from screamcast.strata_wrappers import StrataBackboneModel, StrataModel
 
 
-def _make_pixel_dit(tile_size: int = 64) -> DiT_Pixel:
+def _make_pixel_dit(tile_size: int = 64) -> StrataModel:
     # depth=12, patch_size_vert=2 → 6 depth tokens; attn_kernel=3 requires ≥3.
     # do_rope_2d=True precomputes RoPE for (tile_size/patch_horiz)^2 * depth tokens,
     # so feeding a larger spatial domain raises RuntimeError (the bug we test).
     D, PH, PV = 12, 4, 2
-    return DiT_Pixel(
+    return StrataModel(
         depth=D,
         height=tile_size,
         width=tile_size,
@@ -55,7 +55,7 @@ def _healpix_index(h: int, w: int) -> torch.Tensor:
 
 
 def test_pixel_dit_tile_size_passes():
-    """DiT_Pixel forward works for the tile size it was built with."""
+    """StrataModel forward works for the tile size it was built with."""
     model = _make_pixel_dit(tile_size=64)
     x = torch.randn(1, 6, 12, 64, 64).cuda()
     y = model(x, _healpix_index(64, 64))
@@ -75,7 +75,7 @@ def test_pixel_dit_set_tile_size():
 def test_pixel_dit_set_tile_size_refreshes_pixel_rope():
     """set_tile_size refreshes the pixel-pathway RoPE buffer when do_rope_2d_pixel=True."""
     D, PH, PV = 12, 4, 2
-    model = DiT_Pixel(
+    model = StrataModel(
         depth=D,
         height=64,
         width=64,
@@ -96,16 +96,54 @@ def test_pixel_dit_set_tile_size_refreshes_pixel_rope():
         grid_type="healpix",
         nside=512,
     ).cuda()
-    assert model._rope_cos_pixel.shape[-2] == D * 64 * 64
+    assert model.strata._rope_cos_pixel.shape[-2] == D * 64 * 64
     model.set_tile_size(128, 128)
-    assert model._rope_cos_pixel.shape[-2] == D * 128 * 128
+    assert model.strata._rope_cos_pixel.shape[-2] == D * 128 * 128
     x = torch.randn(1, 6, D, 128, 128).cuda()
     y = model(x, _healpix_index(128, 128))
     assert y.shape == x.shape
 
 
+def test_pixel_dit_set_tile_size_matches_fresh_construction():
+    """The mirrored pixel-RoPE rebuild must equal construction at the new size.
+
+    set_tile_size re-implements physicsnemo's construction-time pixel table
+    build (Strata has no re-tiling hook); this pins the two code paths to
+    each other so a physicsnemo pin bump that changes the recipe fails here
+    instead of silently corrupting retiled inference. CPU-only on purpose.
+    """
+
+    def _build(h: int, w: int) -> StrataModel:
+        return StrataModel(
+            depth=12,
+            height=h,
+            width=w,
+            patch_size_horiz=4,
+            patch_size_vert=2,
+            in_chans=6,
+            base_out_chans=6,
+            n_layers=1,
+            embed_dim=64,
+            num_heads=2,
+            attn_kernel=3,
+            embed_dim_pixel=32,
+            n_layers_pixel=1,
+            num_heads_pixel=1,
+            do_rope_2d_pixel=True,
+            grid_type="healpix",
+            nside=512,
+        )
+
+    retiled = _build(64, 64)
+    retiled.set_tile_size(128, 128)
+    fresh = _build(128, 128)
+    assert torch.equal(retiled.strata._rope_cos_pixel, fresh.strata._rope_cos_pixel)
+    assert torch.equal(retiled.strata._rope_sin_pixel, fresh.strata._rope_sin_pixel)
+    assert retiled._height == fresh._height == 128
+
+
 def test_dit_3d():
-    model = DiT(
+    model = StrataBackboneModel(
         depth=32,
         height=64,
         width=64,
@@ -123,7 +161,7 @@ def test_dit_3d():
 
 
 def test_dit_3d_stereographic():
-    model = DiT(
+    model = StrataBackboneModel(
         depth=32,
         height=64,
         width=64,
@@ -144,17 +182,25 @@ def test_dit_3d_stereographic():
 
 
 def _checkpoint_set(ratio: float, n_blocks: int, training: bool = True) -> set[int]:
-    """Call DiT._should_checkpoint_block against a minimal stub.
+    """Call StrataTransformer3D._should_checkpoint_block against a minimal stub.
 
     The method only reads three attributes, so we can avoid the cost of
-    building a real DiT (CUDA + weight init).
+    building a real model (CUDA + weight init). Guards the checkpointing-ratio
+    semantics the wrapper's disable_activation_checkpointing relies on across
+    physicsnemo pin bumps.
     """
+    from physicsnemo.experimental.models.strata import StrataTransformer3D
+
     stub = SimpleNamespace(
         training=training,
         _activation_checkpointing_ratio=ratio,
-        _blocks=[None] * n_blocks,
+        blocks=[None] * n_blocks,
     )
-    return {i for i in range(n_blocks) if DiT._should_checkpoint_block(stub, i)}
+    return {
+        i
+        for i in range(n_blocks)
+        if StrataTransformer3D._should_checkpoint_block(stub, i)
+    }
 
 
 def test_should_checkpoint_block_eval_mode_skips_all():
@@ -246,6 +292,8 @@ def test_dealiased_patch_embed_pd1_no_vertical_mixing():
 def test_dealiased_patch_embed_all_ones_matches_vanilla():
     # patch_size=(1,1,1) means no axis is decimated → filter is all-identity →
     # output should equal vanilla PatchEmbed3D output when proj weights match.
+    from physicsnemo.experimental.models.strata.layers import PatchEmbed3D
+
     D, H, W = 4, 8, 8
     vanilla = PatchEmbed3D(D, H, W, patch_size=1, in_chans=3, embed_dim=8)
     dealias = DealiasedPatchEmbed3D(

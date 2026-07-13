@@ -2,9 +2,16 @@
 
 Strata is a deep-learning weather emulator for the
 [SCREAM](https://e3sm.org/scream/) global atmosphere model. It trains
-transformer-based neural networks (DiT3D / PixelDiT) to emulate SCREAM
-atmospheric physics on the cubed-sphere grid and supports multi-day global
-forecasting.
+transformer-based neural networks to emulate SCREAM atmospheric physics on
+the cubed-sphere grid and supports multi-day global forecasting.
+
+The Strata architecture (a two-stage 3D neighborhood-attention transformer
+with stereographic rotary position embeddings) lives in
+[NVIDIA PhysicsNeMo](https://github.com/NVIDIA/physicsnemo) as
+`physicsnemo.experimental.models.strata`. This repository adds the
+SCREAM-specific pieces around it: spherical tile geometry, tile-local wind
+rotation, data pipelines, training configs, and rollout/inference tooling
+(see `screamcast/strata_wrappers.py`).
 
 The public release is named *Strata*, but the Python package, command-line
 scripts, and environment variables keep the project's original name: you import
@@ -15,9 +22,41 @@ scripts, and environment variables keep the project's original name: you import
 
 ## Setup
 
-Install the dependencies that are not already in the base PyTorch image:
+The models need a recent NVIDIA GPU software stack that cannot come from PyPI
+alone: a CUDA-tuned PyTorch build, NVIDIA DALI (data pipelines), Transformer
+Engine, and a NATTEN build that matches the installed torch. The supported
+base environment is the [NGC PyTorch container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch)
+`nvcr.io/nvidia/pytorch:26.01-py3` (anonymous pulls generally work; a free
+NGC account may be required depending on NGC policy).
+
+### Docker (recommended)
+
+Build the training/inference image from the repository root:
+
+    docker build -f docker/Dockerfile -t strata .
+
+The image contains the complete environment, including a from-source NATTEN
+build (set `CUDA_ARCH` in [`docker/build_natten.sh`](docker/build_natten.sh)
+for non-Hopper GPUs) and PhysicsNeMo pinned to a commit that includes the
+Strata models.
+
+### Manual install
+
+Inside an NGC PyTorch `26.01` container (torch, DALI, and Transformer Engine
+ship with it):
 
     make install
+
+Besides `requirements.txt`, this installs three packages that need special
+handling — NATTEN from the per-torch wheel index at `https://whl.natten.org`
+(the wheel must match the installed torch; NGC images need the source build
+in `docker/build_natten.sh` instead), earth2grid from a pinned GitHub archive
+(it is not on PyPI), and PhysicsNeMo from a pinned GitHub archive with
+`--no-deps` (its `torch>=2.10.0` floor would otherwise replace a container's
+pre-release torch build). See the comments in
+[`docker/Dockerfile`](docker/Dockerfile) for the rationale behind each step.
+
+### Data, checkpoints, and auxiliary files
 
 Create a `.env` file at the repository root that points to your data and output
 locations. Copy the template and fill in the values:
@@ -28,11 +67,53 @@ The key variables are `PROJECT_ROOT` (training and rollout outputs are written
 here), `ZARR_ROOT` (the SCREAM zarr dataset), `AUX_DATA_ROOT` (auxiliary files,
 below), and `WANDB_API_KEY` (experiment logging).
 
-Place the SCREAM zarr dataset, a model checkpoint, and the auxiliary files under
-the locations configured in `.env`. The auxiliary files used for training and
-cubed-sphere inference are `latlon_ne1024pg2.nc`, `ne1024pg2_scrip.nc`,
-`ne1024halo256pg2_scrip.nc`, `scream_vertical_coordinate.nc`, and (optionally,
-for the rollout qv-fixer) `ps_mean_cubesphere_day14_r2.nc`.
+The SCREAM training dataset (cubed-sphere zarr v3 stores) is published on
+Hugging Face as three dataset repositories — a 14-day simulation
+(*sdecadal*) plus two 7-day simulations (*sdy1*, *sdy2*) used as the
+additional sources in the three-source training configs:
+
+- [nvidia/STRATA-SCREAM-sdecadal](https://huggingface.co/datasets/nvidia/STRATA-SCREAM-sdecadal) — 14 days, 10-minute steps
+- [nvidia/STRATA-SCREAM-sdy1](https://huggingface.co/datasets/nvidia/STRATA-SCREAM-sdy1) — 7 days, 10-minute steps
+- [nvidia/STRATA-SCREAM-sdy2](https://huggingface.co/datasets/nvidia/STRATA-SCREAM-sdy2) — 7 days, 10-minute steps
+
+Each repository is the zarr store itself, so it can be read directly over
+HTTP via `huggingface_hub`'s fsspec filesystem (installed in the Docker
+image) — convenient for exploration without downloading ~TB of data:
+
+```python
+import xarray as xr
+
+ds = xr.open_zarr("hf://datasets/nvidia/STRATA-SCREAM-sdy1")
+ds["T_2m"].isel(time=500, ncol=slice(0, 100)).values  # streams just the chunks it needs
+```
+
+For training, download the stores instead (e.g. with `huggingface-cli
+download`) — the dataloader reads tiles at a rate that HTTP streaming cannot
+sustain — and place each under `ZARR_ROOT` with the directory name the
+training configs expect (see `_ZARR_SDECADAL` / `_ZARR_SDY1` / `_ZARR_SDY2`
+in `train_configs.py`), e.g.
+`$ZARR_ROOT/sdecadal.ne1024pg2_ne1024pg2.F20TR-SCREAMv1.c10-sep11.out10min.cubesphere.zarr`.
+(Setting `ZARR_ROOT` itself to an `hf://` prefix does not work: the configs
+join it with the original store names, which differ from the Hugging Face
+repository names.)
+
+The auxiliary files used for training and cubed-sphere inference are
+`latlon_ne1024pg2.nc`, `ne1024pg2_scrip.nc`, `ne1024halo256pg2_scrip.nc`,
+and `scream_vertical_coordinate.nc`; place them under `AUX_DATA_ROOT`.
+`scream_vertical_coordinate.nc` ships in `data/`; the other three are
+generated from scratch (pure numpy + netCDF4, ~15 minutes) by
+
+    bash data_prep/scrip_generation/generate_all.sh --output-dir <AUX_DATA_ROOT>
+
+(see [`data_prep/scrip_generation/`](data_prep/scrip_generation/); the
+derived `latlon_ne1024pg2.nc` is bit-identical to the file the shipped
+configs were trained with).
+
+> **Availability**: trained model checkpoints are not yet publicly
+> distributed, so the rollout-from-checkpoint workflows below cannot
+> currently run end to end outside NVIDIA. Training from scratch is fully
+> reproducible: dataset (Hugging Face, above), auxiliary files (generated,
+> above), and environment (Docker, above) are all public.
 
 ## Training
 

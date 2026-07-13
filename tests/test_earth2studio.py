@@ -31,10 +31,10 @@ if "PROJECT_ROOT" not in os.environ:
     pytest.skip("PROJECT_ROOT is not configured", allow_module_level=True)
 
 from screamcast.dali_ext_src import ScreamV2
-from screamcast.dit_3d import DiT
 from screamcast.earth2studio_wrappers import ScreamcastModel
 from screamcast.model_pipelines import MixedPredictionAsymmetric
 from screamcast.normalization import RunningNorm2d
+from screamcast.strata_wrappers import StrataBackboneModel
 
 # ---------------------------------------------------------------------------
 # Minimal model parameters shared across wrapper tests
@@ -50,7 +50,9 @@ _TILE_SIZE = 8
 _NSIDE = 512
 
 
-def _make_screamcast_model(tile_size: int = _TILE_SIZE) -> ScreamcastModel:
+def _make_screamcast_model(
+    tile_size: int = _TILE_SIZE, with_latlon: bool = True
+) -> ScreamcastModel:
     """Construct a tiny untrained ScreamcastModel, mirroring training initialization."""
     levels = np.arange(_LEVEL_START, _LEVEL_END, _PLEVEL)
     num_depth_levels = len(levels)
@@ -64,7 +66,7 @@ def _make_screamcast_model(tile_size: int = _TILE_SIZE) -> ScreamcastModel:
 
     # Build a tiny DiT (same factory as training) with do_concat_latitude=False
     # so no spatial index is needed for this untrained wrapper test.
-    network = DiT(
+    network = StrataBackboneModel(
         depth=num_depth_levels,
         height=tile_size,
         width=tile_size,
@@ -78,7 +80,9 @@ def _make_screamcast_model(tile_size: int = _TILE_SIZE) -> ScreamcastModel:
         attn_kernel=3,
         do_rope_2d=False,
         do_concat_latitude=False,
-        frequency_embed_dim=tile_size,
+        # The earth2studio wrapper supplies the spatial index as a
+        # {"lat","lon"} dict (production configs run this way too).
+        index_is_latlon=True,
         grid_type="healpix",
     )
 
@@ -97,6 +101,16 @@ def _make_screamcast_model(tile_size: int = _TILE_SIZE) -> ScreamcastModel:
     )
     pipeline.eval()
 
+    # Synthetic per-face lat/lon (degrees) — required by the wrapper to
+    # compute the autonomous coszr forcing at forward time.
+    if with_latlon:
+        lat = torch.linspace(-60.0, 60.0, tile_size)
+        lon = torch.linspace(0.0, 350.0, tile_size)
+        grid = torch.stack(torch.meshgrid(lat, lon, indexing="ij"), dim=-1)
+        latlon = grid.unsqueeze(0).expand(6, -1, -1, -1).contiguous()
+    else:
+        latlon = None
+
     return ScreamcastModel(
         pipeline=pipeline,
         tile_size=tile_size,
@@ -104,6 +118,7 @@ def _make_screamcast_model(tile_size: int = _TILE_SIZE) -> ScreamcastModel:
         variables_prognostic=_VARS_PROG,
         variables_forcing=_VARS_FORC,
         variables_diagnostic=_VARS_DIAG,
+        latlon=latlon,
     )
 
 
@@ -122,8 +137,10 @@ def test_wrapper_input_coords():
     assert len(coords["face"]) == 6
     assert coords["lead_time"][0] == np.timedelta64(0, "ns")
 
-    # Input variables: prognostic + forcing (all 2D, so no level suffix)
-    expected_vars = list(_VARS_PROG) + list(_VARS_FORC)
+    # Input variables: prognostic state only (all 2D, so no level suffix).
+    # Forcing channels are appended internally by the wrapper — coszr is an
+    # autonomous forcing computed from time + latlon, never a caller input.
+    expected_vars = list(_VARS_PROG)
     assert list(coords["variable"]) == expected_vars
 
 
@@ -275,7 +292,7 @@ def test_reset_latlon_restores_original():
 
 
 def test_reset_latlon_raises_without_src():
-    model = _make_screamcast_model()
+    model = _make_screamcast_model(with_latlon=False)
     with pytest.raises(ValueError, match="reset_latlon"):
         model.reset_latlon()
 
@@ -304,19 +321,27 @@ def test_create_iterator_updates_coszr_when_time_present():
 
     seen_coords = []
 
-    def fake_update_coszr(self, x_in, coords_in):
+    def fake_build_full_input(self, x_in, coords_in):
+        # Record the coords the forcing build sees, then append a zero
+        # channel in place of the real coszr so the pipeline still gets the
+        # full prognostic+forcing channel count.
         seen_coords.append((coords_in["time"][0], coords_in["lead_time"][0]))
-        return x_in
+        return torch.cat([x_in, torch.zeros_like(x_in[:, :1])], dim=1)
 
-    model.update_coszr = MethodType(fake_update_coszr, model)
+    model._build_full_input = MethodType(fake_build_full_input, model)
 
     iterator = model.create_iterator(x, coords)
-    next(iterator)
-    next(iterator)
+    _, coords0 = next(iterator)  # initial condition: no forcing build
+    _, coords1 = next(iterator)  # first advance
 
+    # The forcing (coszr) is built at the INPUT valid time (time + current
+    # lead_time, i.e. +0s on the first step); the yielded output then carries
+    # the advanced lead time.
     assert seen_coords == [
-        (np.datetime64("2020-10-13T00:00:00"), np.timedelta64(600, "s"))
+        (np.datetime64("2020-10-13T00:00:00"), np.timedelta64(0, "ns"))
     ]
+    assert coords0["lead_time"][0] == np.timedelta64(0, "ns")
+    assert coords1["lead_time"][0] == np.timedelta64(600, "s")
 
 
 def test_persistence_model_matches_screamcast_metadata():
@@ -366,7 +391,10 @@ def test_persistence_iterator_advances_lead_time():
     x1, coords1 = next(iterator)
 
     assert torch.equal(x0[:, : persistence._n_prog_channels], x)
-    assert (x0[:, persistence._n_prog_channels :] == 0).all()
+    # Initial yield: diagnostics do not exist on the input state and are
+    # NaN-filled by contract (see _default_generator); the persistence step
+    # itself then zeros them.
+    assert x0[:, persistence._n_prog_channels :].isnan().all()
     assert torch.equal(x1[:, : persistence._n_prog_channels], x)
     assert (x1[:, persistence._n_prog_channels :] == 0).all()
     assert coords0["lead_time"][0] == np.timedelta64(0, "ns")

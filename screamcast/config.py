@@ -109,6 +109,14 @@ class DiTConfig:
     index_is_latlon: bool = False
 
     # Dealiased patch embedding (shift-invariant PatchEmbed3D)
+    # Stereographic-RoPE coordinate unit: radians per RoPE phase unit, per
+    # FINE PIXEL (the backbone stage multiplies by patch_size_horiz, the
+    # pixel/cross-attention stages use it directly). 0 = the historical
+    # default, sqrt(pi/(3*1024**2)) per pixel (a HEALPix-nside-1024 unit
+    # every shipped checkpoint was trained with — leave at 0 to reproduce
+    # them bit-exactly). Override for grids of a different density, e.g. the
+    # target grid's pixel spacing sqrt(4*pi/ncol).
+    rope_length_scale: float = 0.0
     use_dealiased_patch_embed: bool = False
     dealias_resample_filter: tuple[int, ...] = field(
         default_factory=lambda: (1, 4, 6, 4, 1)

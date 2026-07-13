@@ -41,7 +41,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import zarr
-from modulus.distributed import DistributedManager
+from physicsnemo.distributed import DistributedManager
 from tqdm import tqdm
 
 import data_catalog

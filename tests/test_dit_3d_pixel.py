@@ -12,16 +12,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Wrapper-level tests for the two-stage pixel model (StrataModel).
+
+Block-level behavior (AdaLN-zero init, DepthwiseConv chunking, ...) is tested
+upstream in physicsnemo's strata suite; these tests cover the wrapper
+composition, config translation, and geometry plumbing.
+"""
+
 import pytest
 import torch
 
-from screamcast.dit_3d import DiTBlock
-from screamcast.dit_3d_pixel import DiT_Pixel, PixelDiTBlock
+from screamcast.strata_wrappers import StrataModel
 
 
 def test_dit_pixel():
     D, H, W = 24, 64, 64
-    model = DiT_Pixel(
+    model = StrataModel(
         depth=D,
         height=H,
         width=W,
@@ -46,7 +52,7 @@ def test_dit_pixel():
 
 def test_dit_pixel_stereographic():
     D, H, W = 24, 64, 64
-    model = DiT_Pixel(
+    model = StrataModel(
         depth=D,
         height=H,
         width=W,
@@ -75,7 +81,7 @@ def test_dit_pixel_stereographic():
 
 def test_dit_pixel_bilinear_dw_gelu_project():
     D, H, W = 24, 64, 64
-    model = DiT_Pixel(
+    model = StrataModel(
         depth=D,
         height=H,
         width=W,
@@ -99,73 +105,15 @@ def test_dit_pixel_bilinear_dw_gelu_project():
     assert y.shape == x.shape
 
 
-def test_pixel_dit_block_adaln_zero_at_init():
-    block = PixelDiTBlock(
-        dim=64,
-        cond_dim=128,
-        pixels_per_patch=16,
-        num_heads=1,
-        use_bilinear_dw_gelu_project_adaln=True,
-    )
-    assert block.adaln_bilinear_dw_proj.weight.abs().max() == 0.0
-    assert block.adaln_bilinear_dw_proj.bias.abs().max() == 0.0
-
-
-def test_pixel_dit_block_dw_conv_toggle():
-    """use_chunked_depthwise_conv selects DepthwiseConv vs plain nn.Conv2d
-    and the two paths agree numerically up to fp32 reduction-order noise."""
-    from screamcast.depthwise_conv import DepthwiseConv
-
-    chunked = PixelDiTBlock(
-        dim=64,
-        cond_dim=128,
-        pixels_per_patch=16,
-        num_heads=1,
-        use_bilinear_dw_gelu_project_adaln=True,
-        use_chunked_depthwise_conv=True,
-    )
-    plain = PixelDiTBlock(
-        dim=64,
-        cond_dim=128,
-        pixels_per_patch=16,
-        num_heads=1,
-        use_bilinear_dw_gelu_project_adaln=True,
-        use_chunked_depthwise_conv=False,
-    )
-    assert isinstance(chunked.adaln_bilinear_dw_conv, DepthwiseConv)
-    assert type(plain.adaln_bilinear_dw_conv) is torch.nn.Conv2d
-    # Both paths must keep the identity-init (center-tap = 1, rest = 0).
-    for blk in (chunked, plain):
-        w = blk.adaln_bilinear_dw_conv.weight
-        assert w.shape == (128, 1, 5, 5)
-        assert w[:, 0, 2, 2].abs().min() == 1.0
-        w_zeroed = w.clone()
-        w_zeroed[:, 0, 2, 2] = 0.0
-        assert w_zeroed.abs().max() == 0.0
-        assert blk.adaln_bilinear_dw_conv.bias.abs().max() == 0.0
-
-    # Numerical equivalence: copy chunked's weights into plain and verify
-    # forward outputs agree under realistic input + replicate padding.
-    # cuDNN dispatches different kernels for the two paths, so outputs are
-    # not bit-identical; tolerances accommodate fp32 reduction-order drift.
-    torch.manual_seed(0)
-    with torch.no_grad():
-        for p_chunked, p_plain in zip(
-            chunked.adaln_bilinear_dw_conv.parameters(),
-            plain.adaln_bilinear_dw_conv.parameters(),
-        ):
-            p_chunked.copy_(torch.randn_like(p_chunked))
-            p_plain.copy_(p_chunked)
-        x = torch.randn(2, 128, 16, 16)
-        y_chunked = chunked.adaln_bilinear_dw_conv(x)
-        y_plain = plain.adaln_bilinear_dw_conv(x)
-    torch.testing.assert_close(y_chunked, y_plain, atol=1e-5, rtol=1e-5)
-
-
 def test_dit_pixel_first_block_only_adaln():
+    from physicsnemo.experimental.models.strata.layers import (
+        StrataPixel3DBlock,
+        StrataTransformer3DBlock,
+    )
+
     D, H, W = 24, 64, 64
     n_layers_pixel = 3
-    model = DiT_Pixel(
+    model = StrataModel(
         depth=D,
         height=H,
         width=W,
@@ -184,10 +132,11 @@ def test_dit_pixel_first_block_only_adaln():
         first_block_only_adaln_pixel=True,
     ).to("cuda")
 
-    assert isinstance(model._pixel_blocks[0], PixelDiTBlock)
-    for b in model._pixel_blocks[1:]:
-        assert isinstance(b, DiTBlock)
-        assert not isinstance(b, PixelDiTBlock)
+    pixel_blocks = model.strata.pixel_blocks
+    assert isinstance(pixel_blocks[0], StrataPixel3DBlock)
+    for b in pixel_blocks[1:]:
+        assert isinstance(b, StrataTransformer3DBlock)
+        assert not isinstance(b, StrataPixel3DBlock)
         assert not hasattr(b, "adaln_pixel_proj")
         assert not hasattr(b, "adaln_bilinear_dw_proj")
 
@@ -199,7 +148,7 @@ def test_dit_pixel_first_block_only_adaln():
 
 def test_dit_pixel_stereographic_rope_pixel():
     D, H, W = 24, 64, 64
-    model = DiT_Pixel(
+    model = StrataModel(
         depth=D,
         height=H,
         width=W,
@@ -230,7 +179,7 @@ def test_dit_pixel_stereographic_rope_pixel():
 
 def test_dit_pixel_rope_2d_pixel():
     D, H, W = 24, 64, 64
-    model = DiT_Pixel(
+    model = StrataModel(
         depth=D,
         height=H,
         width=W,
@@ -248,7 +197,7 @@ def test_dit_pixel_rope_2d_pixel():
         do_rope_2d_pixel=True,
     ).to("cuda")
     # Pixel grid is (D, H, W) since pixel patch is 1×1×1.
-    assert model._rope_cos_pixel.shape[-2] == D * H * W
+    assert model.strata._rope_cos_pixel.shape[-2] == D * H * W
     x = torch.randn(1, 6, D, H, W).cuda()
     index = torch.arange(H * W).reshape(1, H, W).cuda()
     y = model(x, index)
@@ -257,7 +206,7 @@ def test_dit_pixel_rope_2d_pixel():
 
 def test_dit_pixel_rope_2d_pixel_and_stereographic_conflict():
     with pytest.raises(ValueError, match="row/column RoPE and stereographic RoPE"):
-        DiT_Pixel(
+        StrataModel(
             depth=24,
             height=64,
             width=64,
@@ -277,9 +226,62 @@ def test_dit_pixel_rope_2d_pixel_and_stereographic_conflict():
         )
 
 
+def test_factory_translation_production_shape():
+    """The train factory maps a production-shaped config correctly.
+
+    Guards the two config-translation properties that would silently corrupt
+    a production checkpoint load: the backbone gets stereographic RoPE while
+    the pixel stage gets NO RoPE (production pixel RoPE is a separate config
+    family), and the bilinear_dw adaln mode is selected.
+    """
+    import train as train_module
+    from screamcast.config import DiTConfig, PixelDiTConfig
+
+    dit_cfg = DiTConfig(
+        embed_dim=64,
+        n_layers=2,
+        num_heads=2,
+        attn_kernel=3,
+        patch_size_horiz=4,
+        patch_size_vert=1,
+        do_rope_2d_stereographic=True,
+        do_rotate_wind=True,
+        qk_norm=True,
+        gated_attention=True,
+        do_alt_depthwise_attn=True,
+        index_is_latlon=True,
+    )
+    pixel_cfg = PixelDiTConfig(
+        embed_dim=32,
+        n_layers=2,
+        attn_kernel=3,
+        qk_norm=True,
+        use_bilinear_dw_gelu_project_adaln=True,
+    )
+    model = train_module.build_strata(
+        6,
+        6,
+        1024,
+        32,
+        dit_cfg=dit_cfg,
+        pixel_cfg=pixel_cfg,
+        do_bf16_mixed=False,
+        depth_levels=8,
+        wind_channel_indices=(0, 1),
+        grid_type="healpix",
+    )
+    assert model.strata.backbone.rope_mode == "stereographic"
+    assert model.strata.rope_mode_pixel == "none"
+    assert model.strata.adaln_mode == "bilinear_dw"
+    for block in model.strata.backbone.blocks:
+        assert block.attn.gated_attention
+        assert isinstance(block.attn.gate_proj, torch.nn.Linear)
+    assert model._index_is_latlon
+
+
 def test_dit_pixel_freeze_pixel_blocks():
     D, H, W = 24, 64, 64
-    model = DiT_Pixel(
+    model = StrataModel(
         depth=D,
         height=H,
         width=W,
@@ -296,6 +298,96 @@ def test_dit_pixel_freeze_pixel_blocks():
         num_heads_pixel=1,
         freeze_pixel_blocks=True,
     )
-    for name, p in model._pixel_blocks.named_parameters():
+    for name, p in model.strata.pixel_blocks.named_parameters():
         assert not p.requires_grad, f"pixel block param should be frozen: {name}"
-    assert any(p.requires_grad for p in model.semantic.parameters())
+    for name, p in model.strata.pixel_final_layer.named_parameters():
+        assert not p.requires_grad, f"pixel head param should be frozen: {name}"
+    assert any(p.requires_grad for p in model.strata.backbone.parameters())
+
+
+def _tiny_kwargs(**over):
+    kw = dict(
+        depth=8,
+        height=32,
+        width=32,
+        patch_size_horiz=4,
+        patch_size_vert=1,
+        in_chans=5,
+        base_out_chans=5,
+        n_layers=1,
+        embed_dim=64,
+        num_heads=4,
+        attn_kernel=3,
+        do_rope_2d_stereographic=True,
+        do_rope_2d_stereographic_pixel=True,
+        index_is_latlon=True,
+        grid_type="healpix",
+        nside=16,
+        embed_dim_pixel=32,
+        n_layers_pixel=1,
+        num_heads_pixel=2,
+        attn_kernel_pixel=3,
+    )
+    kw.update(over)
+    return kw
+
+
+def test_rope_length_scale_default_matches_historical_constant():
+    """The 0/None sentinel reproduces the exact pre-migration constant."""
+    import math
+
+    model = StrataModel(**_tiny_kwargs())
+    ph = 4
+    expected_backbone = math.sqrt(math.pi * ph**2 / (3.0 * 1024**2))
+    expected_pixel = math.sqrt(math.pi / (3.0 * 1024**2))
+    assert model.strata.backbone.rope_length_scale == expected_backbone
+    assert model.strata.rope_length_scale_pixel == expected_pixel
+
+
+def test_rope_length_scale_override_propagates():
+    """An explicit per-pixel base reaches every stage in consistent units."""
+    base = 5.66e-3  # e.g. an ne128pg2 pixel spacing
+    model = StrataModel(**_tiny_kwargs(rope_length_scale=base))
+    assert model.strata.backbone.rope_length_scale == base * 4
+    assert model.strata.rope_length_scale_pixel == base
+    with pytest.raises(ValueError, match="must be positive"):
+        StrataModel(**_tiny_kwargs(rope_length_scale=-1.0))
+
+
+def test_set_rope_length_scale_live_update():
+    """The experimental setter retargets both stages; axial mode rejects it."""
+    model = StrataModel(**_tiny_kwargs())
+    model.set_rope_length_scale(1e-2)
+    assert model.strata.backbone.rope_length_scale == 4e-2
+    assert model.strata.rope_length_scale_pixel == 1e-2
+
+    axial = StrataModel(
+        **_tiny_kwargs(
+            do_rope_2d_stereographic=False,
+            do_rope_2d_stereographic_pixel=False,
+            do_rope_2d=True,
+        )
+    )
+    with pytest.raises(ValueError, match="stereographic"):
+        axial.set_rope_length_scale(1e-2)
+
+
+def test_mlp_gelu_is_tanh_everywhere():
+    """The tanh-GELU swap must cover every Mlp (guards the physicsnemo pin).
+
+    physicsnemo builds Mlp with exact (erf) GELU; every shipped checkpoint
+    was trained with tanh GELU. If this fails, _use_tanh_gelu no longer
+    matches physicsnemo's Mlp structure.
+    """
+    from physicsnemo.nn.module.mlp_layers import Mlp
+
+    model = StrataModel(**_tiny_kwargs())
+    gelus = [
+        layer
+        for module in model.modules()
+        if isinstance(module, Mlp)
+        for layer in module.layers
+        if isinstance(layer, torch.nn.GELU)
+    ]
+    assert len(gelus) > 0, "no Mlp GELU layers found — Mlp structure changed"
+    assert all(g.approximate == "tanh" for g in gelus)

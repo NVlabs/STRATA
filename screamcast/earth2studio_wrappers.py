@@ -37,9 +37,8 @@ from screamcast.config import TrainConfig
 from screamcast.cubesphere_transforms import reorder_cubesphere_to_2d_tensor
 from screamcast.dali_ext_src import ScreamV2
 from screamcast.datetime import as_py_datetime
-from screamcast.dit_3d import DiT
-from screamcast.dit_3d_pixel import DiT_Pixel
 from screamcast.model_registry import MixedPredictionAsymmetric_init
+from screamcast.strata_wrappers import StrataBackboneModel, StrataModel
 
 
 class ScreamDataSource:
@@ -615,7 +614,7 @@ class ScreamcastModel(torch.nn.Module):
         inputs instead of the size it was trained on.
         """
         self.tile_size = tile_size
-        # Both DiT and DiT_Pixel expose set_tile_size(height, width); DiT_Pixel's
+        # Both wrapper classes expose set_tile_size(height, width); DiT_Pixel's
         # implementation delegates to the semantic stage and also refreshes its
         # own pixel-pathway RoPE buffers when applicable.
         self.pipeline.network.set_tile_size(tile_size, tile_size)
@@ -730,11 +729,8 @@ class ScreamcastModel(torch.nn.Module):
             True if a supported checkpointing knob was found and changed.
         """
         network = self.pipeline.network
-        if isinstance(network, DiT_Pixel):
-            network.semantic._activation_checkpointing_ratio = 0.0
-            return True
-        if isinstance(network, DiT):
-            network._activation_checkpointing_ratio = 0.0
+        if isinstance(network, (StrataModel, StrataBackboneModel)):
+            network.disable_activation_checkpointing()
             return True
         return False
 
@@ -809,7 +805,7 @@ class ScreamcastModel(torch.nn.Module):
 
         def _network_factory():
             if model_type == "pixeldit":
-                return _train_module.DiT3DPixel(
+                return _train_module.build_strata(
                     in_channels=in_channels_3d,
                     out_channels=out_channels_3d,
                     nside=nside,
@@ -819,12 +815,11 @@ class ScreamcastModel(torch.nn.Module):
                     do_bf16_mixed=bf16,
                     depth_levels=num_depth_levels,
                     wind_channel_indices=wind_channel_indices,
-                    wind_channel_indices_dual=None,
                     grid_type="cubesphere",
                     cubesphere_latlon_path=data_cfg.latlon_path,
                 )
             else:
-                return _train_module.DiT3D(
+                return _train_module.build_backbone(
                     in_channels=in_channels_3d,
                     out_channels=out_channels_3d,
                     nside=nside,
@@ -833,7 +828,6 @@ class ScreamcastModel(torch.nn.Module):
                     do_bf16_mixed=bf16,
                     depth_levels=num_depth_levels,
                     wind_channel_indices=wind_channel_indices,
-                    wind_channel_indices_dual=None,
                     grid_type="cubesphere",
                     cubesphere_latlon_path=data_cfg.latlon_path,
                 )
@@ -857,14 +851,10 @@ class ScreamcastModel(torch.nn.Module):
 
         pipeline = pipeline_factory(pretrained=False)
 
-        # Strip _orig_mod. prefix inserted by torch.compile when checkpoints are saved
-        network_sd = ckpt_data["network"]
-        if any(k.startswith("_orig_mod.") for k in network_sd):
-            network_sd = {
-                k.removeprefix("_orig_mod."): v for k, v in network_sd.items()
-            }
-            ckpt_data = {**ckpt_data, "network": network_sd}
-
+        # Legacy checkpoints (pre-Strata module names, torch.compile
+        # _orig_mod. prefixes) are translated inside the network wrapper's
+        # load_state_dict pre-hook (screamcast.checkpoint_compat), so the raw
+        # state dict loads as-is under strict=True.
         pipeline.load_checkpoint(ckpt_data)
         pipeline.eval()
 
