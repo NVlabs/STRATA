@@ -104,6 +104,44 @@ def test_pixel_dit_set_tile_size_refreshes_pixel_rope():
     assert y.shape == x.shape
 
 
+def test_pixel_dit_set_tile_size_matches_fresh_construction():
+    """The mirrored pixel-RoPE rebuild must equal construction at the new size.
+
+    set_tile_size re-implements physicsnemo's construction-time pixel table
+    build (Strata has no re-tiling hook); this pins the two code paths to
+    each other so a physicsnemo pin bump that changes the recipe fails here
+    instead of silently corrupting retiled inference. CPU-only on purpose.
+    """
+
+    def _build(h: int, w: int) -> StrataModel:
+        return StrataModel(
+            depth=12,
+            height=h,
+            width=w,
+            patch_size_horiz=4,
+            patch_size_vert=2,
+            in_chans=6,
+            base_out_chans=6,
+            n_layers=1,
+            embed_dim=64,
+            num_heads=2,
+            attn_kernel=3,
+            embed_dim_pixel=32,
+            n_layers_pixel=1,
+            num_heads_pixel=1,
+            do_rope_2d_pixel=True,
+            grid_type="healpix",
+            nside=512,
+        )
+
+    retiled = _build(64, 64)
+    retiled.set_tile_size(128, 128)
+    fresh = _build(128, 128)
+    assert torch.equal(retiled.strata._rope_cos_pixel, fresh.strata._rope_cos_pixel)
+    assert torch.equal(retiled.strata._rope_sin_pixel, fresh.strata._rope_sin_pixel)
+    assert retiled._height == fresh._height == 128
+
+
 def test_dit_3d():
     model = StrataBackboneModel(
         depth=32,

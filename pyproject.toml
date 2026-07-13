@@ -37,7 +37,9 @@ dependencies = [
     "pytorch-optimizer>=3.10.0",
     "tensorboard>=2.20.0",
     "lmdb>=2.2.0",
-    "nvidia-physicsnemo",
+    # >=2.2.0a0: the Strata models ship in 2.2 (PyPI 2.1.x would import-fail);
+    # the pinned archive below provides 2.2.0a0.
+    "nvidia-physicsnemo>=2.2.0a0",
     "h5netcdf",
     "netCDF4",
     "h5py",

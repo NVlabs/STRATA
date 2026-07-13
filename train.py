@@ -110,12 +110,12 @@ def _dit_common_kwargs(
         height=tile_size,
         width=tile_size,
         patch_size=dit_cfg.patch_size,
-        patch_size_vert=None
-        if dit_cfg.patch_size_vert < 0
-        else dit_cfg.patch_size_vert,
-        patch_size_horiz=None
-        if dit_cfg.patch_size_horiz < 0
-        else dit_cfg.patch_size_horiz,
+        patch_size_vert=(
+            None if dit_cfg.patch_size_vert < 0 else dit_cfg.patch_size_vert
+        ),
+        patch_size_horiz=(
+            None if dit_cfg.patch_size_horiz < 0 else dit_cfg.patch_size_horiz
+        ),
         in_chans=in_channels,
         base_out_chans=out_channels,
         nside=nside,
@@ -226,7 +226,10 @@ def _pixel_blocks_adaln_changed(checkpoint_path: str, model: torch.nn.Module) ->
     have co-adapted to different conditioning and should be reinitialized.
     Only called on foreign checkpoint loads (not latest.pth resume).
     """
-    from screamcast.checkpoint_compat import remap_legacy_state_dict
+    from screamcast.checkpoint_compat import (
+        _strip_wrapper_prefixes,
+        remap_legacy_state_dict,
+    )
 
     try:
         ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
@@ -236,26 +239,37 @@ def _pixel_blocks_adaln_changed(checkpoint_path: str, model: torch.nn.Module) ->
         network_sd, _ = remap_legacy_state_dict(dict(network_sd))
         ckpt_keys = set(network_sd.keys())
     except Exception:
+        logging.exception(
+            "Could not read/remap %s to judge whether the pixel adaln path "
+            "changed; assuming it did NOT (pixel blocks keep their loaded "
+            "weights). If this checkpoint switches adaln modes, reinitialize "
+            "the pixel blocks manually.",
+            checkpoint_path,
+        )
         return False
 
     if not ckpt_keys:
         return False
 
-    def _strip_wrapper(name: str) -> str:
-        # Under torch.compile the model's parameter names carry _orig_mod.
-        # while the remapped checkpoint keys never do; compare bare names.
-        for prefix in ("_orig_mod.", "module.", "_forward_module."):
-            while name.startswith(prefix):
-                name = name[len(prefix) :]
-        return name
-
+    # Under torch.compile the model's parameter names carry _orig_mod. while
+    # the remapped checkpoint keys never do; compare bare names.
+    stripped_names = [
+        _strip_wrapper_prefixes(name) for name, _ in model.named_parameters()
+    ]
     current_adaln_keys = {
-        _strip_wrapper(name)
-        for name, _ in model.named_parameters()
-        if "pixel_blocks" in name and "adaln" in name
+        name for name in stripped_names if "pixel_blocks" in name and "adaln" in name
     }
 
     if not current_adaln_keys:
+        if any("pixel_blocks" in name for name in stripped_names):
+            # Every public pixel config (plain, bilinear_dw, first-block-only)
+            # has adaln-named params in its pixel blocks; matching none means
+            # the physicsnemo naming this heuristic relies on has changed.
+            raise RuntimeError(
+                "model has pixel_blocks parameters but none matched the "
+                "'adaln' naming pattern — the physicsnemo parameter naming "
+                "contract changed; update _pixel_blocks_adaln_changed."
+            )
         return False
 
     # If none of the current adaln keys exist in the checkpoint → path changed
@@ -415,9 +429,9 @@ def train(
                 depth_levels=num_depth_levels,
                 wind_channel_indices=dit_wind_channel_indices,
                 grid_type=grid_type,
-                cubesphere_latlon_path=cfg.data.latlon_path
-                if grid_type == "cubesphere"
-                else None,
+                cubesphere_latlon_path=(
+                    cfg.data.latlon_path if grid_type == "cubesphere" else None
+                ),
             )
         else:
             network = build_backbone(
@@ -430,9 +444,9 @@ def train(
                 depth_levels=num_depth_levels,
                 wind_channel_indices=dit_wind_channel_indices,
                 grid_type=grid_type,
-                cubesphere_latlon_path=cfg.data.latlon_path
-                if grid_type == "cubesphere"
-                else None,
+                cubesphere_latlon_path=(
+                    cfg.data.latlon_path if grid_type == "cubesphere" else None
+                ),
             )
     else:
         raise ValueError(
@@ -1188,9 +1202,11 @@ def train(
                         )
                 writer.add_scalar(
                     "lr_per_step",
-                    cfg.training.lr
-                    if scheduler is None
-                    else optimizer.param_groups[0]["lr"],
+                    (
+                        cfg.training.lr
+                        if scheduler is None
+                        else optimizer.param_groups[0]["lr"]
+                    ),
                     global_step=nimg,
                 )
                 writer.add_scalar("grad_norm", grad_norm.item(), global_step=nimg)
@@ -1306,9 +1322,9 @@ def train(
                             loader=backtest_dataloader,
                             device=fabric.device,
                             channel_index=ds.channel_index_output(),
-                            output_dir=f"scores/{nimg}/"
-                            if fabric.global_rank == 0
-                            else "",
+                            output_dir=(
+                                f"scores/{nimg}/" if fabric.global_rank == 0 else ""
+                            ),
                             min_samples=cfg.training.validate_min_samples,
                             writer=writer,
                             nimg=nimg,
@@ -1358,9 +1374,9 @@ def train(
                         if cfg.training.do_backtest_inference:
                             val_metrics["backtest_loss"] = backtest_loss
                             val_metrics["backtest_median_score"] = backtest_median_score
-                            val_metrics[
-                                "backtest_median_score_tilemean"
-                            ] = backtest_median_score_tilemean
+                            val_metrics["backtest_median_score_tilemean"] = (
+                                backtest_median_score_tilemean
+                            )
                         wandb_run.log(val_metrics, step=nimg)
 
                     if test_loss < state["best_valid_loss"]:

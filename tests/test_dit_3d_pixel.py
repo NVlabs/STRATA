@@ -273,11 +273,9 @@ def test_factory_translation_production_shape():
     assert model.strata.backbone.rope_mode == "stereographic"
     assert model.strata.rope_mode_pixel == "none"
     assert model.strata.adaln_mode == "bilinear_dw"
-    assert (
-        model.strata.backbone.gated_attention
-        if hasattr(model.strata.backbone, "gated_attention")
-        else True
-    )
+    for block in model.strata.backbone.blocks:
+        assert block.attn.gated_attention
+        assert isinstance(block.attn.gate_proj, torch.nn.Linear)
     assert model._index_is_latlon
 
 
@@ -372,3 +370,24 @@ def test_set_rope_length_scale_live_update():
     )
     with pytest.raises(ValueError, match="stereographic"):
         axial.set_rope_length_scale(1e-2)
+
+
+def test_mlp_gelu_is_tanh_everywhere():
+    """The tanh-GELU swap must cover every Mlp (guards the physicsnemo pin).
+
+    physicsnemo builds Mlp with exact (erf) GELU; every shipped checkpoint
+    was trained with tanh GELU. If this fails, _use_tanh_gelu no longer
+    matches physicsnemo's Mlp structure.
+    """
+    from physicsnemo.nn.module.mlp_layers import Mlp
+
+    model = StrataModel(**_tiny_kwargs())
+    gelus = [
+        layer
+        for module in model.modules()
+        if isinstance(module, Mlp)
+        for layer in module.layers
+        if isinstance(layer, torch.nn.GELU)
+    ]
+    assert len(gelus) > 0, "no Mlp GELU layers found — Mlp structure changed"
+    assert all(g.approximate == "tanh" for g in gelus)

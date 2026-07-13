@@ -83,11 +83,21 @@ def _use_tanh_gelu(model: nn.Module) -> None:
     any pre-migration checkpoint, or every MLP output shifts by up to ~5e-4
     per activation.
     """
+    n_swapped = 0
     for module in model.modules():
         if isinstance(module, Mlp):
             for i, layer in enumerate(module.layers):
                 if isinstance(layer, nn.GELU) and layer.approximate == "none":
                     module.layers[i] = nn.GELU(approximate="tanh")
+                    n_swapped += 1
+    if n_swapped == 0:
+        raise RuntimeError(
+            "_use_tanh_gelu found no exact-GELU Mlp layers to swap. The "
+            "pinned physicsnemo's Mlp structure must have changed; without "
+            "the swap every checkpoint would silently run erf GELU instead "
+            "of the tanh GELU it was trained with. Update the swap to match "
+            "the new Mlp before bumping the physicsnemo pin."
+        )
 
 
 def _init_patch_embed(patch_embed: nn.Module) -> None:
@@ -365,10 +375,14 @@ class StrataBackboneModel(_StrataModelBase):
 
     @_activation_checkpointing_ratio.setter
     def _activation_checkpointing_ratio(self, value: float) -> None:
+        # Read before write: this is a plain (private) physicsnemo attribute,
+        # and a bare setattr after an upstream rename would silently create a
+        # dead attribute while checkpointing stays in its old state.
+        _ = self.strata._activation_checkpointing_ratio
         self.strata._activation_checkpointing_ratio = value
 
     def disable_activation_checkpointing(self) -> None:
-        self.strata._activation_checkpointing_ratio = 0.0
+        self._activation_checkpointing_ratio = 0.0
 
     def set_tile_size(self, height: int, width: int) -> None:
         """Reconfigure the expected spatial tile size (all RoPE modes)."""
@@ -599,6 +613,10 @@ class StrataModel(_StrataModelBase):
         return self.strata.width
 
     def disable_activation_checkpointing(self) -> None:
+        # Read before write (see StrataBackboneModel): fail loudly if a
+        # physicsnemo pin bump renames either private ratio attribute.
+        _ = self.strata.backbone._activation_checkpointing_ratio
+        _ = self.strata._activation_checkpointing_ratio_pixel
         self.strata.backbone._activation_checkpointing_ratio = 0.0
         self.strata._activation_checkpointing_ratio_pixel = 0.0
 
@@ -614,13 +632,6 @@ class StrataModel(_StrataModelBase):
         self.strata.height = height
         self.strata.width = width
         if self.strata.rope_mode_pixel != "axial":
-            return
-        # The cross-attention model owns extra axial buffers (cross Q/K
-        # tables) and rebuilds all of them itself; the plain Strata falls
-        # through to the generic pixel-table rebuild below.
-        retile = getattr(self.strata, "retile_axial_rope_buffers", None)
-        if retile is not None:
-            retile(height, width)
             return
         coords = build_axial_token_coords(self.strata.depth, height, width)
         cos, sin = build_axial_rope_cos_sin_2d_continuous(
