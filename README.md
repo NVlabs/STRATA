@@ -100,12 +100,20 @@ repository names.)
 The auxiliary files used for training and cubed-sphere inference are
 `latlon_ne1024pg2.nc`, `ne1024pg2_scrip.nc`, `ne1024halo256pg2_scrip.nc`,
 and `scream_vertical_coordinate.nc`; place them under `AUX_DATA_ROOT`.
+`scream_vertical_coordinate.nc` ships in `data/`; the other three are
+generated from scratch (pure numpy + netCDF4, ~15 minutes) by
 
-> **Availability**: trained model checkpoints and the auxiliary files other
-> than the shipped `data/scream_vertical_coordinate.nc` are not yet publicly
+    bash data_prep/scrip_generation/generate_all.sh --output-dir <AUX_DATA_ROOT>
+
+(see [`data_prep/scrip_generation/`](data_prep/scrip_generation/); the
+derived `latlon_ne1024pg2.nc` is bit-identical to the file the shipped
+configs were trained with).
+
+> **Availability**: trained model checkpoints are not yet publicly
 > distributed, so the rollout-from-checkpoint workflows below cannot
-> currently run end to end outside NVIDIA. The environment build and the
-> unit test suite (`pytest`) work without them.
+> currently run end to end outside NVIDIA. Training from scratch is fully
+> reproducible: dataset (Hugging Face, above), auxiliary files (generated,
+> above), and environment (Docker, above) are all public.
 
 ## Training
 
