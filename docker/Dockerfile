@@ -135,13 +135,16 @@ RUN python3 -m pip uninstall -y nvidia-physicsnemo || true
 RUN python3 -m pip install --no-cache-dir --no-deps \
     https://github.com/NVIDIA/physicsnemo/archive/07cdcc8b65f10bee733a32a77b4b76e20c70c54c.tar.gz
 
-# The NGC image ships triton with an empty backends/nvidia/bin (no ptxas /
-# cuobjdump / nvdisasm), which breaks every torch.compile with
-# "RuntimeError: Cannot find ptxas". Link the CUDA toolkit's binaries into
-# the location triton expects.
-RUN TRITON_BIN=$(python3 -c "import triton, pathlib; print(pathlib.Path(triton.__file__).parent / 'backends' / 'nvidia' / 'bin')") \
- && mkdir -p "$TRITON_BIN" \
- && ln -sf /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/cuobjdump /usr/local/cuda/bin/nvdisasm "$TRITON_BIN"/
+# The NGC image chain has shipped triton with an empty backends/nvidia/bin
+# (no ptxas / cuobjdump / nvdisasm -> "RuntimeError: Cannot find ptxas") and
+# without backends/nvidia/include (no cuda.h -> the CudaUtils gcc build
+# behind every torch.compile dies with "fatal error: cuda.h"). Link the CUDA
+# toolkit's binaries and header into the locations triton expects; both
+# no-ops if a future image ships them.
+RUN TRITON_NV=$(python3 -c "import triton, pathlib; print(pathlib.Path(triton.__file__).parent / 'backends' / 'nvidia')") \
+ && mkdir -p "$TRITON_NV/bin" "$TRITON_NV/include" \
+ && ln -sf /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/cuobjdump /usr/local/cuda/bin/nvdisasm "$TRITON_NV/bin/" \
+ && ln -sf /usr/local/cuda/include/cuda.h "$TRITON_NV/include/cuda.h"
 
 # Build-time smoke test: the exact imports the Strata stack does at startup.
 RUN python3 - <<'EOF'
