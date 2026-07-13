@@ -99,8 +99,7 @@ repository names.)
 
 The auxiliary files used for training and cubed-sphere inference are
 `latlon_ne1024pg2.nc`, `ne1024pg2_scrip.nc`, `ne1024halo256pg2_scrip.nc`,
-`scream_vertical_coordinate.nc`, and (optionally, for the rollout qv-fixer)
-`ps_mean_cubesphere_day14_r2.nc`; place them under `AUX_DATA_ROOT`.
+and `scream_vertical_coordinate.nc`; place them under `AUX_DATA_ROOT`.
 
 > **Availability**: trained model checkpoints and the auxiliary files other
 > than the shipped `data/scream_vertical_coordinate.nc` are not yet publicly
