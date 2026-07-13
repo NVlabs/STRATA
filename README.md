@@ -67,18 +67,46 @@ The key variables are `PROJECT_ROOT` (training and rollout outputs are written
 here), `ZARR_ROOT` (the SCREAM zarr dataset), `AUX_DATA_ROOT` (auxiliary files,
 below), and `WANDB_API_KEY` (experiment logging).
 
-Place the SCREAM zarr dataset, a model checkpoint, and the auxiliary files under
-the locations configured in `.env`. The auxiliary files used for training and
-cubed-sphere inference are `latlon_ne1024pg2.nc`, `ne1024pg2_scrip.nc`,
-`ne1024halo256pg2_scrip.nc`, `scream_vertical_coordinate.nc`, and (optionally,
-for the rollout qv-fixer) `ps_mean_cubesphere_day14_r2.nc`.
+The SCREAM training dataset (cubed-sphere zarr v3 stores) is published on
+Hugging Face as three dataset repositories — a 14-day simulation
+(*sdecadal*) plus two 7-day simulations (*sdy1*, *sdy2*) used as the
+additional sources in the three-source training configs:
 
-> **Availability**: the SCREAM zarr dataset, trained model checkpoints, and
-> the auxiliary files other than the shipped
-> `data/scream_vertical_coordinate.nc` are not yet publicly distributed, so
-> the training and rollout workflows below cannot currently run end to end
-> outside NVIDIA. The environment build and the unit test suite (`pytest`)
-> work without them.
+- [nvidia/STRATA-SCREAM-sdecadal](https://huggingface.co/datasets/nvidia/STRATA-SCREAM-sdecadal) — 14 days, 10-minute steps
+- [nvidia/STRATA-SCREAM-sdy1](https://huggingface.co/datasets/nvidia/STRATA-SCREAM-sdy1) — 7 days, 10-minute steps
+- [nvidia/STRATA-SCREAM-sdy2](https://huggingface.co/datasets/nvidia/STRATA-SCREAM-sdy2) — 7 days, 10-minute steps
+
+Each repository is the zarr store itself, so it can be read directly over
+HTTP via `huggingface_hub`'s fsspec filesystem (installed in the Docker
+image) — convenient for exploration without downloading ~TB of data:
+
+```python
+import xarray as xr
+
+ds = xr.open_zarr("hf://datasets/nvidia/STRATA-SCREAM-sdy1")
+ds["T_2m"].isel(time=500, ncol=slice(0, 100)).values  # streams just the chunks it needs
+```
+
+For training, download the stores instead (e.g. with `huggingface-cli
+download`) — the dataloader reads tiles at a rate that HTTP streaming cannot
+sustain — and place each under `ZARR_ROOT` with the directory name the
+training configs expect (see `_ZARR_SDECADAL` / `_ZARR_SDY1` / `_ZARR_SDY2`
+in `train_configs.py`), e.g.
+`$ZARR_ROOT/sdecadal.ne1024pg2_ne1024pg2.F20TR-SCREAMv1.c10-sep11.out10min.cubesphere.zarr`.
+(Setting `ZARR_ROOT` itself to an `hf://` prefix does not work: the configs
+join it with the original store names, which differ from the Hugging Face
+repository names.)
+
+The auxiliary files used for training and cubed-sphere inference are
+`latlon_ne1024pg2.nc`, `ne1024pg2_scrip.nc`, `ne1024halo256pg2_scrip.nc`,
+`scream_vertical_coordinate.nc`, and (optionally, for the rollout qv-fixer)
+`ps_mean_cubesphere_day14_r2.nc`; place them under `AUX_DATA_ROOT`.
+
+> **Availability**: trained model checkpoints and the auxiliary files other
+> than the shipped `data/scream_vertical_coordinate.nc` are not yet publicly
+> distributed, so the rollout-from-checkpoint workflows below cannot
+> currently run end to end outside NVIDIA. The environment build and the
+> unit test suite (`pytest`) work without them.
 
 ## Training
 
