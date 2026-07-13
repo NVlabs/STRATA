@@ -1374,9 +1374,9 @@ def train(
                         if cfg.training.do_backtest_inference:
                             val_metrics["backtest_loss"] = backtest_loss
                             val_metrics["backtest_median_score"] = backtest_median_score
-                            val_metrics["backtest_median_score_tilemean"] = (
-                                backtest_median_score_tilemean
-                            )
+                            val_metrics[
+                                "backtest_median_score_tilemean"
+                            ] = backtest_median_score_tilemean
                         wandb_run.log(val_metrics, step=nimg)
 
                     if test_loss < state["best_valid_loss"]:
