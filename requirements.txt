@@ -7,7 +7,14 @@
 #   - nvidia-physicsnemo (pinned GitHub archive with the Strata models;
 #                 --no-deps so its torch>=2.10.0 floor cannot replace a
 #                 container's pre-release torch build)
-lightning==2.4.0
+# lightning >=2.6.6 everywhere: earlier releases (through 2.6.5) import and
+# execute arbitrary module paths from a checkpoint's _instantiator
+# hyperparameter in LightningModule.load_from_checkpoint (fixed upstream by
+# an instantiator allowlist). pytorch-lightning is the same code under its
+# second distribution name and must be pinned explicitly — upgrading
+# `lightning` alone leaves a vulnerable pytorch_lightning importable.
+lightning==2.6.6
+pytorch-lightning==2.6.6
 multi-storage-client[boto3]>=0.14.1
 torchmetrics>=1.9.0
 # to avoid errors
