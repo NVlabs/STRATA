@@ -41,6 +41,7 @@ Example:
     >>> padded_tiles = halo_exchange(local_tiles)
     >>> interior_tiles = topology.crop(padded_tiles)
 """
+
 from __future__ import annotations
 
 import itertools
@@ -327,6 +328,41 @@ class DistributedTileKNNHaloPadding_AllGather(torch.nn.Module):
         )
 
 
+def own_face_target_mask(
+    topology: TileTopology,
+    *,
+    device: torch.device | None = None,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Mark the padded targets that are real grid points of their own face.
+
+    1 = the target is a real grid point of the tile's own face; 0 = it lies on
+    the gnomonic extension beyond a cube-face edge. Extension targets do not
+    coincide with the neighbouring face's grid, so the KNN operator has to
+    interpolate them instead of copying a single point.
+
+    Multiplying the adjoint's window by this keeps the windowed overlap-add
+    wherever the halo is an exact copy (every intra-face tile seam) and drops
+    it wherever the halo is interpolated (the cube-face edges and corners).
+
+    The row/column arithmetic mirrors ``_select_padded_tile``, which defines
+    the halo target grid. The padded-face offset cancels out of both bounds,
+    so the predicate depends only on the tile's position within its own face.
+
+    Returns:
+        ``(tiles_per_rank, padded_tile_size, padded_tile_size)`` of 1s and 0s.
+    """
+    ts, halo, face = topology.tile_size, topology.halo_width, topology.face_size
+    masks = []
+    for _, tile_i, tile_j in topology.local_tiles:
+        rows = torch.arange(tile_i * ts - halo, (tile_i + 1) * ts + halo)
+        cols = torch.arange(tile_j * ts - halo, (tile_j + 1) * ts + halo)
+        on_row = (rows >= 0) & (rows < face)
+        on_col = (cols >= 0) & (cols < face)
+        masks.append(on_row[:, None] & on_col[None, :])
+    return torch.stack(masks).to(device=device, dtype=dtype)
+
+
 class NormalizedHaloAdjoint(torch.nn.Module):
     """Normalized adjoint of DistributedTileKNNHaloPadding_AllGather.
 
@@ -338,6 +374,15 @@ class NormalizedHaloAdjoint(torch.nn.Module):
     normalization D⁻¹ Aᵀ y.  A KBD or similar window downweights halo
     contributions relative to interior-tile contributions, matching the
     windowed overlap-add used in patch-based inference.
+
+    ``window`` may be a single ``(padded, padded)`` window shared by every
+    tile, or a per-tile ``(tiles_per_rank, padded, padded)`` stack.
+
+    ``own_face_only=True`` additionally multiplies the window by
+    :func:`own_face_target_mask`, dropping the overlap-add across cube-face
+    edges while keeping it at every intra-face tile seam. ``D_w`` is
+    recomputed from whatever window results, so the normalization stays exact
+    either way: a constant field still round-trips.
 
     Implementation note:
 
@@ -356,6 +401,7 @@ class NormalizedHaloAdjoint(torch.nn.Module):
         self,
         halo_exchange: DistributedTileKNNHaloPadding_AllGather,
         window: torch.Tensor | None = None,
+        own_face_only: bool = False,
     ) -> None:
         super().__init__()
         self.halo_exchange = halo_exchange
@@ -368,15 +414,37 @@ class NormalizedHaloAdjoint(torch.nn.Module):
 
         if window is None:
             window = torch.ones(padded_size, padded_size, device=device, dtype=dtype)
-        # Flatten and tile window across all local tiles: (n_dst,)
-        window_flat = (
-            window.to(device=device, dtype=dtype)
-            .flatten()
-            .repeat(topology.tiles_per_rank)
-        )
+        window = window.to(device=device, dtype=dtype)
+        if window.shape == (padded_size, padded_size):
+            window = window.unsqueeze(0).expand(topology.tiles_per_rank, -1, -1)
+        elif window.shape != (topology.tiles_per_rank, padded_size, padded_size):
+            raise ValueError(
+                f"window must be ({padded_size}, {padded_size}) or "
+                f"({topology.tiles_per_rank}, {padded_size}, {padded_size}), "
+                f"got {tuple(window.shape)}"
+            )
+        if own_face_only:
+            window = window * own_face_target_mask(topology, device=device, dtype=dtype)
+        # Flatten to (n_dst,) in tile-major order. clone() so the buffer does
+        # not alias the caller's tensor.
+        window_flat = window.reshape(-1).clone()
         self.register_buffer("window", window_flat)
         self._vjp = {}
         weights = self._distributed_regrid_vjp(window_flat.unsqueeze(0))
+        n_bad = int((~(weights > 0)).sum())
+        if (
+            topology.world_size > 1
+            and torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+        ):
+            counter = torch.tensor([n_bad], device=weights.device, dtype=torch.int64)
+            torch.distributed.all_reduce(counter, op=torch.distributed.ReduceOp.SUM)
+            n_bad = int(counter.item())
+        if n_bad:
+            raise ValueError(
+                f"{n_bad} interior points receive zero, negative or NaN total "
+                "window weight, so D_w is singular. Check the window/mask."
+            )
         self.register_buffer(
             "weights",
             weights.reshape(

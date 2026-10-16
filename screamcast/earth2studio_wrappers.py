@@ -894,6 +894,42 @@ class ScreamcastModel(torch.nn.Module):
         static_vars = [
             v for v in data_cfg.variables_forcing if v in _SCREAM_STATIC_FORCING
         ]
+        # Released checkpoint packages ship the static fields as <var>.npy (flat
+        # ncol order, float32) next to latlon_*.nc under AUX_DATA_ROOT, so
+        # inference does not need the SCREAM training dataset.  Use them when
+        # every static variable is present; otherwise fall back to the catalog.
+        static_npy = {v: os.path.join(aux_data_root, f"{v}.npy") for v in static_vars}
+        if (
+            static_vars
+            and scream_data is None
+            and all(os.path.exists(f) for f in static_npy.values())
+        ):
+            ne, npg = data_cfg.cubesphere_ne, data_cfg.cubesphere_npg
+            ncol_per_face = ne * ne * npg * npg
+            channels = []
+            for var in static_vars:
+                flat = torch.from_numpy(
+                    np.load(static_npy[var]).reshape(-1).astype(np.float32)
+                )
+                if flat.numel() != 6 * ncol_per_face:
+                    raise ValueError(
+                        f"{static_npy[var]}: expected {6 * ncol_per_face} columns "
+                        f"for ne{ne}pg{npg}, got {flat.numel()}"
+                    )
+                channels.append(
+                    torch.stack(
+                        [
+                            reorder_cubesphere_to_2d_tensor(
+                                flat[i * ncol_per_face : (i + 1) * ncol_per_face],
+                                ne=ne,
+                                npg=npg,
+                            )
+                            for i in range(6)
+                        ]
+                    )
+                )
+            static_forcing = torch.stack(channels)  # [n_static, 6, nside, nside]
+            static_vars = []  # done; skip the catalog path below
         if static_vars:
             if scream_data is None:
                 import data_catalog
