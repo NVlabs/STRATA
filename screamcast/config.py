@@ -31,6 +31,7 @@ Usage::
 from __future__ import annotations
 
 import dataclasses
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -306,8 +307,11 @@ class DataConfig:
     backtest_end_index: int | None = None
     backtest_stride: int | None = None
 
-    # Static data paths
-    latlon_path: str = "data/latlon_ne1024pg2.nc"
+    # Static data paths. Resolved when this module is imported, after dotenv
+    # has loaded AUX_DATA_ROOT. Unset, this stays data/latlon_ne1024pg2.nc.
+    latlon_path: str = os.path.join(
+        os.environ.get("AUX_DATA_ROOT", "data"), "latlon_ne1024pg2.nc"
+    )
 
     def __post_init__(self) -> None:
         if self.grid_type and self.grid_type.lower() not in {"healpix", "cubesphere"}:
