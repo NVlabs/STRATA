@@ -109,11 +109,38 @@ generated from scratch (pure numpy + netCDF4, ~15 minutes) by
 derived `latlon_ne1024pg2.nc` is bit-identical to the file the shipped
 configs were trained with).
 
-> **Availability**: trained model checkpoints are not yet publicly
-> distributed, so the rollout-from-checkpoint workflows below cannot
-> currently run end to end outside NVIDIA. Training from scratch is fully
-> reproducible: dataset (Hugging Face, above), auxiliary files (generated,
-> above), and environment (Docker, above) are all public.
+> **Availability**: the STRATA v1 checkpoint and its auxiliary files
+> (static fields and both SCRIP grids) are in the Hugging Face dataset
+> `qx7m-kestrel/strata-v1-bundle`. That repository is private for now and
+> will be replaced by a public Hugging Face repository soon; this path
+> will be updated then. Download it and set `AUX_DATA_ROOT` to that
+> directory. A `.env` file is not required if you export the variables
+> below. The public SCREAM stores are about 35 TB. You can point a
+> forecast at the Hugging Face copy directly, but a downloaded local path
+> is faster.
+
+## Running the STRATA v1 checkpoint
+
+```bash
+hf download qx7m-kestrel/strata-v1-bundle --local-dir /path/to/strata_v1
+
+hf download nvidia/STRATA-SCREAM-sdecadal --repo-type dataset \
+  --local-dir /path/to/sdecadal.ne1024pg2_ne1024pg2.F20TR-SCREAMv1.c10-sep11.out10min.cubesphere.zarr
+
+export IMAGE=<your container tag>
+export AUX_DATA_ROOT=/path/to/strata_v1
+export SCREAM_MAIN_ZARR_PATH=/path/to/sdecadal.ne1024pg2_ne1024pg2.F20TR-SCREAMv1.c10-sep11.out10min.cubesphere.zarr
+export OUTPUT=/path/to/forecast_out
+sbatch perlmutter_scripts/strata_v1_rollout.sh
+```
+
+`perlmutter_scripts/strata_v1_rollout.sh` is the 4-GPU, 2-step rollout.
+Build `docker/Dockerfile` for your GPU (`CUDA_ARCH=8.0` on A100, `9.0` on
+H100) and pass that tag as `IMAGE`. A finished run exits 0 and logs
+`run_scream step 2/2`, `Forecast done: 2 steps = 0.3 h`, liquid precip
+about `0.002 mm/day`, and ice precip `0.000`. Ice precip of zero is
+expected. Perlmutter-specific container and job setup is in
+[`docs/nersc_setup.md`](docs/nersc_setup.md).
 
 ## Training
 
@@ -126,9 +153,16 @@ Single GPU:
 
     python train.py <config_name>
 
+The released STRATA v1 checkpoint is the 4-step finetune of the Pixel DiT
+with the bilinear depthwise-GeLU projection:
+`pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_unfreeze_3src_const1em5_t128_4stepft`.
+Run `torchrun` inside an interactive GPU session, not from a login node.
+That config also needs `sdy1` and `sdy2` under `ZARR_ROOT`, using the
+directory names above. A forecast does not.
+
 Multiple GPUs on one node:
 
-    torchrun --nproc_per_node=<num_gpus> train.py <config_name>
+    torchrun --nproc_per_node=<num_gpus> train.py pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_unfreeze_3src_const1em5_t128_4stepft
 
 Checkpoints (`best.pth` / `latest.pth`) and logs are written to the config's
 `rundir` (default `output/`). `train.py` uses PyTorch Lightning Fabric and
