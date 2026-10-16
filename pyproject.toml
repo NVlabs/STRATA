@@ -34,7 +34,10 @@ dependencies = [
     "typer>=0.26",
     "tqdm>=4.67",
     "torchmetrics>=1.9.0",
-    "lightning>=2.6.1",
+    # >=2.6.6: checkpoint _instantiator arbitrary-import fix; both
+    # distribution names must carry the floor (see requirements.txt)
+    "lightning>=2.6.6",
+    "pytorch-lightning>=2.6.6",
     "pytorch-optimizer>=3.10.0",
     "tensorboard>=2.20.0",
     "lmdb>=2.2.0",
