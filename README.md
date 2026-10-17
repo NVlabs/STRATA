@@ -5,7 +5,7 @@ Strata is a deep-learning weather emulator for the
 transformer-based neural networks to emulate SCREAM atmospheric physics on
 the cubed-sphere grid and supports multi-day global forecasting.
 
-- 📄 **Paper:** [Scaling Storm-Resolving Atmospheric AI Simulation to the Entire Planet](https://arxiv.org/html/2606.31248v1)
+- 📄 **Paper:** [Scaling Storm-Resolving Atmospheric AI Simulation to the Entire Planet](https://arxiv.org/html/2606.31248v1) — Accepted at **NeurIPS 2026, Main Track**.
 - 🤗 **Model checkpoint:** Will be shared soon.
 
 The Strata architecture (a two-stage 3D neighborhood-attention transformer
