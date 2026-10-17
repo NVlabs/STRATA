@@ -43,17 +43,20 @@ wind rotation keeps the mean-based center, so its numerics are unchanged.
 Everything else is bit-compatible modulo op ordering.
 """
 
+from functools import partial
 from typing import Mapping, Optional, Tuple
 
 import torch
 import torch.nn as nn
 from physicsnemo.experimental.models.strata import Strata, StrataTransformer3D
 from physicsnemo.experimental.models.strata.coords import build_axial_token_coords
+from physicsnemo.experimental.models.strata.layers import StrataPixel3DBlock
 from physicsnemo.experimental.nn import build_axial_rope_cos_sin_2d_continuous
 from physicsnemo.nn.module.mlp_layers import Mlp
 
 from screamcast.checkpoint_compat import remap_legacy_state_dict
 from screamcast.dealias import DealiasedPatchEmbed3D
+from screamcast.depthwise_conv import _chunked_depthwise_conv
 from screamcast.tile_geometry import TileGeometry
 from screamcast.wind_rotation import forward_uv_to_tile, inverse_tile_to_uv
 
@@ -506,6 +509,14 @@ class StrataModel(_StrataModelBase):
             activation_checkpointing_pixel=do_activation_checkpointing_pixel,
         )
         self.strata = Strata(**strata_kwargs)
+        if use_chunked_depthwise_conv_pixel:
+            for block in self.strata.pixel_blocks:
+                if (
+                    isinstance(block, StrataPixel3DBlock)
+                    and block.adaln_mode == "bilinear_dw"
+                ):
+                    conv = block.adaln_bilinear_dw_conv
+                    conv.forward = partial(_chunked_depthwise_conv, conv)
         _use_tanh_gelu(self.strata)
 
         if semantic_kwargs.get("use_dealiased_patch_embed", False):
