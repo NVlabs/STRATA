@@ -22,54 +22,34 @@ _MAX_CONV_ELEMENTS = 2**31 - 1
 
 
 def _chunked_depthwise_conv(conv: nn.Conv2d, x: torch.Tensor) -> torch.Tensor:
-    """Apply grouped conv in the largest index-safe batch or channel chunks.
-
-    Include explicit padding and the output in the element bound. Bias stays
-    outside autocast convolution, matching the existing vmap operator.
-    """
+    """Choose index-safe batch/channel chunks for the shared vmap operator."""
     h, w = x.shape[-2:]
     ph, pw = h + 2 * conv.padding[0], w + 2 * conv.padding[1]
     oh = (ph - conv.dilation[0] * (conv.kernel_size[0] - 1) - 1) // conv.stride[0] + 1
     ow = (pw - conv.dilation[1] * (conv.kernel_size[1] - 1) - 1) // conv.stride[1] + 1
     area = max(h * w, oh * ow, ph * pw if conv.padding_mode != "zeros" else 0)
-    dim, chunk_size = 0, _MAX_CONV_ELEMENTS // (x.shape[1] * area)
-    if chunk_size < 1:
-        dim, chunk_size = 1, _MAX_CONV_ELEMENTS // (x.shape[0] * area)
-        if chunk_size < 1:
+    batch_chunk_size = _MAX_CONV_ELEMENTS // (x.shape[1] * area)
+    channel_chunk_size = x.shape[1]
+    if batch_chunk_size < 1:
+        batch_chunk_size = x.shape[0]
+        channel_chunk_size = _MAX_CONV_ELEMENTS // (x.shape[0] * area)
+        if channel_chunk_size < 1:
             raise ValueError(
                 "one conditioning channel exceeds the 32-bit indexing limit"
             )
-    outputs = []
-    for i, part in enumerate(x.split(chunk_size, dim=dim)):
-        weight, bias = conv.weight, conv.bias
-        if dim == 1:
-            start = i * chunk_size
-            weight = weight[start : start + part.shape[1]]
-            if bias is not None:
-                bias = bias[start : start + part.shape[1]]
-        part = part.contiguous()
-        padding = conv.padding
-        if conv.padding_mode != "zeros":
-            part = nn.functional.pad(
-                part, conv._reversed_padding_repeated_twice, mode=conv.padding_mode
-            )
-            padding = (0, 0)
-        output = nn.functional.conv2d(
-            part,
-            weight,
-            None,
-            conv.stride,
-            padding,
-            conv.dilation,
-            groups=part.shape[1],
-        )
-        if bias is not None:
-            output = output + bias[None, :, None, None]
-        outputs.append(output)
-    return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=dim)
+    return _wrap_large_depthwise_conv(
+        conv,
+        channel_chunk_size if channel_chunk_size < x.shape[1] else None,
+        batch_chunk_size=(batch_chunk_size if batch_chunk_size < x.shape[0] else None),
+    )(x)
 
 
-def _wrap_large_depthwise_conv(conv: nn.Conv2d, chunk_size: int = 4):
+def _wrap_large_depthwise_conv(
+    conv: nn.Conv2d,
+    chunk_size: int | None = 4,
+    *,
+    batch_chunk_size: int | None = None,
+):
     """Work around the conv2d element-count restriction for depthwise convs."""
     if conv.groups != conv.out_channels:
         raise ValueError("only works with depthwise convolution")
@@ -93,7 +73,7 @@ def _wrap_large_depthwise_conv(conv: nn.Conv2d, chunk_size: int = 4):
     def apply(x: torch.Tensor) -> torch.Tensor:
         return func(x, conv.weight, bias)
 
-    return torch.vmap(apply)
+    return torch.vmap(apply, chunk_size=batch_chunk_size)
 
 
 def _apply_conv2d(

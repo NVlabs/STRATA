@@ -50,8 +50,17 @@ def test_depthwise_conv_without_chunking():
 
 
 @pytest.mark.parametrize("bias", [True, False])
-@pytest.mark.parametrize("limit,shape", [(144, (5, 2, 4, 4)), (72, (2, 4, 4, 4))])
-def test_chunked_matches_conv2d_outputs_and_gradients(monkeypatch, bias, limit, shape):
+@pytest.mark.parametrize(
+    "limit,shape,chunks,pad_calls",
+    [
+        (144, (5, 2, 4, 4), [None, 2], 3),
+        (72, (2, 4, 4, 4), [1, None], 4),
+        (1000, (2, 4, 4, 4), [None, None], 1),
+    ],
+)
+def test_chunked_matches_conv2d_outputs_and_gradients(
+    monkeypatch, bias, limit, shape, chunks, pad_calls
+):
     torch.manual_seed(7)
     monkeypatch.setattr(depthwise, "_MAX_CONV_ELEMENTS", limit)
     reference = nn.Conv2d(
@@ -71,18 +80,26 @@ def test_chunked_matches_conv2d_outputs_and_gradients(monkeypatch, bias, limit, 
     x_reference = x.detach().clone().requires_grad_()
     expected = reference(x_reference)
     original_pad = nn.functional.pad
+    original_vmap = torch.vmap
     calls = []
+    selected_chunks = []
 
-    def check_limit(part, *args, **kwargs):
-        padded = original_pad(part, *args, **kwargs)
-        assert part.numel() <= limit and padded.numel() <= limit
+    def record_pad(part, *args, **kwargs):
         calls.append(part.shape)
-        return padded
+        return original_pad(part, *args, **kwargs)
 
-    monkeypatch.setattr(nn.functional, "pad", check_limit)
+    def record_vmap(*args, **kwargs):
+        selected_chunks.append(kwargs["chunk_size"])
+        return original_vmap(*args, **kwargs)
+
+    # vmap hides mapped dimensions from pad's logical tensor shape. Check
+    # the physical batch/channel chunk sizes as well as the number of calls.
+    monkeypatch.setattr(nn.functional, "pad", record_pad)
+    monkeypatch.setattr(torch, "vmap", record_vmap)
     actual = conv(x)
     torch.testing.assert_close(actual, expected)
-    assert len(calls) > 1
+    assert selected_chunks == chunks
+    assert len(calls) == pad_calls
     probe = torch.randn_like(actual)
     (actual * probe).sum().backward()
     (expected * probe).sum().backward()
