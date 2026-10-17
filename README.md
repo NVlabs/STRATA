@@ -161,6 +161,9 @@ live under [`scripts/ace/`](scripts/ace/).
 
 ## Developing
 
+GitHub Actions runs `make lint` on pushes to `main` and pull requests. To run the same
+checks locally, install Python 3.12 and run `make install-linters` first.
+
     make lint     # SPDX license headers, black, and ruff
     pytest
 
