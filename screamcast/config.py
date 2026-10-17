@@ -151,6 +151,8 @@ class PixelDiTConfig:
     freeze_semantic: bool = False
     freeze_pixel_blocks: bool = False
     use_bilinear_dw_gelu_project_adaln: bool = False
+    # True: automatically split batch/levels into the largest index-safe
+    # grouped-convolution chunks. False: force one unchunked grouped call.
     use_chunked_depthwise_conv: bool = True
     first_block_only_adaln: bool = False
     do_rope_2d: bool = False
