@@ -517,7 +517,6 @@ class StrataModel(_StrataModelBase):
                 ):
                     conv = block.adaln_bilinear_dw_conv
                     conv.forward = partial(_chunked_depthwise_conv, conv)
-                    conv.chunk_size = "auto"
         _use_tanh_gelu(self.strata)
 
         if semantic_kwargs.get("use_dealiased_patch_embed", False):

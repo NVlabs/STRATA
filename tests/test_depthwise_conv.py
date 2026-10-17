@@ -12,98 +12,77 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import copy
+from functools import partial
+
 import pytest
 import torch
 from torch import nn
 
 import screamcast.depthwise_conv as depthwise
-from screamcast.depthwise_conv import DepthwiseConv, _wrap_large_depthwise_conv
 
 
-def test_wrap_depthwise_conv():
-    conv = nn.Conv2d(10, 10, 5, padding=2, groups=10)
-    conv_wrapped = _wrap_large_depthwise_conv(conv)
-    x = torch.ones(5, 10, 32, 32)
-    assert conv_wrapped(x).shape == (5, 10, 32, 32)
-    torch.testing.assert_close(conv(x), conv_wrapped(x))
-
-
-def test_wrap_depthwise_conv_without_bias():
-    conv = nn.Conv2d(10, 10, 5, padding=2, groups=10, bias=False)
-    conv_wrapped = _wrap_large_depthwise_conv(conv)
-    x = torch.ones(5, 10, 32, 32)
-    assert conv_wrapped(x).shape == (5, 10, 32, 32)
-    torch.testing.assert_close(conv(x), conv_wrapped(x))
-
-
-@pytest.mark.parametrize("chunk_size", ["auto", 2, None])
-def test_depthwise_conv(chunk_size):
-    conv = DepthwiseConv(10, chunk_size=chunk_size, padding=2, kernel_size=5)
-    x = torch.ones(10, 10, 32, 32)
-    assert conv(x).shape == (10, 10, 32, 32)
-
-
-def test_depthwise_conv_without_chunking():
-    conv = DepthwiseConv(10, chunk_size=None, padding=2, kernel_size=5)
-    x = torch.ones(10, 10, 32, 32)
-    assert conv(x).shape == (10, 10, 32, 32)
-
-
-@pytest.mark.parametrize("bias", [True, False])
 @pytest.mark.parametrize(
-    "limit,shape,chunks,pad_calls",
+    "limit,shape",
     [
-        (144, (5, 2, 4, 4), [None, 2], 3),
-        (72, (2, 4, 4, 4), [1, None], 4),
-        (1000, (2, 4, 4, 4), [None, None], 1),
+        (256, (5, 2, 4, 4)),  # Batch chunks; two padded samples fit.
+        (128, (2, 4, 4, 4)),  # One sample also needs channel chunks.
+        (1000, (2, 4, 4, 4)),  # Everything fits without splitting.
+        (64, (2, 4, 4, 4)),  # Exactly one padded channel fits.
     ],
 )
-def test_chunked_matches_conv2d_outputs_and_gradients(
-    monkeypatch, bias, limit, shape, chunks, pad_calls
-):
+def test_chunked_matches_conv2d_outputs_and_gradients(monkeypatch, limit, shape):
     torch.manual_seed(7)
     monkeypatch.setattr(depthwise, "_MAX_CONV_ELEMENTS", limit)
     reference = nn.Conv2d(
-        shape[1],
-        shape[1],
-        3,
-        padding=1,
-        groups=shape[1],
-        padding_mode="replicate",
-        bias=bias,
+        shape[1], shape[1], 5, padding=2, groups=shape[1], padding_mode="replicate"
     ).double()
-    conv = DepthwiseConv(
-        shape[1], 3, padding=1, padding_mode="replicate", bias=bias
-    ).double()
-    conv.load_state_dict(reference.state_dict(), strict=True)
+    conv = copy.deepcopy(reference)
+    conv.forward = partial(depthwise._chunked_depthwise_conv, conv)
     x = torch.randn(shape, dtype=torch.float64, requires_grad=True)
     x_reference = x.detach().clone().requires_grad_()
     expected = reference(x_reference)
-    original_pad = nn.functional.pad
-    original_vmap = torch.vmap
+    original_build = depthwise._build_chunked_depthwise_conv
     calls = []
-    selected_chunks = []
 
-    def record_pad(part, *args, **kwargs):
-        calls.append(part.shape)
-        return original_pad(part, *args, **kwargs)
+    def checked_build(conv, channel_chunk):
+        apply = original_build(conv, channel_chunk)
 
-    def record_vmap(*args, **kwargs):
-        selected_chunks.append(kwargs["chunk_size"])
-        return original_vmap(*args, **kwargs)
+        def checked_apply(part, weight, bias):
+            channels = shape[1] if channel_chunk is None else channel_chunk
+            # The production 5x5 replicate-padded kernel expands 4x4 to 8x8.
+            assert part.shape[0] * channels * 64 <= limit
+            calls.append((part.shape[0], channel_chunk))
+            return apply(part, weight, bias)
 
-    # vmap hides mapped dimensions from pad's logical tensor shape. Check
-    # the physical batch/channel chunk sizes as well as the number of calls.
-    monkeypatch.setattr(nn.functional, "pad", record_pad)
-    monkeypatch.setattr(torch, "vmap", record_vmap)
+        return checked_apply
+
+    monkeypatch.setattr(depthwise, "_build_chunked_depthwise_conv", checked_build)
     actual = conv(x)
     torch.testing.assert_close(actual, expected)
-    assert selected_chunks == chunks
-    assert len(calls) == pad_calls
+    if limit == 1000:
+        assert calls == [(shape[0], None)]
     probe = torch.randn_like(actual)
     (actual * probe).sum().backward()
     (expected * probe).sum().backward()
     torch.testing.assert_close(x.grad, x_reference.grad)
     torch.testing.assert_close(conv.weight.grad, reference.weight.grad)
-    if bias:
-        torch.testing.assert_close(conv.bias.grad, reference.bias.grad)
+    torch.testing.assert_close(conv.bias.grad, reference.bias.grad)
+
+
+def test_adapter_deepcopy_uses_own_parameters():
+    conv = nn.Conv2d(2, 2, 5, padding=2, groups=2, padding_mode="replicate")
+    conv.forward = partial(depthwise._chunked_depthwise_conv, conv)
+    clone = copy.deepcopy(conv).double()
+    with torch.no_grad():
+        clone.weight.zero_()
+        clone.bias.fill_(3)
+    x = torch.randn(2, 2, 4, 4, dtype=torch.float64)
+    torch.testing.assert_close(clone(x), torch.full_like(x, 3))
+
+
+def test_adapter_rejects_plane_over_indexing_limit(monkeypatch):
+    monkeypatch.setattr(depthwise, "_MAX_CONV_ELEMENTS", 63)
+    conv = nn.Conv2d(2, 2, 5, padding=2, groups=2, padding_mode="replicate")
+    with pytest.raises(ValueError, match="one conditioning plane"):
+        depthwise._chunked_depthwise_conv(conv, torch.ones(2, 2, 4, 4))
