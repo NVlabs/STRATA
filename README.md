@@ -213,6 +213,32 @@ Checkpoints (`best.pth` / `latest.pth`) and logs are written to the config's
 auto-detects the launch environment, so the same entry point also runs under
 SLURM `srun` (via `SLURM_*` env vars) for multi-node jobs.
 
+### Recommended schedule (production checkpoint)
+
+The 5 km production recipe trains in four stages; each resumes the previous stage's
+`best.pth` (`experiment.resume_from`). "Images" counts training tiles (batch size is 1 per
+GPU, so one step on 2 nodes / 16 GPUs is 16 images).
+
+We recommend training with the precipitation ReLU off (`pipeline.do_precip_relu=False`)
+and clipping precipitation at inference instead: with the ReLU inside the forward pass a
+precipitation head can saturate below zero during training (zero output, zero gradient)
+and never recover.
+
+1. **Pretrain on 64×64 tiles** at a learning rate of 1e-4 (5k-step warm-up, then
+   constant) for about 10M images, or until convergence. The production run reached
+   10M images in total (started on 1 node, moved to 2 nodes at the same learning rate);
+   starting on 2 nodes should need about the same number of images.
+2. **Anneal on 64×64 tiles**: one cosine from 1e-4 down to 1e-6 over the next ~3M images
+   (`cosine_t_max=10` validations × `validate_steps=20000` = 200k steps on 2 nodes),
+   keeping the optimizer state.
+3. **Fine-tune on 128×128 tiles** at a constant 1e-5 (2k-step warm-up) with a fresh
+   optimizer. Better: fine-tune directly on tile + 2×halo, the padded tile the rollout
+   feeds the model. This converges within about 0.5-1M images.
+4. **Multi-step fine-tuning** once stage 3 has converged: 2-step, then 4-step, both at a
+   constant 1e-5. `add_multistep_finetune_configs("<stage-3 config>")` in
+   `train_configs.py` defines `<stage-3 config>_2stepft` and `_4stepft`; run the 2-step
+   config, then the 4-step one (it resumes the 2-step run's `best.pth`).
+
 ## Global rollout (cubed sphere)
 
 Global rollouts run `scripts/ace/run_screamcast_nudged.py` under SLURM.
