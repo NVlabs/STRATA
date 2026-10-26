@@ -1,0 +1,26 @@
+diff --git a/hiccup/hiccup_data_class.py b/hiccup/hiccup_data_class.py
+index 5cb732c..646fa2e 100644
+--- a/hiccup/hiccup_data_class.py
++++ b/hiccup/hiccup_data_class.py
+@@ -1565,14 +1565,19 @@ class hiccup_data(object):
+         # xarray will automatically convert the time coordinate,
+         # which can be problematic, especially when generating nudging data.
+         # By specifying the encoding we can avoid this problem
+-        time_encoding_dict = {'time':{'units': f'hours since {ref_date} 00:00:00'}}
+-
+         for file_name in file_dict.values() :
+             # run_cmd(f'ncdump {file_name} -v time | tail | grep "time =" ',verbose,shell=True)
+             # run_cmd(f'ncdump {file_name} -h | grep "time:units" ',verbose,shell=True)
+             with xr.open_dataset(file_name) as ds_data:
+                 ds_data.load()
+                 self.add_time_date_variables(ds_data,verbose=False,do_timers=False)
++                # Current xarray refuses to overwrite an existing calendar attr
++                # with the encoding calendar. Keep HICCUP's noleap calendar by
++                # moving it into the encoding dict before the write.
++                time_encoding_dict = {'time': {'units': f'hours since {ref_date} 00:00:00'}}
++                calendar = ds_data['time'].attrs.pop('calendar', None)
++                if calendar is not None:
++                    time_encoding_dict['time']['calendar'] = calendar
+                 ds_data.to_netcdf(f'{file_name}.hiccup_tmp',format=xarray_atm_nc_format,mode='w',encoding=time_encoding_dict)
+                 ds_data.close()
+             run_cmd(f'mv {file_name}.hiccup_tmp {file_name}',verbose)
