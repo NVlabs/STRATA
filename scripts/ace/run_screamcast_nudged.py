@@ -92,6 +92,7 @@ from screamcast.regional_averages import (
     load_landfrac_face,
 )
 from screamcast.sht_omega_filter import DistributedSHTHighpass
+from screamcast.tile_jitter import JitteredModel
 from screamcast.vertical_interpolation import log_pressure_interpolate
 from screamcast.zarr_writer import (
     FaceZarrWriteStep,
@@ -294,6 +295,57 @@ def parse_args() -> argparse.Namespace:
             "Apply a Kaiser-Bessel derived window to each padded tile before the "
             "halo adjoint, downweighting halo contributions relative to interior "
             "predictions. Only used when --halo-adjoint is set."
+        ),
+    )
+    parser.add_argument(
+        "--halo-adjoint-cross-face",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Let the halo adjoint project predictions made on the cube-face "
+            "extension back onto real grid points. Those targets do not coincide "
+            "with the neighbour face's grid, so the KNN operator interpolates "
+            "them and the adjoint mixes a grid-scale-smoothed estimate into the "
+            "outermost few pixels of every face. --no-halo-adjoint-cross-face "
+            "keeps the overlap-add at intra-face tile seams and drops it across "
+            "cube-face edges. Only used when --halo-adjoint is set."
+        ),
+    )
+    parser.add_argument(
+        "--tile-jitter",
+        type=int,
+        default=4,
+        help=(
+            "Per-step sub-patch jitter in pixels. Every step runs the model on a "
+            "(padded-J) x (padded-J) sub-window of each padded tile so the 4-px "
+            "patch kink does not accumulate. Default 4 (the patch size). 0 turns "
+            "jitter off."
+        ),
+    )
+    parser.add_argument(
+        "--tile-jitter-mode",
+        choices=["cycle", "random", "cycle16"],
+        default="cycle16",
+        help=(
+            "Offset schedule. cycle16 visits all J*J offsets and cancels both "
+            "axis lines and both 2-D corners. cycle is the diagonal schedule and "
+            "leaves 45-degree stripes. random has no blind spot but only a "
+            "random-walk cancellation."
+        ),
+    )
+    parser.add_argument(
+        "--tile-jitter-seed",
+        type=int,
+        default=0,
+        help="RNG seed for --tile-jitter-mode random. The same seed is used on every rank.",
+    )
+    parser.add_argument(
+        "--tile-jitter-fill",
+        choices=["replicate", "zero"],
+        default="replicate",
+        help=(
+            "Fill for the un-sampled J-px border. replicate copies the sub-window "
+            "edge so the halo adjoint's window weight is not applied to zeros."
         ),
     )
     parser.add_argument(
@@ -621,7 +673,11 @@ def main() -> None:
     pad = channel_chunked(args.halo_channel_chunk)(halo_exchange)
 
     if args.halo_adjoint:
-        logger.info("building NormalizedHaloAdjoint (window=%s)", args.halo_window)
+        logger.info(
+            "building NormalizedHaloAdjoint (window=%s, cross_face=%s)",
+            args.halo_window,
+            args.halo_adjoint_cross_face,
+        )
         if args.halo_window:
             padded_size = topology.padded_tile_size
             w1d = torch.tensor(
@@ -631,7 +687,11 @@ def main() -> None:
         else:
             window = None
         unpad = channel_chunked(args.halo_channel_chunk)(
-            NormalizedHaloAdjoint(halo_exchange, window=window).to(device)
+            NormalizedHaloAdjoint(
+                halo_exchange,
+                window=window,
+                own_face_only=not args.halo_adjoint_cross_face,
+            ).to(device)
         )
     else:
         unpad = channel_chunked(args.halo_channel_chunk)(halo_exchange.topology.crop)
@@ -639,6 +699,24 @@ def main() -> None:
     model.set_latlon(lat_deg=halo_exchange.lat_deg, lon_deg=halo_exchange.lon_deg)
     if args.forecast_model == "screamcast":
         model.compile()
+
+    if args.tile_jitter > 0:
+        model = JitteredModel(
+            model,
+            jitter=args.tile_jitter,
+            mode=args.tile_jitter_mode,
+            seed=args.tile_jitter_seed,
+            fill=args.tile_jitter_fill,
+        )
+        logger.info(
+            "sub-patch jitter ON: %dx%d window in the %d padded tile, mode=%s seed=%d fill=%s",
+            topology.padded_tile_size - args.tile_jitter,
+            topology.padded_tile_size - args.tile_jitter,
+            topology.padded_tile_size,
+            args.tile_jitter_mode,
+            args.tile_jitter_seed,
+            args.tile_jitter_fill,
+        )
 
     in_coords = dict(model.input_coords())
     logger.info("Loaded model: %s (%s)", args.run_name, args.forecast_model)
@@ -741,6 +819,11 @@ def main() -> None:
         "initial_time": str(t0),
         "device": str(device),
         "halo_adjoint": args.halo_adjoint,
+        "halo_adjoint_cross_face": (
+            args.halo_adjoint_cross_face if args.halo_adjoint else None
+        ),
+        "tile_jitter": args.tile_jitter,
+        "tile_jitter_mode": args.tile_jitter_mode if args.tile_jitter > 0 else None,
     }
     # Build output variable grouping and output store before rollout so we can
     # write each step as it is produced.

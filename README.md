@@ -112,11 +112,77 @@ generated from scratch (pure numpy + netCDF4, ~15 minutes) by
 derived `latlon_ne1024pg2.nc` is bit-identical to the file the shipped
 configs were trained with).
 
-> **Availability**: trained model checkpoints are not yet publicly
-> distributed, so the rollout-from-checkpoint workflows below cannot
-> currently run end to end outside NVIDIA. Training from scratch is fully
-> reproducible: dataset (Hugging Face, above), auxiliary files (generated,
-> above), and environment (Docker, above) are all public.
+> **Availability**: the STRATA v1 checkpoint and its auxiliary files
+> (static fields, `latlon_ne1024pg2.nc`, and both SCRIP grids) are in the
+> Hugging Face dataset `qx7m-kestrel/strata-v1-bundle`. That repository is
+> private for now and will be replaced by a public Hugging Face repository
+> soon; this path will be updated then. Download it and set `AUX_DATA_ROOT`
+> to that directory. A `.env` file is not required if you export
+> `AUX_DATA_ROOT` and `SCREAM_MAIN_ZARR_PATH`.
+
+## Running the STRATA v1 checkpoint
+
+The checkpoint bundle is small:
+
+```bash
+hf download qx7m-kestrel/strata-v1-bundle --local-dir /path/to/strata_v1
+export AUX_DATA_ROOT=/path/to/strata_v1
+```
+
+The initial-condition store is not. `nvidia/STRATA-SCREAM-sdecadal` is
+about 35 TB. Read it from remote storage first: set `SCREAM_MAIN_ZARR_PATH`
+to an `s3://` path (with `SCREAM_ZARR_PROFILE` set to that rclone remote)
+or to the Hugging Face dataset, and run the forecast against that path.
+Download a local copy only if throughput is the bottleneck:
+
+```bash
+hf download nvidia/STRATA-SCREAM-sdecadal --repo-type dataset \
+  --local-dir /path/to/sdecadal.ne1024pg2_ne1024pg2.F20TR-SCREAMv1.c10-sep11.out10min.cubesphere.zarr
+
+export SCREAM_MAIN_ZARR_PATH=/path/to/sdecadal.ne1024pg2_ne1024pg2.F20TR-SCREAMv1.c10-sep11.out10min.cubesphere.zarr
+```
+
+The forecast itself is a 4-GPU, 2-step `torchrun`, on whatever machine can
+launch it. Build `docker/Dockerfile` for your GPU (`--build-arg CUDA_ARCH=8.0`
+on A100, `9.0` on H100). `TORCH_COMPILE_DISABLE=1` keeps the first step from
+sitting in Inductor. PhysicsNeMo is installed with `--no-deps` in that image,
+so `treelib`, `gitpython`, `hydra-core`, and `termcolor` have to be
+importable or the process exits at startup.
+
+```bash
+export SCREAM_AUX_ZARR_PATH=$SCREAM_MAIN_ZARR_PATH
+export TORCH_COMPILE_DISABLE=1
+export OUTPUT=/path/to/forecast_out
+torchrun --nproc_per_node=4 scripts/ace/run_screamcast_nudged.py \
+  --run-name strata_v1_smoke \
+  --checkpoint $AUX_DATA_ROOT/checkpoints/strata_v1.pth \
+  --forecast-model screamcast \
+  --correction none \
+  --n-steps 2 \
+  --tile-size 128 \
+  --halo-width 16 \
+  --halo-adjoint \
+  --inference-batch-size 1 \
+  --tile-jitter 4 \
+  --tile-jitter-mode cycle16 \
+  --tile-jitter-fill replicate \
+  --sht-omega-lmax 0 \
+  --no-zarr-output \
+  --initial-time 2020-10-13T00:00:00 \
+  $OUTPUT
+```
+
+A finished run exits 0 and logs `run_scream step 2/2`,
+`Forecast done: 2 steps = 0.3 h`, and liquid precip about `0.002 mm/day`.
+Ice precip `0.000` is a known bug of this checkpoint, not normal behavior:
+ice precip is a diagnostic, and training applied a ReLU non-negative
+constraint (`do_precip_relu`), so ice precip was not learned well. It
+should not affect the other state variables.
+
+On Perlmutter, do not hand-copy the launch. `perlmutter_scripts/strata_v1_rollout.sh`
+is this same forecast wrapped for Shifter, and it hardcodes the NERSC
+account and GPU constraint. The exports and `sbatch` line are in
+[`docs/nersc_setup.md`](docs/nersc_setup.md).
 
 ## Training
 
@@ -129,9 +195,18 @@ Single GPU:
 
     python train.py <config_name>
 
+The released STRATA v1 checkpoint is the 4-step finetune of the Pixel DiT
+with the bilinear depthwise-GeLU projection:
+`pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_unfreeze_3src_const1em5_t128_4stepft`.
+Run `torchrun` inside an interactive GPU session, not from a login node.
+That config also needs `sdy1` and `sdy2` under `ZARR_ROOT`, under the
+directory names `_ZARR_SDY1` and `_ZARR_SDY2` in `train_configs.py`
+(`sdy1.ne1024pg2_...out10min-4lev.cubesphere.zarr` and the matching `sdy2`
+name), not the Hugging Face repository names. A forecast does not.
+
 Multiple GPUs on one node:
 
-    torchrun --nproc_per_node=<num_gpus> train.py <config_name>
+    torchrun --nproc_per_node=<num_gpus> train.py pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_unfreeze_3src_const1em5_t128_4stepft
 
 Checkpoints (`best.pth` / `latest.pth`) and logs are written to the config's
 `rundir` (default `output/`). `train.py` uses PyTorch Lightning Fabric and
