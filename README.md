@@ -184,6 +184,13 @@ is this same forecast wrapped for Shifter, and it hardcodes the NERSC
 account and GPU constraint. The exports and `sbatch` line are in
 [`docs/nersc_setup.md`](docs/nersc_setup.md).
 
+### Initial conditions from ERA5 or ECMWF HRES
+
+`initial_conditions/` builds ne1024pg2 / L128 atmospheric initial conditions
+from ERA5, or from the ECMWF HRES analysis, with the E3SM HICCUP steps. A GPU
+port of those steps builds one IC in about 80 s. See
+[`docs/initial_conditions.md`](docs/initial_conditions.md).
+
 ## Training
 
 Training settings are named Python configs in `train_configs.py`; see
