@@ -5,7 +5,7 @@
 #                 or the source build in docker/build_natten.sh on NGC images)
 #   - earth2grid (not on PyPI; pinned GitHub archive, --no-deps)
 #   - nvidia-physicsnemo (pinned GitHub archive with the Strata models;
-#                 --no-deps so its torch>=2.10.0 floor cannot replace a
+#                 --no-deps so its torch>=2.13.0 floor cannot replace a
 #                 container's pre-release torch build)
 # lightning >=2.6.6 everywhere: earlier releases (through 2.6.5) import and
 # execute arbitrary module paths from a checkpoint's _instantiator

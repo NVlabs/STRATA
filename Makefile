@@ -8,10 +8,10 @@ install-linters:
 
 install:
 	pip install --no-build-isolation -r requirements.txt
-	pip install -f https://whl.natten.org "natten>=0.21.5"
-	pip install --no-deps --no-build-isolation https://github.com/NVlabs/earth2grid/archive/3415382a37e414a867d4c6ae2519e3e8afdbece1.tar.gz
-	pip install "warp-lang>=1.14" jaxtyping
-	pip install --no-deps https://github.com/NVIDIA/physicsnemo/archive/07cdcc8b65f10bee733a32a77b4b76e20c70c54c.tar.gz
+	pip install -f https://whl.natten.org "natten>=0.21.7"
+	pip install --no-deps --no-build-isolation https://github.com/NVlabs/earth2grid/archive/6e39b069f0558cd0eff0ec666ede5e125d79b4ff.tar.gz
+	pip install "warp-lang>=1.17" jaxtyping "termcolor>=3.3.0" "treelib>=1.8.0"
+	pip install --no-deps https://github.com/NVIDIA/physicsnemo/archive/fae6bb2b0e96488a052d9627d41e6dc94653f06a.tar.gz
 
 lint:
 	python3 ci/check_licenses.py

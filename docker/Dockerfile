@@ -24,7 +24,7 @@
 # Engine. Everything below is layered on top of it. Anonymous pulls of the
 # base image generally work; a free NGC account may be required depending on
 # NGC policy: https://catalog.ngc.nvidia.com
-FROM nvcr.io/nvidia/pytorch:26.01-py3
+FROM nvcr.io/nvidia/pytorch:26.09-py3
 
 ENV PIP_NO_CACHE_DIR=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -49,10 +49,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN python3 -m pip install -U pip setuptools wheel
 
+# Pin the NGC torch / CUDA / numpy stack. NGC 26.09 ships an EMPTY
+# /etc/pip/constraint.txt, so without this any package that declares e.g.
+# torch>=2.13 would replace NGC's 2.14.0a0 pre-release torch with a PyPI
+# wheel. NGC's nvidia-dali-cuda130 (the data pipelines) requires
+# packaging<=26.2.
+RUN python3 -m pip list --format=freeze \
+    | grep -i -E '^(torch|torchvision|torchaudio|triton|numpy|transformer.engine|apex|flash.attn|cuda-|nvidia-|cupti)' \
+    > /etc/pip/strata-constraint.txt \
+ && echo "packaging<=26.2" >> /etc/pip/strata-constraint.txt \
+ && cat /etc/pip/strata-constraint.txt
+ENV PIP_CONSTRAINT=/etc/pip/strata-constraint.txt
+
 # Plain-pip requirements. NATTEN, earth2grid, and physicsnemo are installed
 # separately below because each needs flags a requirements file cannot
-# express. This step runs with NGC's PIP_CONSTRAINT still active so pip
-# cannot displace the container's torch stack.
+# express. PIP_CONSTRAINT stays active for every step so pip cannot displace
+# the container's torch stack.
 COPY requirements.txt /tmp/requirements.txt
 RUN python3 -m pip install --no-cache-dir --prefer-binary \
     -r /tmp/requirements.txt
@@ -66,21 +78,21 @@ ARG CUDA_ARCH=9.0
 COPY docker/build_natten.sh /tmp/build_natten.sh
 RUN CUDA_ARCH=${CUDA_ARCH} bash /tmp/build_natten.sh
 
-# earth2grid is not on PyPI; install the pinned GitHub archive. --no-deps
-# and --no-build-isolation keep it from touching the torch stack.
+# earth2grid is not on PyPI; install the pinned GitHub archive (v2025.11.1).
+# --no-deps and --no-build-isolation keep it from touching the torch stack.
 RUN python3 -m pip install --no-cache-dir --prefer-binary --no-deps --no-build-isolation \
-    https://github.com/NVlabs/earth2grid/archive/3415382a37e414a867d4c6ae2519e3e8afdbece1.tar.gz
+    https://github.com/NVlabs/earth2grid/archive/6e39b069f0558cd0eff0ec666ede5e125d79b4ff.tar.gz
 
-# NGC pins zarr<3 via PIP_CONSTRAINT; the datasets are zarr v3. Clear the
-# constraint for this and the remaining steps.
-ENV PIP_CONSTRAINT=""
+# The datasets are zarr v3. (NGC 26.01 pinned zarr<3 in its constraint file;
+# the strata-constraint.txt above does not constrain zarr.)
 RUN python3 -m pip install --no-cache-dir --upgrade "zarr>=3"
 
 # fme (AI2 Full Model Emulator) and earth2studio power the rollout/inference
 # wrappers. Their runtime deps are installed first so the --no-deps install
 # below cannot skip them; --no-deps stops pip from re-resolving the
 # torch/CUDA/natten stack already baked into the image.
-# torch-harmonics is pinned to 0.8.0 by fme==2026.1.1.
+# torch-harmonics is pinned to 0.8.0 by fme==2026.1.1. earth2studio 0.13.0
+# imports nest_asyncio and requires pandas<3 (NGC 26.09 ships pandas 3).
 RUN python3 -m pip install --no-cache-dir --prefer-binary \
     dacite \
     dask \
@@ -91,7 +103,9 @@ RUN python3 -m pip install --no-cache-dir --prefer-binary \
     imageio_ffmpeg \
     loguru \
     moviepy \
+    nest-asyncio \
     omegaconf \
+    "pandas<3" \
     plotly \
     pygrib \
     "setuptools<81" \
@@ -102,21 +116,29 @@ RUN python3 -m pip install --no-cache-dir --prefer-binary --no-deps \
     fme==2026.1.1 \
     earth2studio==0.13.0
 
-# marimo runs the notebooks/ examples.
+# marimo runs the notebooks/ examples. It needs a newer Pygments than the
+# apt-installed one, which has no pip RECORD file and cannot be uninstalled;
+# shadow it in site-packages instead.
+RUN python3 -m pip install --no-cache-dir --ignore-installed pygments
 RUN python3 -m pip install --no-cache-dir --prefer-binary marimo
 
-# physicsnemo pinned to main @ 07cdcc8b (includes the Strata models and the
-# continuous/stereographic RoPE helpers from PR #1750; pre-2.2, so PyPI does
-# not have it yet). --no-deps is REQUIRED: physicsnemo declares
-# torch>=2.10.0, and the NGC torch is a PEP 440 PRE-release that pip
-# considers older, so a plain install would replace the container's torch.
+# physicsnemo pinned to main @ fae6bb2b (2.3.0a0). It contains PR #2140
+# (merge b26a8805): Strata's depthwise conditioning conv defaults to
+# chunk_size="auto" instead of fixed 2-channel vmap chunks, which fixes the
+# slow pixel-stage conv of NVlabs/STRATA#6 for every config that leaves
+# use_chunked_depthwise_conv at its default. No physicsnemo release contains
+# it yet, and every commit that does requires torch>=2.13 (hence NGC 26.09).
+# --no-deps is REQUIRED: physicsnemo declares torch>=2.13.0, and the NGC
+# torch is a PEP 440 PRE-release that pip considers older, so a plain
+# install would replace the container's torch.
 # The import of physicsnemo.experimental.models.strata transitively pulls in
 # all of physicsnemo.nn, which needs warp, tensordict and timm at import
-# time; tensordict/timm declare their own torch/torchvision floors, so they
+# time (and, since the 2.3 dev line, treelib and termcolor via
+# physicsnemo.distributed); tensordict/timm declare their own torch/torchvision floors, so they
 # get the same --no-deps treatment, with their pure-Python runtime deps
 # installed explicitly first.
 RUN python3 -m pip install --no-cache-dir --prefer-binary \
-    "warp-lang>=1.14" \
+    "warp-lang>=1.17" \
     jaxtyping \
     cloudpickle \
     importlib_metadata \
@@ -124,16 +146,18 @@ RUN python3 -m pip install --no-cache-dir --prefer-binary \
     pyvers \
     huggingface_hub \
     safetensors \
-    pyyaml
+    pyyaml \
+    "termcolor>=3.3.0" \
+    "treelib>=1.8.0"
 # NB: tensordict declares orjson, but only as an optional accelerated JSON
 # backend imported lazily (stdlib json is the registered default) — verified
 # import-clean without it, so it is deliberately NOT installed (MPL-2.0).
 RUN python3 -m pip install --no-cache-dir --prefer-binary --no-deps \
-    tensordict \
-    timm
+    "tensordict>=0.15.3,<0.16.0" \
+    "timm>=1.0.30"
 RUN python3 -m pip uninstall -y nvidia-physicsnemo || true
 RUN python3 -m pip install --no-cache-dir --no-deps \
-    https://github.com/NVIDIA/physicsnemo/archive/07cdcc8b65f10bee733a32a77b4b76e20c70c54c.tar.gz
+    https://github.com/NVIDIA/physicsnemo/archive/fae6bb2b0e96488a052d9627d41e6dc94653f06a.tar.gz
 
 # The NGC image chain has shipped triton with an empty backends/nvidia/bin
 # (no ptxas / cuobjdump / nvdisasm -> "RuntimeError: Cannot find ptxas") and
@@ -153,14 +177,20 @@ import typer  # noqa: F401
 import warp
 from earth2grid import healpix_bare  # noqa: F401
 
+import inspect
+
 import physicsnemo
 
 assert natten.HAS_LIBNATTEN, "natten built without libnatten"
-assert physicsnemo.__version__.startswith("2.2"), physicsnemo.__version__
+assert physicsnemo.__version__.startswith("2.3"), physicsnemo.__version__
 from physicsnemo.experimental.models.strata import (  # noqa: F401
     Strata,
     StrataTransformer3D,
 )
+
+# physicsnemo PR #2140 (NVlabs/STRATA#6): automatic depthwise-conv chunking.
+default = inspect.signature(Strata.__init__).parameters["chunk_size_grouped_conv"].default
+assert default == "auto", default
 from physicsnemo.experimental.nn import (  # noqa: F401
     build_axial_rope_cos_sin_2d_continuous,
     spherical_centroid,

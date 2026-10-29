@@ -279,6 +279,39 @@ def test_factory_translation_production_shape():
     assert model._index_is_latlon
 
 
+def test_factory_default_depthwise_conv_uses_auto_chunking():
+    """The default pixel config builds automatically chunked depthwise convs.
+
+    NVlabs/STRATA#6: checkpoints that predate ``use_chunked_depthwise_conv``
+    load with its default (True), i.e. physicsnemo's chunked DepthwiseConv.
+    That is fast only with physicsnemo's ``chunk_size="auto"`` (PR #2140);
+    the fixed 2-channel chunks of earlier pins launch ~8x more kernels per
+    forward. Check the built modules, not the config field.
+    """
+    from physicsnemo.experimental.models.strata.layers import DepthwiseConv
+
+    import train as train_module
+    from screamcast.config import DiTConfig, PixelDiTConfig
+
+    with torch.device("meta"):
+        model = train_module.build_strata(
+            6,
+            6,
+            1024,
+            32,
+            dit_cfg=DiTConfig(embed_dim=64, n_layers=1, num_heads=2),
+            pixel_cfg=PixelDiTConfig(use_bilinear_dw_gelu_project_adaln=True),
+            do_bf16_mixed=False,
+            depth_levels=4,
+            grid_type="healpix",
+        )
+    convs = [block.adaln_bilinear_dw_conv for block in model.strata.pixel_blocks]
+    assert convs
+    for conv in convs:
+        assert isinstance(conv, DepthwiseConv)
+        assert conv.chunk_size == "auto"
+
+
 def test_dit_pixel_freeze_pixel_blocks():
     D, H, W = 24, 64, 64
     model = StrataModel(

@@ -5,7 +5,7 @@ ImageIO,2.37.3,BSD-2-Clause,https://github.com/imageio/imageio
 Jinja2,3.1.6,BSD License,https://github.com/pallets/jinja/
 Markdown,3.10.2,BSD-3-Clause,https://Python-Markdown.github.io/
 MarkupSafe,3.0.3,BSD-3-Clause,https://github.com/pallets/markupsafe/
-NATTEN,0.21.5,MIT,https://natten.org
+NATTEN,0.21.7,MIT,https://natten.org
 PyYAML,6.0.3,MIT License,https://pyyaml.org/
 Pygments,2.20.0,BSD-2-Clause,https://pygments.org
 Werkzeug,3.1.8,BSD-3-Clause,https://github.com/pallets/werkzeug/
@@ -118,7 +118,7 @@ numba,0.65.0,BSD License,https://numba.pydata.org
 numcodecs,0.16.5,MIT,https://github.com/zarr-developers/numcodecs
 numpy,2.4.4,BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0,https://numpy.org
 nvdlfw_inspect,0.2.2,Apache2,https://github.com/NVIDIA/nvidia-dlfw-inspect
-nvidia-physicsnemo,2.2.0a0,Apache-2.0,https://github.com/NVIDIA/physicsnemo
+nvidia-physicsnemo,2.3.0a0,Apache-2.0,https://github.com/NVIDIA/physicsnemo
 oauthlib,3.3.1,BSD-3-Clause,https://github.com/oauthlib/oauthlib
 omegaconf,2.3.0,BSD License,https://github.com/omry/omegaconf
 onnx,1.21.0,Apache-2.0,https://onnx.ai/
