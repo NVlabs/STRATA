@@ -38,7 +38,8 @@ Two subtleties make the guard reliable:
   *by sorted name* after construction, so identical (name, shape) param sets
   produce identical weights regardless of construction order. Only a genuine
   change to the forward math can move the output.
-* **fp32 / eval / fixed input.** Deterministic forward, no bf16, no dropout.
+* **fp32 / eval / fixed input.** Deterministic forward, no bf16, no dropout,
+  and TF32 disabled for the test (see ``_strict_fp32``).
 
 Usage
 -----
@@ -90,6 +91,21 @@ requires_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="DiT stack requires CUDA (natten kernels)",
 )
+
+
+@pytest.fixture(autouse=True)
+def _strict_fp32():
+    """Run the forward in true fp32, whatever the environment's TF32 default.
+
+    NGC PyTorch images enable TF32 matmuls/convs, which moves these outputs by
+    ~2e-4, above ATOL; goldens generated with TF32 off would then fail in an
+    image with it on, and vice versa. Restores the previous flags afterwards.
+    """
+    matmul, cudnn = torch.backends.cuda.matmul, torch.backends.cudnn
+    saved = matmul.allow_tf32, cudnn.allow_tf32
+    matmul.allow_tf32 = cudnn.allow_tf32 = False
+    yield
+    matmul.allow_tf32, cudnn.allow_tf32 = saved
 
 
 def _fill_params_deterministically(model: torch.nn.Module) -> torch.nn.Module:

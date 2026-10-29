@@ -10,7 +10,7 @@ install:
 	pip install --no-build-isolation -r requirements.txt
 	pip install -f https://whl.natten.org "natten>=0.21.7"
 	pip install --no-deps --no-build-isolation https://github.com/NVlabs/earth2grid/archive/6e39b069f0558cd0eff0ec666ede5e125d79b4ff.tar.gz
-	pip install "warp-lang>=1.17" jaxtyping "termcolor>=3.3.0" "treelib>=1.8.0"
+	pip install "warp-lang>=1.17" jaxtyping "GitPython>=3.1.62" "hydra-core>=1.3.7" "termcolor>=3.3.0" "treelib>=1.8.0"
 	pip install --no-deps https://github.com/NVIDIA/physicsnemo/archive/fae6bb2b0e96488a052d9627d41e6dc94653f06a.tar.gz
 
 lint:

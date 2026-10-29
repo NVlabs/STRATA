@@ -71,10 +71,13 @@ RUN python3 -m pip install --no-cache-dir --prefer-binary \
 
 # NATTEN built from source: NGC PyTorch is a custom build, so the prebuilt
 # wheels on https://whl.natten.org do not include a matching libnatten.
-# Pass --build-arg CUDA_ARCH=<compute capability> for your GPU
-# (9.0=Hopper/H100 default; `nvidia-smi --query-gpu=compute_cap
-# --format=csv,noheader` prints it; see build_natten.sh).
-ARG CUDA_ARCH=9.0
+# Pass --build-arg CUDA_ARCH=<compute capabilities> for your GPUs, e.g.
+# "8.0" for A100 (`nvidia-smi --query-gpu=compute_cap --format=csv,noheader`
+# prints it; see build_natten.sh). The default covers Ada (RTX 6000 Ada,
+# L40S) and Hopper (H100). On a GPU the build does not cover, the first NATTEN
+# call aborts the whole process with "no kernel image is available for
+# execution on the device" (no Python exception, so pytest exits silently).
+ARG CUDA_ARCH="8.9;9.0"
 COPY docker/build_natten.sh /tmp/build_natten.sh
 RUN CUDA_ARCH=${CUDA_ARCH} bash /tmp/build_natten.sh
 
@@ -134,7 +137,8 @@ RUN python3 -m pip install --no-cache-dir --prefer-binary marimo
 # The import of physicsnemo.experimental.models.strata transitively pulls in
 # all of physicsnemo.nn, which needs warp, tensordict and timm at import
 # time (and, since the 2.3 dev line, treelib and termcolor via
-# physicsnemo.distributed); tensordict/timm declare their own torch/torchvision floors, so they
+# physicsnemo.distributed; GitPython and hydra-core are needed by the
+# training entry points); tensordict/timm declare their own torch/torchvision floors, so they
 # get the same --no-deps treatment, with their pure-Python runtime deps
 # installed explicitly first.
 RUN python3 -m pip install --no-cache-dir --prefer-binary \
@@ -147,6 +151,8 @@ RUN python3 -m pip install --no-cache-dir --prefer-binary \
     huggingface_hub \
     safetensors \
     pyyaml \
+    "GitPython>=3.1.62" \
+    "hydra-core>=1.3.7" \
     "termcolor>=3.3.0" \
     "treelib>=1.8.0"
 # NB: tensordict declares orjson, but only as an optional accelerated JSON

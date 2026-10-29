@@ -19,7 +19,7 @@ set -e
 # Required inside NGC PyTorch containers: their torch is a custom build, so
 # the prebuilt wheels on https://whl.natten.org ship no matching libnatten.
 export NATTEN_VERSION="${NATTEN_VERSION:-0.21.7}"
-export CUDA_ARCH="${CUDA_ARCH:-9.0}"  # 9.0=Hopper(H100), 10.0=Blackwell(B200), 8.0=Ampere(A100)
+export CUDA_ARCH="${CUDA_ARCH:-8.9;9.0}"  # ;-separated: 8.0=Ampere(A100), 8.9=Ada, 9.0=Hopper(H100), 10.0=Blackwell(B200)
 export NATTEN_CUDA_ARCH="${CUDA_ARCH}"
 export NATTEN_N_WORKERS="${NATTEN_N_WORKERS:-16}"
 export NATTEN_WITH_CUDA="1"
