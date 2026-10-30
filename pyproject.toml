@@ -12,7 +12,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "Apache 2.0"}
 dependencies = [
-    "torch>=2.10.0",
+    "torch>=2.13.0",
     "numpy>=2.1",
     "pandas>=2.3",
     "matplotlib>=3.10",
@@ -20,7 +20,7 @@ dependencies = [
     "zarr>=3",
     # not on PyPI: direct reference to the commit the release was verified
     # against (same archive docker/Dockerfile installs)
-    "earth2grid @ https://github.com/NVlabs/earth2grid/archive/3415382a37e414a867d4c6ae2519e3e8afdbece1.tar.gz",
+    "earth2grid @ https://github.com/NVlabs/earth2grid/archive/6e39b069f0558cd0eff0ec666ede5e125d79b4ff.tar.gz",
     "earth2studio>=0.13",
     "einops>=0.8",
     "scipy>=1.16",
@@ -30,7 +30,7 @@ dependencies = [
     "python-dotenv>=1.2",
     "pyyaml>=6.0",
     "nvtx>=0.2.14",
-    "natten>=0.21.5",
+    "natten>=0.21.7",
     "typer>=0.26",
     "tqdm>=4.67",
     "torchmetrics>=1.9.0",
@@ -41,9 +41,10 @@ dependencies = [
     "pytorch-optimizer>=3.10.0",
     "tensorboard>=2.20.0",
     "lmdb>=2.2.0",
-    # >=2.2.0a0: the Strata models ship in 2.2 (PyPI 2.1.x would import-fail);
-    # the pinned archive below provides 2.2.0a0.
-    "nvidia-physicsnemo>=2.2.0a0",
+    # >=2.3.0a0: the pinned archive below (2.3.0a0) contains physicsnemo
+    # PR #2140, the automatic depthwise-conv chunking that fixes
+    # NVlabs/STRATA#6; 2.2.x and earlier use the slow fixed 2-channel chunks.
+    "nvidia-physicsnemo>=2.3.0a0",
     "h5netcdf>=1.8",
     "netCDF4>=1.7",
     "h5py>=3.16",
@@ -113,6 +114,8 @@ exclude = ["examples"]
 "tests/*.py" = ["S101"]
 
 [tool.uv.sources]
-# Pinned to physicsnemo main including the Strata models + stereographic RoPE
-# (PR #1750). Switch to `nvidia-physicsnemo>=2.2` on PyPI once 2.2.0 is released.
-nvidia-physicsnemo = { url = "https://github.com/NVIDIA/physicsnemo/archive/07cdcc8b65f10bee733a32a77b4b76e20c70c54c.tar.gz" }
+# Pinned to physicsnemo main @ fae6bb2b: the Strata models, stereographic RoPE
+# (PR #1750) and automatic depthwise-conv chunking (PR #2140, NVlabs/STRATA#6).
+# No release contains #2140 yet (latest is 2.2.2); switch to a PyPI release
+# once one does. Every commit containing #2140 requires torch>=2.13.
+nvidia-physicsnemo = { url = "https://github.com/NVIDIA/physicsnemo/archive/fae6bb2b0e96488a052d9627d41e6dc94653f06a.tar.gz" }

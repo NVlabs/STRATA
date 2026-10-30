@@ -29,7 +29,7 @@ The models need a recent NVIDIA GPU software stack that cannot come from PyPI
 alone: a CUDA-tuned PyTorch build, NVIDIA DALI (data pipelines), and a NATTEN
 build that matches the installed torch. The supported
 base environment is the [NGC PyTorch container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch)
-`nvcr.io/nvidia/pytorch:26.01-py3` (anonymous pulls generally work; a free
+`nvcr.io/nvidia/pytorch:26.09-py3` (anonymous pulls generally work; a free
 NGC account may be required depending on NGC policy).
 
 ### Docker (recommended)
@@ -39,9 +39,9 @@ Build the training/inference image from the repository root:
     docker build -f docker/Dockerfile -t strata .
 
 The image contains the complete environment, including a from-source NATTEN
-build (set `CUDA_ARCH` in [`docker/build_natten.sh`](docker/build_natten.sh)
-for non-Hopper GPUs) and PhysicsNeMo pinned to a commit that includes the
-Strata models.
+build for Ada and Hopper GPUs by default (pass `--build-arg CUDA_ARCH=...`
+for others, e.g. `8.0` on A100; see [`docker/build_natten.sh`](docker/build_natten.sh))
+and PhysicsNeMo pinned to a commit that includes the Strata models.
 
 ### pip install (plain PyPI environment)
 
@@ -144,10 +144,10 @@ export SCREAM_MAIN_ZARR_PATH=/path/to/sdecadal.ne1024pg2_ne1024pg2.F20TR-SCREAMv
 
 The forecast itself is a 4-GPU, 2-step `torchrun`, on whatever machine can
 launch it. Build `docker/Dockerfile` for your GPU (`--build-arg CUDA_ARCH=8.0`
-on A100, `9.0` on H100). `TORCH_COMPILE_DISABLE=1` keeps the first step from
-sitting in Inductor. PhysicsNeMo is installed with `--no-deps` in that image,
-so `treelib`, `gitpython`, `hydra-core`, and `termcolor` have to be
-importable or the process exits at startup.
+on A100; the default covers Ada and H100). `TORCH_COMPILE_DISABLE=1` keeps
+the first step from sitting in Inductor. PhysicsNeMo is installed with
+`--no-deps` in that image; its runtime imports (`treelib`, `gitpython`,
+`hydra-core`, `termcolor`) are installed explicitly.
 
 ```bash
 export SCREAM_AUX_ZARR_PATH=$SCREAM_MAIN_ZARR_PATH

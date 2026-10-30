@@ -424,6 +424,8 @@ def test_from_checkpoint():
     coords = OrderedDict(in_coords)
     coords["face"] = np.array([0])
     coords["batch"] = np.empty(2)
+    # Checkpoints with coszr forcing compute it from time + lead_time.
+    coords["time"] = np.array([np.datetime64("2020-10-13T00:00:00")])
 
     out, _ = model(x, coords)
 

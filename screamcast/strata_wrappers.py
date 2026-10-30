@@ -626,7 +626,7 @@ class StrataModel(_StrataModelBase):
         physicsnemo ``Strata`` has no re-tiling hook of its own (documented
         gap), so this reaches into its pixel RoPE buffers to rebuild them for
         ``rope_mode_pixel="axial"``. Mirrors the construction-time code in
-        physicsnemo strata.py (pinned commit 07cdcc8b); revisit on pin bumps.
+        physicsnemo strata.py (pinned commit fae6bb2b); revisit on pin bumps.
         """
         self.strata.backbone.set_tile_size(height, width)
         self.strata.height = height
