@@ -13,8 +13,10 @@ with stereographic rotary position embeddings) lives in
 [NVIDIA PhysicsNeMo](https://github.com/NVIDIA/physicsnemo) as
 `physicsnemo.experimental.models.strata`. This repository adds the
 SCREAM-specific pieces around it: spherical tile geometry, tile-local wind
-rotation, data pipelines, training configs, and rollout/inference tooling
-(see `screamcast/strata_wrappers.py`).
+rotation, data pipelines, training configs, rollout/inference tooling
+(see `screamcast/strata_wrappers.py`), and a pipeline that builds SCREAM
+initial conditions from ERA5 or the ECMWF HRES analysis
+(see [Initial conditions](#initial-conditions-from-era5-or-ecmwf-hres)).
 
 The public release is named *Strata*, but the Python package, command-line
 scripts, and environment variables keep the project's original name: you import
@@ -184,12 +186,45 @@ is this same forecast wrapped for Shifter, and it hardcodes the NERSC
 account and GPU constraint. The exports and `sbatch` line are in
 [`docs/nersc_setup.md`](docs/nersc_setup.md).
 
-### Initial conditions from ERA5 or ECMWF HRES
+## Initial conditions from ERA5 or ECMWF HRES
 
-`initial_conditions/` builds ne1024pg2 / L128 atmospheric initial conditions
-from ERA5, or from the ECMWF HRES analysis, with the E3SM HICCUP steps. A GPU
-port of those steps builds one IC in about 80 s. See
-[`docs/initial_conditions.md`](docs/initial_conditions.md).
+`initial_conditions/` builds SCREAM atmospheric initial conditions (ICs) on
+ne1024pg2 with the E3SM L128 vertical grid, for any hour of ERA5 or of the
+ECMWF HRES analysis (2016-2022). It follows the E3SM
+[HICCUP](https://github.com/E3SM-Project/HICCUP) steps: conservative
+horizontal remap, surface-pressure adjustment to the SCREAM topography,
+vertical remap to L128, supersaturation removal, then potential temperature
+and hydrostatic heights.
+
+- `fast_ic.py` is a torch port of those steps. It reads ERA5 from the public
+  ARCO store and builds one IC in about 80 s on one GPU. Its output matches
+  HICCUP itself bit for bit, apart from last-bit differences in a few values.
+- `hres_ic.py` does the same from the WeatherBench2 HRES `hres_t0` store.
+- `run_hiccup_eamxx.py` runs HICCUP itself (2.5-3 h per IC) and is kept as
+  the reference the fast path is validated against.
+
+Each IC is a one-frame Zarr store with flat `ncol` and the 32 model levels
+STRATA uses. `run_screamcast_nudged.py` does not take such a store as its
+initial state yet: it reads the initial state from `SCREAM_MAIN_ZARR_PATH`.
+
+One-time inputs: the SCREAM `phis`, `sgh30` and `landfrac` arrays from the
+`nvidia/STRATA-SCREAM-sdy1` dataset, the L128 coordinate file from HICCUP,
+and the ERA5 to ne1024pg2 remap map. `build_map.py` builds the map (3.2 GB)
+in about 30 min on 72 cores; it needs conda-forge `nco` and `tempest-remap`.
+Then, from the repository root:
+
+```bash
+python -m initial_conditions.fast_ic \
+  --timestamp 2017-09-14T00 \
+  --out-dir "$WORK/ics" \
+  --map "$WORK/map/map_721x1440_to_ne1024pg2.nc" \
+  --phis "$WORK/scream_phis.zarr" \
+  --latlon "$AUX_DATA_ROOT/latlon_ne1024pg2.nc" --scream-ref "$WORK/scream_static" \
+  --vert "$WORK/vert_coord_E3SM_L128.nc"
+```
+
+[`docs/initial_conditions.md`](docs/initial_conditions.md) has the downloads,
+the map build, the Docker command, the HRES path and the validation.
 
 ## Training
 
