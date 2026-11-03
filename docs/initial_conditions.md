@@ -21,7 +21,7 @@ There are two pipelines:
 | `run_hiccup_eamxx.py` | One timestamp: ERA5 extraction, HICCUP pipeline, PotentialTemperature and `z_mid`, combined NetCDF IC |
 | `hiccup_l128_to_zarr.py` | NetCDF IC to a one-frame Zarr v3 store (32 levels, flat `ncol`, consolidated metadata) |
 | `run_tc_batch.py` | Loops over `layout.CASES` (10 tropical-cyclone ICs): build, convert, upload to an rclone remote with a manifest |
-| `build_ne1024_map.sh` | Builds or reuses the ERA5 721x1440 to ne1024pg2 `fv2fv_flx --lrg2sml` map |
+| `build_map.py` | Builds (in parallel) or reuses the ERA5 721x1440 to ne1024pg2 `fv2fv_flx --lrg2sml` map |
 | `layout.py` | Grid and level constants, Zarr variable lists, the TC case list, file-name helpers |
 | `hiccup_time_calendar.patch` | Required local fix to HICCUP (see below) |
 | `hres_ic.py` | The same HICCUP steps on the ECMWF HRES analysis (see [HRES initial conditions](#hres-initial-conditions)) |
@@ -35,7 +35,7 @@ All Python entry points are modules. Run them from the repository root with
 |---|---|
 | ERA5 | ARCO `gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3`, read over HTTPS. **37 pressure levels** (1-1000 hPa), 0.25 deg 721x1440, north-to-south, starting at Greenwich. Time index is hours since 1900-01-01. The HICCUP path extracts each timestamp to `<data-root>/data/ERA5.{atm,sfc}.<date>.<HH>.nc`. |
 | SCREAM `phis`, `sgh30`, `landfrac` | The `phis`, `sgh30` and `landfrac` arrays of the [nvidia/STRATA-SCREAM-sdy1](https://huggingface.co/datasets/nvidia/STRATA-SCREAM-sdy1) dataset (about 60 MB together; see below). |
-| Map | `map_721x1440_to_ne1024pg2.nc` (3.1 GB), `ncremap -a fv2fv_flx --lrg2sml` from the ERA5 grid to ne1024pg2, with a `.command.txt` sidecar next to it. Build it once with `build_ne1024_map.sh` (see [Map](#map)). `fast_ic` and `hres_ic` only read it. |
+| Map | `map_721x1440_to_ne1024pg2.nc` (3.1 GB), `ncremap -a fv2fv_flx --lrg2sml` from the ERA5 grid to ne1024pg2, with a `.command.txt` sidecar next to it. Build it once with `build_map.py`, about 30 min on 72 cores (see [Map](#map)). `fast_ic` and `hres_ic` only read it. |
 | ne1024pg2 SCRIP | `ne1024pg2_scrip.nc`, the destination grid for the map (`grid_size = 25165824`) |
 | lat/lon | `latlon_ne1024pg2.nc`, NetCDF with `lat`/`lon` on `ncol`. They are written to the Zarr as stored (radians) and converted to degrees for `coszr`. |
 | L128 coordinate | HICCUP `files_vert/vert_coord_E3SM_L128.nc` (default `--vert`) |
@@ -61,20 +61,41 @@ file names.
 
 ### Map
 
-`build_ne1024_map.sh` builds the map with ncremap, or adopts an existing one
-after checking its source and destination sizes. It needs conda-forge `nco`
-and `tempest-remap` (see [Environment](#environment)). Built serially, the map
-takes about 18 h:
+`build_map.py` builds the map in parallel. It needs conda-forge `nco` and
+`tempest-remap` (see [Environment](#environment)), and writes the ERA5 SCRIP
+file with HICCUP's `ncremap -G` command if `--src-scrip` does not exist:
 
 ```bash
-SRC_SCRIP=grid/scrip_ERA5_721x1440.nc DST_SCRIP="$AUX_DATA_ROOT/ne1024pg2_scrip.nc" \
-  MAP=map/map_721x1440_to_ne1024pg2.nc bash initial_conditions/build_ne1024_map.sh
+python -m initial_conditions.build_map \
+  --dst-scrip "$AUX_DATA_ROOT/ne1024pg2_scrip.nc" \
+  --src-scrip "$WORK/grid/scrip_ERA5_721x1440.nc" \
+  --map "$WORK/map/map_721x1440_to_ne1024pg2.nc"
 ```
 
-HICCUP writes the ERA5 SCRIP file (`scrip_ERA5_721x1440.nc`) into
-`--grid-dir` the first time `run_hiccup_eamxx.py` runs. The HICCUP driver
-reuses a map only when its `.command.txt` sidecar is next to it; otherwise it
-asks HICCUP to build a new one.
+`ncremap -a fv2fv_flx --lrg2sml` runs `GenerateOverlapMesh` and
+`GenerateOfflineMap` serially, which takes 13-18 h at this size. The map is
+first order, so the weights of an ne1024pg2 column depend only on that
+column's overlaps with the ERA5 cells. `build_map.py` runs the same two
+commands on contiguous column ranges in a process pool (`--workers` defaults
+to all cores, with two ranges per worker) and stacks the results. On 72 Grace
+cores the map took 32 min; the two ranges that hold the poles take about three
+times longer than the others and finish last. A range of 87k columns used
+0.8 GB.
+
+Against the serial ncremap map built on an x86 machine (NCO 5.3.6), the
+parallel map has the same `row` and `col` (38,299,240 links in the same
+order). 31,590 weights (0.08%) differ after rounding to float32; the largest
+relative difference is 1.3e-5, on sliver overlaps. A smooth temperature-like
+field remapped with the two maps differs by at most 1.8e-5 K. Two different
+splits of the same columns gave weights within 7e-9 of each other and the same
+float32 weights, so the differences come from the build machine, not from the
+split.
+
+An existing map is reused when its `.command.txt` sidecar is next to it
+(`build_map.py` writes one), and a map without a sidecar is adopted after its
+`n_a`/`n_b` sizes are checked. `run_hiccup_eamxx.py` reuses the map only when
+the sidecar is there; otherwise it asks HICCUP to build a new map serially, so
+run `build_map.py` first.
 
 ## Fast GPU path
 
