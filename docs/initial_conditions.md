@@ -2,7 +2,8 @@
 
 `initial_conditions/` builds EAMxx/SCREAM atmospheric initial conditions on
 **ne1024pg2** (`ncol = 25165824`) with the **E3SM L128** hybrid vertical grid
-from ERA5, in the 32-level Zarr v3 layout that the SCREAM rollout loaders read.
+from ERA5, as one-frame Zarr v3 stores with flat `ncol` and 32 of the L128
+levels (see [Output layouts](#output-layouts)).
 There are two pipelines:
 
 - **`fast_ic.py` (use this).** A torch port of the HICCUP steps that runs on
