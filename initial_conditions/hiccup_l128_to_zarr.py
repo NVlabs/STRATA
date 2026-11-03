@@ -44,6 +44,7 @@ from initial_conditions.layout import (
     VARS_2D,
     VARS_3D,
 )
+from initial_conditions.run_hiccup_eamxx import as_timestamp
 from screamcast.astronomy import calculate_cosine_zenith_direct
 from screamcast.history import history_entry
 
@@ -66,6 +67,13 @@ def load_latlon(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarr
     if units.lower().startswith("rad"):
         lat_deg = np.degrees(lat_deg)
         lon_deg = np.degrees(lon_deg)
+    elif not units.lower().startswith("deg"):
+        raise SystemExit(f"{path}: lat units {units!r} are neither degrees nor radians")
+    if np.abs(lat_deg).max() > 90.0:
+        raise SystemExit(
+            f"{path}: lat is {lat_deg.min():.4g}..{lat_deg.max():.4g} deg after "
+            f"reading units {units!r}; the units attribute does not match the values"
+        )
     return lat, lon, lat_deg, lon_deg
 
 
@@ -125,6 +133,13 @@ def write_zarr_from_netcdf(
                 raise SystemExit(f"{name} dims {ds[name].dims}, expected {DIMS_3D}")
         if int(ds.sizes["lev"]) != NLEV:
             raise SystemExit(f"IC lev is {ds.sizes['lev']}, expected {NLEV}")
+        if "time" not in ds.variables or ds.sizes["time"] != 1:
+            raise SystemExit(f"{ic_path} needs a single time")
+        stamp = as_timestamp(ds["time"].values[0])
+        if stamp != np.datetime64(timestamp, "s"):
+            raise SystemExit(
+                f"{ic_path} is valid at {stamp}, not --timestamp {timestamp}"
+            )
         ncol = int(ds.sizes["ncol"])
         phis = np.asarray(ds["phis"].isel(time=0).values, dtype=np.float32)
         fields_2d = {

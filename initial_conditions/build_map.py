@@ -44,7 +44,7 @@ import shutil
 import subprocess
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import netCDF4
 import numpy as np
@@ -112,37 +112,50 @@ def write_scrip_slice(src: str, out: str, start: int, stop: int) -> None:
             new[:] = var[start:stop]
 
 
-def build_part(
-    src_scrip: str, dst_scrip: str, part_dir: str, k: int, start: int, stop: int
-) -> str:
-    """Run GenerateOverlapMesh and GenerateOfflineMap on columns [start, stop)."""
-    out = os.path.join(part_dir, f"map_{k:04d}.nc")
-    if os.path.isfile(out):
-        return out
-    scrip = os.path.join(part_dir, f"dst_{k:04d}.nc")
-    overlap = os.path.join(part_dir, f"overlap_{k:04d}.g")
-    tmp_map = os.path.join(part_dir, f"map_{k:04d}.tmp.nc")
-    write_scrip_slice(dst_scrip, scrip, start, stop)
+def build_part(part_dir: str, dst_scrip: str, start: int, stop: int) -> str:
+    """Run GenerateOverlapMesh and GenerateOfflineMap on columns [start, stop).
+
+    Runs inside ``part_dir`` with short relative file names: the conda-forge
+    TempestRemap 2.2.0 build aborts ("buffer overflow detected") on long
+    output paths. ``part_dir/src.nc`` links to the ERA5 SCRIP file.
+    """
+    tag = f"{start:08d}_{stop:08d}"
+    out = f"map_{tag}.nc"
+    if os.path.isfile(os.path.join(part_dir, out)):
+        return os.path.join(part_dir, out)
+    scrip, overlap, tmp_map = f"dst_{tag}.nc", f"ov_{tag}.g", f"map_{tag}.tmp.nc"
+    write_scrip_slice(dst_scrip, os.path.join(part_dir, scrip), start, stop)
     commands = [
         ["GenerateOverlapMesh", "--allow_no_overlap"]
-        + ["--b", src_scrip, "--a", scrip, "--out", overlap],
-        ["GenerateOfflineMap", "--in_mesh", src_scrip, "--out_mesh", scrip]
+        + ["--b", "src.nc", "--a", scrip, "--out", overlap],
+        ["GenerateOfflineMap", "--in_mesh", "src.nc", "--out_mesh", scrip]
         + ["--ov_mesh", overlap, "--out_map", tmp_map, *OFFLINE_OPTS],
     ]
-    with open(os.path.join(part_dir, f"log_{k:04d}.txt"), "w") as handle:
+    log_path = os.path.join(part_dir, f"log_{tag}.txt")
+    with open(log_path, "w") as handle:
         for cmd in commands:
             handle.write(shlex.join(cmd) + "\n")
             handle.flush()
-            if subprocess.call(cmd, stdout=handle, stderr=subprocess.STDOUT) != 0:
-                raise RuntimeError(f"part {k} failed; see {handle.name}")
-    os.replace(tmp_map, out)
-    os.remove(overlap)
-    os.remove(scrip)
-    return out
+            status = subprocess.call(
+                cmd, cwd=part_dir, stdout=handle, stderr=subprocess.STDOUT
+            )
+            if status != 0:
+                raise RuntimeError(f"columns {start}-{stop} failed; see {log_path}")
+    os.replace(os.path.join(part_dir, tmp_map), os.path.join(part_dir, out))
+    os.remove(os.path.join(part_dir, overlap))
+    os.remove(os.path.join(part_dir, scrip))
+    return os.path.join(part_dir, out)
 
 
-def merge_parts(parts: list[str], bounds: np.ndarray, out: str, dst_scrip: str) -> None:
-    """Stack the part maps in column order into one map file."""
+def merge_parts(
+    parts: list[str], bounds: np.ndarray, out: str, dst_scrip: str, history: str
+) -> None:
+    """Stack the part maps in column order into one map file.
+
+    Source-side ``area_a`` and ``frac_a`` are recomputed from all links: in a
+    part they only see that part's overlaps. As in the serial map, ``area_a``
+    is the summed overlap area and ``frac_a`` is overlap area over ``area_a``.
+    """
     n_s = []
     for path in parts:
         with netCDF4.Dataset(path) as ds:
@@ -163,20 +176,101 @@ def merge_parts(parts: list[str], bounds: np.ndarray, out: str, dst_scrip: str) 
             grid_file_dst=dst_scrip,
             domain_b=dst_scrip,
             grid_file_ovr="per-part overlap meshes (initial_conditions.build_map)",
-            history=history_entry(),
+            history=history,
         )
         dst.setncatts(attrs)
-        frac_a = np.zeros(dst.dimensions["n_a"].size)
+        overlap_area = np.zeros(dst.dimensions["n_a"].size)
         for k, path in enumerate(parts):
             with netCDF4.Dataset(path) as part:
                 s0, s1 = offsets[k], offsets[k + 1]
-                dst["row"][s0:s1] = part["row"][:] + bounds[k]
-                dst["col"][s0:s1] = part["col"][:]
-                dst["S"][s0:s1] = part["S"][:]
+                row = np.asarray(part["row"][:])
+                col = np.asarray(part["col"][:])
+                weights = np.asarray(part["S"][:])
+                dst["row"][s0:s1] = row + bounds[k]
+                dst["col"][s0:s1] = col
+                dst["S"][s0:s1] = weights
                 for name in DST_VARS:
                     dst[name][bounds[k] : bounds[k + 1]] = part[name][:]
-                frac_a += part["frac_a"][:]
-        dst["frac_a"][:] = frac_a
+                area_b = np.asarray(part["area_b"][:])
+                overlap_area += np.bincount(
+                    col - 1, weights * area_b[row - 1], overlap_area.size
+                )
+        area_a = np.asarray(dst["area_a"][:])
+        covered = overlap_area > 0
+        area_a[covered] = overlap_area[covered]
+        dst["area_a"][:] = area_a
+        dst["frac_a"][:] = overlap_area / area_a
+
+
+def build(
+    src_scrip: str,
+    dst_scrip: str,
+    map_path: str,
+    workers: int,
+    n_parts: int,
+    part_dir: str,
+    history: str,
+) -> None:
+    """Build ``map_path`` from ``n_parts`` column ranges on ``workers`` processes.
+
+    ``part_dir`` is this build's own working directory: finished parts in it
+    are reused by a rerun with the same inputs, and it is removed on success.
+    """
+    src_scrip, dst_scrip = os.path.abspath(src_scrip), os.path.abspath(dst_scrip)
+    os.makedirs(part_dir, exist_ok=True)
+    inputs = f"src {src_scrip}\ndst {dst_scrip}\n"
+    inputs_path = os.path.join(part_dir, "inputs.txt")
+    if os.path.isfile(inputs_path):
+        with open(inputs_path) as handle:
+            if handle.read() != inputs:
+                raise SystemExit(
+                    f"{part_dir} holds parts built from other grids "
+                    f"(see {inputs_path}); remove it or pass another --tmp-dir"
+                )
+    else:
+        with open(inputs_path, "w") as handle:
+            handle.write(inputs)
+    link = os.path.join(part_dir, "src.nc")
+    if os.path.lexists(link):
+        os.remove(link)
+    os.symlink(src_scrip, link)
+
+    ncol = grid_size(dst_scrip)
+    bounds = np.linspace(0, ncol, n_parts + 1).astype(np.int64)
+    log(f"{n_parts} parts of ~{ncol // n_parts} columns on {workers} workers")
+    t0 = time.perf_counter()
+    with ProcessPoolExecutor(workers) as pool:
+        futures = [
+            pool.submit(build_part, part_dir, dst_scrip, int(lo), int(hi))
+            for lo, hi in zip(bounds[:-1], bounds[1:])
+        ]
+        try:
+            for done, future in enumerate(as_completed(futures), start=1):
+                future.result()
+                log(f"{done}/{n_parts} parts done ({time.perf_counter() - t0:.0f} s)")
+        except BaseException:
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+    parts = [future.result() for future in futures]
+    os.makedirs(os.path.dirname(os.path.abspath(map_path)), exist_ok=True)
+    tmp_map = map_path + ".tmp"
+    merge_parts(parts, bounds, tmp_map, dst_scrip, history)
+    os.replace(tmp_map, map_path)
+    shutil.rmtree(part_dir)
+    log(f"wrote {map_path} in {time.perf_counter() - t0:.0f} s")
+
+
+def looks_complete(path: str) -> bool:
+    """True when the links run from the first to the last destination column."""
+    with netCDF4.Dataset(path) as ds:
+        n_b, n_s = ds.dimensions["n_b"].size, ds.dimensions["n_s"].size
+        if n_s == 0:
+            return False
+        ends = [ds["row"][0], ds["row"][n_s - 1], ds["S"][n_s - 1]]
+    if any(np.ma.is_masked(value) for value in ends):
+        return False
+    first, last, weight = ends
+    return int(first) == 1 and int(last) == n_b and float(weight) > 0
 
 
 def parse_args() -> argparse.Namespace:
@@ -194,24 +288,29 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--tmp-dir",
-        help="part files; default <map>.parts, removed after a successful merge",
+        help="where to put the <map name>.parts working directory "
+        "(default: next to the map); only that directory is removed",
     )
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    args.dst_scrip = os.path.abspath(args.dst_scrip)
+    args.src_scrip = os.path.abspath(args.src_scrip)
+    args.map = os.path.abspath(args.map)
     sidecar = args.map + ".command.txt"
-    command = shlex.join(
-        [sys.executable, "-m", "initial_conditions.build_map"] + sys.argv[1:]
-    )
+    argv = [sys.executable, "-m", "initial_conditions.build_map"]
+    argv += ["--dst-scrip", args.dst_scrip, "--src-scrip", args.src_scrip]
+    argv += ["--map", args.map]
+    command = shlex.join(argv)
     if os.path.isfile(args.map) and os.path.getsize(args.map) > 0:
         if os.path.isfile(sidecar):
             log(f"reusing {args.map}")
             return
-        if map_sizes(args.map) != (N_SRC, NCOL):
+        if map_sizes(args.map) != (N_SRC, NCOL) or not looks_complete(args.map):
             raise SystemExit(
-                f"{args.map} is not a {N_SRC} -> {NCOL} map (n_a/n_b); not adopting it"
+                f"{args.map} is not a complete {N_SRC} -> {NCOL} map; not adopting it"
             )
         log(f"adopting existing {args.map} (n_a={N_SRC}, n_b={NCOL})")
         with open(sidecar, "w") as handle:
@@ -222,38 +321,26 @@ def main() -> None:
         raise SystemExit(
             f"{args.dst_scrip} has {grid_size(args.dst_scrip)} cells, expected {NCOL}"
         )
-    part_dir = args.tmp_dir or args.map + ".parts"
+    tmp_root = args.tmp_dir or os.path.dirname(args.map)
+    part_dir = os.path.join(tmp_root, os.path.basename(args.map) + ".parts")
     os.makedirs(part_dir, exist_ok=True)
     ensure_src_scrip(args.src_scrip, part_dir)
-    n_parts = args.parts or 2 * args.workers
-    bounds = np.linspace(0, NCOL, n_parts + 1).astype(np.int64)
-    log(f"{n_parts} parts of ~{NCOL // n_parts} columns on {args.workers} workers")
-    t0 = time.perf_counter()
-    with ProcessPoolExecutor(args.workers) as pool:
-        futures = [
-            pool.submit(
-                build_part,
-                args.src_scrip,
-                args.dst_scrip,
-                part_dir,
-                k,
-                int(bounds[k]),
-                int(bounds[k + 1]),
-            )
-            for k in range(n_parts)
-        ]
-        parts = []
-        for k, future in enumerate(futures):
-            parts.append(future.result())
-            log(f"part {k + 1}/{n_parts} done ({time.perf_counter() - t0:.0f} s)")
-    os.makedirs(os.path.dirname(os.path.abspath(args.map)), exist_ok=True)
-    tmp_map = args.map + ".tmp"
-    merge_parts(parts, bounds, tmp_map, args.dst_scrip)
-    os.replace(tmp_map, args.map)
+    tempest = (
+        "per part: GenerateOverlapMesh --allow_no_overlap --b <src> --a <dst columns> "
+        f"--out <overlap>; GenerateOfflineMap {shlex.join(OFFLINE_OPTS)}"
+    )
+    history = f"{history_entry(argv)}; {tempest}"
+    build(
+        args.src_scrip,
+        args.dst_scrip,
+        args.map,
+        args.workers,
+        args.parts or 2 * args.workers,
+        part_dir,
+        history,
+    )
     with open(sidecar, "w") as handle:
         handle.write(command + "\n")
-    shutil.rmtree(part_dir)
-    log(f"wrote {args.map} in {time.perf_counter() - t0:.0f} s")
 
 
 if __name__ == "__main__":

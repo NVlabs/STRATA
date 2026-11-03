@@ -14,11 +14,17 @@
 # limitations under the License.
 from __future__ import annotations
 
+import cftime
 import numpy as np
+import pytest
 import xarray as xr
 import zarr
 
-from initial_conditions.hiccup_l128_to_zarr import validate_zarr, write_zarr_from_netcdf
+from initial_conditions.hiccup_l128_to_zarr import (
+    load_latlon,
+    validate_zarr,
+    write_zarr_from_netcdf,
+)
 from initial_conditions.layout import NLEV, NLEV_SUBSET, VARS_3D
 from initial_conditions.run_hiccup_eamxx import GRAV, RD, theta_and_zmid
 
@@ -94,7 +100,11 @@ def _write_synthetic_inputs(tmp_path, ncol: int):
     data_vars["ps"] = (("time", "ncol"), (9.0e4 + col)[None].astype(np.float32))
     data_vars["phis"] = (("time", "ncol"), (10.0 * col)[None].astype(np.float32))
     ic_path = tmp_path / "ic.nc"
-    xr.Dataset(data_vars, attrs={"history": "upstream hiccup step"}).to_netcdf(ic_path)
+    # HICCUP writes time on the noleap calendar
+    time = [cftime.DatetimeNoLeap(2016, 3, 20, 12)]
+    xr.Dataset(
+        data_vars, coords={"time": time}, attrs={"history": "upstream hiccup step"}
+    ).to_netcdf(ic_path)
 
     lat_deg = np.array([0.0, 0.0, 45.0, -45.0, 89.0, -89.0])[:ncol]
     lon_deg = np.array([0.0, 180.0, 90.0, 270.0, 10.0, 200.0])[:ncol]
@@ -157,3 +167,51 @@ def test_netcdf_to_zarr_subsets_levels_without_transposing(tmp_path):
     history = root.attrs["history"].splitlines()
     assert history[0] == "upstream hiccup step"
     assert history[-1].endswith("convert --flag")
+
+
+def test_netcdf_to_zarr_refuses_a_timestamp_the_ic_is_not_valid_at(tmp_path):
+    ic_path, latlon_path, ref, _ = _write_synthetic_inputs(tmp_path, 6)
+    with pytest.raises(SystemExit, match="not --timestamp"):
+        write_zarr_from_netcdf(
+            str(ic_path),
+            str(tmp_path / "ic.zarr"),
+            "2016-03-20T18:00:00",
+            str(latlon_path),
+            str(ref),
+            workers=1,
+            argv=["convert"],
+        )
+
+
+def test_latlon_units_must_match_the_values(tmp_path):
+    lat_deg = np.array([-89.5, 0.0, 45.0, 89.5])
+    lon_deg = np.array([0.5, 90.0, 180.0, 359.5])
+    for units, convert in (("degrees_north", np.asarray), ("radians", np.radians)):
+        path = tmp_path / f"{units}.nc"
+        xr.Dataset(
+            {
+                "lat": ("ncol", convert(lat_deg), {"units": units}),
+                "lon": ("ncol", convert(lon_deg), {"units": units}),
+            }
+        ).to_netcdf(path)
+        _, _, lat, lon = load_latlon(str(path))
+        np.testing.assert_allclose(lat, lat_deg, atol=1e-5)
+        np.testing.assert_allclose(lon, lon_deg, atol=1e-4)
+
+    # degree values labelled radians would scale coszr's latitudes by 57.3
+    bad = tmp_path / "mislabelled.nc"
+    xr.Dataset(
+        {
+            "lat": ("ncol", lat_deg, {"units": "rad"}),
+            "lon": ("ncol", lon_deg, {"units": "rad"}),
+        }
+    ).to_netcdf(bad)
+    with pytest.raises(SystemExit, match="does not match"):
+        load_latlon(str(bad))
+
+    unlabelled = tmp_path / "unlabelled.nc"
+    xr.Dataset({"lat": ("ncol", lat_deg), "lon": ("ncol", lon_deg)}).to_netcdf(
+        unlabelled
+    )
+    with pytest.raises(SystemExit, match="neither degrees nor radians"):
+        load_latlon(str(unlabelled))

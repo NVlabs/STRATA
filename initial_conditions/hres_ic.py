@@ -55,6 +55,7 @@ from initial_conditions.fast_ic import (
     _check_grid,
     _lower_priority,
     build_ic,
+    check_store_layout,
     load_map,
     load_vert,
     log,
@@ -119,6 +120,13 @@ def fetch_hres_t0(timestamp: str, url: str, workers: int) -> Era5:
     if not lat[0] < lat[-1]:
         raise SystemExit("expected HRES latitude south-to-north")
     _check_grid(lat[::-1], lon, plev_hpa)
+    check_store_layout(
+        root,
+        [*HRES_ATM.values(), "geopotential"],
+        ["surface_pressure", "2m_temperature"],
+        "hours since 2016-01-01",
+        url,
+    )
     omega_units = str(root["vertical_velocity"].attrs.get("units", ""))
     if "Pa" not in omega_units or "hPa" in omega_units:
         raise SystemExit(f"HRES vertical velocity is in {omega_units!r}, not Pa s-1")

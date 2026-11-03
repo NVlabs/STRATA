@@ -92,7 +92,7 @@ def write_manifest(
         f"timestamp: {case['timestamp']}",
         f"tag: {case['tag']}",
         f"storm: {case['storm']}",
-        f"ncremap_command: {map_cmd}",
+        f"map_command: {map_cmd}",
         f"hiccup_command: {cmds['hiccup']}",
         f"zarr_command: {cmds['zarr']}",
         f"git_sha: {git_commit()}",

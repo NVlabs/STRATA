@@ -27,7 +27,7 @@ import pytest
 
 netCDF4 = pytest.importorskip("netCDF4")
 
-from initial_conditions.build_map import build_part, merge_parts  # noqa: E402
+from initial_conditions.build_map import build, looks_complete  # noqa: E402
 
 TOOLS = ("ncremap", "GenerateCSMesh", "GenerateOverlapMesh", "GenerateOfflineMap")
 pytestmark = pytest.mark.skipif(
@@ -67,29 +67,57 @@ def grids(tmp_path_factory):
     return d, src, dst, serial
 
 
-def test_parts_stack_into_the_serial_map(grids):
-    d, src, dst, serial = grids
-    with netCDF4.Dataset(dst) as ds:
-        ncol = ds.dimensions["grid_size"].size
-    # uneven ranges, so part boundaries fall at different places on the cube
-    bounds = np.array([0, 50, 200, ncol])
-    part_dir = d / "parts"
-    part_dir.mkdir()
-    parts = [
-        build_part(src, dst, str(part_dir), k, int(bounds[k]), int(bounds[k + 1]))
-        for k in range(len(bounds) - 1)
-    ]
-    merged = str(d / "map_parallel.nc")
-    merge_parts(parts, bounds, merged, dst)
+def _assert_same_map(new_path, ref_path):
+    """Every variable of the serial map, to rounding."""
+    with netCDF4.Dataset(ref_path) as ref, netCDF4.Dataset(new_path) as new:
+        assert dict(new.dimensions.items()).keys() == ref.dimensions.keys()
+        for name, dim in ref.dimensions.items():
+            assert new.dimensions[name].size == dim.size, name
+        for name, var in ref.variables.items():
+            got, want = np.asarray(new[name][:]), np.asarray(var[:])
+            if np.issubdtype(want.dtype, np.integer):
+                np.testing.assert_array_equal(got, want, err_msg=name)
+            else:
+                np.testing.assert_allclose(got, want, rtol=1e-12, atol=0, err_msg=name)
 
-    with netCDF4.Dataset(serial) as ref, netCDF4.Dataset(merged) as new:
-        assert new.dimensions["n_b"].size == ncol
-        for name in ("row", "col"):
-            np.testing.assert_array_equal(new[name][:], ref[name][:])
-        np.testing.assert_allclose(new["S"][:], ref["S"][:], rtol=1e-9, atol=0)
-        for name in ("area_b", "frac_b", "xc_b", "yc_b", "xv_b", "yv_b"):
-            np.testing.assert_allclose(new[name][:], ref[name][:], rtol=1e-9, atol=0)
-        np.testing.assert_allclose(new["frac_a"][:], ref["frac_a"][:], rtol=1e-9)
+
+def test_parallel_build_matches_the_serial_map(grids, tmp_path):
+    d, src, dst, serial = grids
+    # a long working path: TempestRemap 2.2.0 aborts on long output paths
+    tmp_root = tmp_path / ("x" * 120)
+    tmp_root.mkdir()
+    (tmp_root / "keep.txt").write_text("not ours")
+    part_dir = str(tmp_root / "map.nc.parts")
+    out = str(tmp_path / "map.nc")
+    build(src, dst, out, workers=2, n_parts=3, part_dir=part_dir, history="test")
+
+    _assert_same_map(out, serial)
+    assert (tmp_root / "keep.txt").read_text() == "not ours"
+    assert not (tmp_root / "map.nc.parts").exists()
+    with netCDF4.Dataset(out) as new:
         # first-order conservative: every destination row sums to one
+        ncol = new.dimensions["n_b"].size
         row_sum = np.bincount(np.asarray(new["row"][:]) - 1, new["S"][:], ncol)
         np.testing.assert_allclose(row_sum, 1.0, rtol=0, atol=1e-12)
+        assert new.getncattr("history") == "test"
+
+
+def test_parts_from_other_grids_are_not_reused(grids, tmp_path):
+    d, src, dst, serial = grids
+    part_dir = tmp_path / "map.nc.parts"
+    part_dir.mkdir()
+    (part_dir / "inputs.txt").write_text("src /other/src.nc\ndst /other/dst.nc\n")
+    with pytest.raises(SystemExit, match="other grids"):
+        build(src, dst, str(tmp_path / "map.nc"), 1, 2, str(part_dir), "test")
+
+
+def test_only_complete_maps_are_adopted(grids, tmp_path):
+    d, src, dst, serial = grids
+    assert looks_complete(serial)
+    header_only = str(tmp_path / "header_only.nc")
+    with netCDF4.Dataset(serial) as ref, netCDF4.Dataset(header_only, "w") as out:
+        for name, dim in ref.dimensions.items():
+            out.createDimension(name, dim.size)
+        for name, var in ref.variables.items():
+            out.createVariable(name, var.dtype, var.dimensions)
+    assert not looks_complete(header_only)

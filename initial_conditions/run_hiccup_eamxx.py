@@ -614,8 +614,10 @@ def main() -> None:
         use_single_precision=True,
     )
     obj.clean_global_attributes(file_name=args.out)
+    # args.out was created above, so there is no earlier history to keep; the
+    # map line has no timestamp because the map was built earlier
     write_history(
-        args.out, history_entry(argv, previous=history_entry([map_command(obj)]))
+        args.out, history_entry(argv, previous=f"map built by: {map_command(obj)}")
     )
     validate_nc(args.out, args.timestamp, phis)
     log(f"wrote {args.out}")
