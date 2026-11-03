@@ -55,8 +55,17 @@ def _hours_since_2016(timestamp: str) -> int:
     )
 
 
-def _write_wb2_like_store(path, omega_units: str = "Pa s**-1") -> None:
-    """A tiny store in the WeatherBench2 hres_t0 layout (south-to-north, Zarr v2)."""
+def _write_wb2_like_store(
+    path,
+    omega_units: str = "Pa s**-1",
+    time_units: str = "hours since 2016-01-01",
+    dims_3d: tuple[str, ...] = ("time", "level", "latitude", "longitude"),
+) -> None:
+    """A tiny store in the WeatherBench2 hres_t0 layout (south-to-north, Zarr v2).
+
+    Attributes as in the real store: ``_ARRAY_DIMENSIONS`` and time in hours
+    since 2016-01-01.
+    """
     nt, nlev, nlat, nlon = len(TIMES), PLEV_HPA.size, LAT_SN.size, LON.size
     root = zarr.open_group(str(path), mode="w", zarr_format=2)
 
@@ -64,8 +73,10 @@ def _write_wb2_like_store(path, omega_units: str = "Pa s**-1") -> None:
         arr = root.create_array(name, shape=data.shape, dtype=data.dtype)
         arr[...] = data
         arr.attrs["units"] = units
+        dims = {4: list(dims_3d), 3: ["time", "latitude", "longitude"]}
+        arr.attrs["_ARRAY_DIMENSIONS"] = dims.get(data.ndim, [name])
 
-    put("time", np.array([_hours_since_2016(t) for t in TIMES], np.int64))
+    put("time", np.array([_hours_since_2016(t) for t in TIMES], np.int64), time_units)
     put("latitude", LAT_SN)
     put("longitude", LON)
     put("level", PLEV_HPA)
@@ -138,3 +149,15 @@ def test_fetch_hres_t0_rejects_missing_time_and_hpa_omega(tmp_path):
     _write_wb2_like_store(bad, omega_units="hPa s-1")
     with pytest.raises(SystemExit, match="not Pa s-1"):
         fetch_hres_t0("2022-09-26T12:00:00", str(bad), workers=1)
+
+
+def test_fetch_hres_t0_rejects_another_epoch_or_dimension_order(tmp_path):
+    other_epoch = tmp_path / "epoch.zarr"
+    _write_wb2_like_store(other_epoch, time_units="hours since 1900-01-01")
+    with pytest.raises(SystemExit, match="time units"):
+        fetch_hres_t0("2022-09-26T12:00:00", str(other_epoch), workers=1)
+
+    lon_lat = tmp_path / "lon_lat.zarr"
+    _write_wb2_like_store(lon_lat, dims_3d=("time", "level", "longitude", "latitude"))
+    with pytest.raises(SystemExit, match="dimensions"):
+        fetch_hres_t0("2022-09-26T12:00:00", str(lon_lat), workers=1)

@@ -35,10 +35,10 @@ All Python entry points are modules. Run them from the repository root with
 |---|---|
 | ERA5 | ARCO `gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3`, read over HTTPS. **37 pressure levels** (1-1000 hPa), 0.25 deg 721x1440, north-to-south, starting at Greenwich. Time index is hours since 1900-01-01. The HICCUP path extracts each timestamp to `<data-root>/data/ERA5.{atm,sfc}.<date>.<HH>.nc`. |
 | SCREAM `phis`, `sgh30`, `landfrac` | The `phis`, `sgh30` and `landfrac` arrays of the [nvidia/STRATA-SCREAM-sdy1](https://huggingface.co/datasets/nvidia/STRATA-SCREAM-sdy1) dataset (about 60 MB together; see below). |
-| Map | `map_721x1440_to_ne1024pg2.nc` (3.1 GB), `ncremap -a fv2fv_flx --lrg2sml` from the ERA5 grid to ne1024pg2, with a `.command.txt` sidecar next to it. Build it once with `build_map.py`, about 30 min on 72 cores (see [Map](#map)). `fast_ic` and `hres_ic` only read it. |
+| Map | `map_721x1440_to_ne1024pg2.nc` (3.2 GB), `ncremap -a fv2fv_flx --lrg2sml` from the ERA5 grid to ne1024pg2, with a `.command.txt` sidecar next to it. Build it once with `build_map.py`, about 30 min on 72 cores (see [Map](#map)). `fast_ic` and `hres_ic` only read it. |
 | ne1024pg2 SCRIP | `ne1024pg2_scrip.nc`, the destination grid for the map (`grid_size = 25165824`) |
-| lat/lon | `latlon_ne1024pg2.nc`, NetCDF with `lat`/`lon` on `ncol`. They are written to the Zarr as stored (radians) and converted to degrees for `coszr`. |
-| L128 coordinate | HICCUP `files_vert/vert_coord_E3SM_L128.nc` (default `--vert`) |
+| lat/lon | `latlon_ne1024pg2.nc`, NetCDF with `lat`/`lon` on `ncol`. They are written to the Zarr as stored, and `coszr` is computed from them in degrees (converted first when the `lat` units start with `rad`; the scripts stop if the result is not a latitude). `generate_all.sh` writes degrees. |
+| L128 coordinate | HICCUP `files_vert/vert_coord_E3SM_L128.nc` (8 KB; default `--vert`, see below) |
 
 `ne1024pg2_scrip.nc` and `latlon_ne1024pg2.nc` are the auxiliary files the
 README's setup section generates with
@@ -58,6 +58,14 @@ mv "$WORK/sdy1_static/landfrac" "$WORK/scream_static/landfrac.zarr"
 
 Give one `--include` per pattern: the `hf` CLI reads further bare patterns as
 file names.
+
+The fast path and `hres_ic` only need the L128 coordinate file from HICCUP,
+not a clone:
+
+```bash
+curl -L -o "$WORK/vert_coord_E3SM_L128.nc" \
+  https://raw.githubusercontent.com/E3SM-Project/HICCUP/3dd04f300bd722ac935df4a20f8ecb0356be9cc1/files_vert/vert_coord_E3SM_L128.nc
+```
 
 ### Map
 
@@ -79,8 +87,8 @@ column's overlaps with the ERA5 cells. `build_map.py` runs the same two
 commands on contiguous column ranges in a process pool (`--workers` defaults
 to all cores, with two ranges per worker) and stacks the results. On 72 Grace
 cores the map took 32 min; the two ranges that hold the poles take about three
-times longer than the others and finish last. A range of 87k columns used
-0.8 GB.
+times longer than the others and finish last. The default ranges have about
+175k columns; a range of half that size used 0.8 GB.
 
 Against the serial ncremap map built on an x86 machine (NCO 5.3.6), the
 parallel map has the same `row` and `col` (38,299,240 links in the same
@@ -89,7 +97,13 @@ relative difference is 1.3e-5, on sliver overlaps. A smooth temperature-like
 field remapped with the two maps differs by at most 1.8e-5 K. Two different
 splits of the same columns gave weights within 7e-9 of each other and the same
 float32 weights, so the differences come from the build machine, not from the
-split.
+split. Each part sees only its own overlaps, so the source-side `area_a`
+(summed overlap area) and `frac_a` are recomputed from all links after the
+merge; they match the serial map to 2e-11 and 1e-15.
+
+The parts are built in `<map name>.parts` next to the map (or under
+`--tmp-dir`), which is removed after the merge. A rerun reuses the parts that
+finished, as long as the grids are the same.
 
 An existing map is reused when its `.command.txt` sidecar is next to it
 (`build_map.py` writes one), and a map without a sidecar is adopted after its
@@ -104,8 +118,8 @@ ERA5 store and writes one Zarr IC per timestamp to
 `<out-dir>/scream_hiccup_ne1024pg2_<tag>.zarr`. The tag defaults to
 `YYYYMMDDHH`. It needs a CUDA GPU with about 50 GB of memory and the STRATA
 Docker image (torch, zarr 3, netCDF4 and gcsfs). It does not need NCO,
-TempestRemap or a HICCUP clone; it reads the map and static arrays from
-[Inputs](#inputs).
+TempestRemap or a HICCUP clone; it reads the map, static arrays and L128
+coordinate file from [Inputs](#inputs).
 
 ```bash
 docker run --rm --gpus all --ipc=host --user "$(id -u):$(id -g)" \
@@ -126,8 +140,8 @@ docker run --rm --gpus all --ipc=host --user "$(id -u):$(id -g)" \
 - If your torch build has no kernels compiled for your GPU, CUDA compiles
   them on first use. Point `CUDA_CACHE_PATH` at persistent storage to keep
   them between runs.
-- `--vert` should be HICCUP's float64 `vert_coord_E3SM_L128.nc` (it is only
-  read, so copy it out of a clone once). The repository's
+- `--vert` should be HICCUP's float64 `vert_coord_E3SM_L128.nc` (downloaded
+  in [Inputs](#inputs)). The repository's
   `data/scream_vertical_coordinate.nc` is a float32 copy of the same
   coordinate; it also works but shifts results by float32 rounding.
 - `--era5-atm`/`--era5-sfc` read the `ERA5.{atm,sfc}.<date>.<HH>.nc` files
@@ -223,6 +237,8 @@ levels from 50 to 1000 hPa) for the whole globe. It runs on one GPU, or with
   data for those years (0.4 deg, 9 levels, no omega) is too coarse to be worth
   building from.
 
+Run it in the STRATA Docker image as for `fast_ic` (it imports torch):
+
 ```bash
 python -m initial_conditions.hres_ic \
   --device cpu --timestamp 2022-09-26T12:00:00 \
@@ -252,7 +268,8 @@ reference path and the map build need:
 
 - A conda environment with conda-forge `nco` (provides `ncremap`; the PyPI
   `nco` wrapper does not work) and `tempest-remap`, plus `xarray`, `dask`,
-  `netcdf4`, `zarr>=3`, `cftime`, `scipy`, `psutil`. The validation ICs were
+  `netcdf4`, `zarr>=3`, `fsspec`, `aiohttp`, `cftime`, `scipy`, `psutil`
+  (`fsspec` and `aiohttp` let zarr read ARCO ERA5 over HTTPS). The validation ICs were
   built with nco 5.4.1, tempest-remap 2.2.0, xarray 2026.9.0, zarr 3.1.6 and
   Python 3.11.
 - A HICCUP clone at commit `3dd04f3` with the calendar patch applied:
@@ -306,26 +323,28 @@ the HICCUP environment without installing `screamcast`.
 w. It goes through the same horizontal and vertical remaps as the other 3D
 fields. `T_2m` gets only the horizontal remap.
 
-One timestamp takes about 2-3 h on one GB300 node. The L128 vertical remap
+One timestamp takes about 2.5-3 h on one GB300 node. The L128 vertical remap
 dominates, at roughly 15 min per 3D field with 8 dask workers
 (`--vremap-workers`, `--vremap-chunk-mem-gb`, `--state-adj-workers`).
 
 ## Commands
 
+Build the map with `build_map.py` first (see [Map](#map)): without a map and
+its `.command.txt` sidecar at `--map`, HICCUP builds one serially (13-18 h).
 Single IC (`--phis-zarr` defaults to `<data-root>/scream_phis.zarr`):
 
 ```bash
 python -m initial_conditions.run_hiccup_eamxx \
   --timestamp 2016-08-01T00:00:00 \
-  --map map/map_721x1440_to_ne1024pg2.nc \
+  --map "$WORK/map/map_721x1440_to_ne1024pg2.nc" \
   --dst-scrip "$AUX_DATA_ROOT/ne1024pg2_scrip.nc" \
   --data-root "$WORK" --hiccup-root "$WORK/HICCUP" \
-  --out out/HICCUP.atm_era5.2016-08-01.00.ne1024pg2.L128.nc \
-  --save-qv-before-sat out/HICCUP.atm_era5.2016-08-01.00.ne1024pg2.L128.qv_before_sat.nc
+  --out "$WORK/out/HICCUP.atm_era5.2016-08-01.00.ne1024pg2.L128.nc" \
+  --save-qv-before-sat "$WORK/out/HICCUP.atm_era5.2016-08-01.00.ne1024pg2.L128.qv_before_sat.nc"
 
 python -m initial_conditions.hiccup_l128_to_zarr \
-  --ic out/HICCUP.atm_era5.2016-08-01.00.ne1024pg2.L128.nc \
-  --out out/scream_hiccup_ne1024pg2_2016080100.zarr \
+  --ic "$WORK/out/HICCUP.atm_era5.2016-08-01.00.ne1024pg2.L128.nc" \
+  --out "$WORK/out/scream_hiccup_ne1024pg2_2016080100.zarr" \
   --timestamp 2016-08-01T00:00:00 \
   --latlon "$AUX_DATA_ROOT/latlon_ne1024pg2.nc" --scream-ref "$WORK/scream_static" \
   --workers 16
@@ -334,14 +353,15 @@ python -m initial_conditions.hiccup_l128_to_zarr \
 `--save-qv-before-sat` hard-links HICCUP's temporary `qv` file, so the path
 must be on the same filesystem as `--tmp-dir`.
 
-Tropical-cyclone batch (skips tags whose Zarr is already on the remote and
-deletes each local NetCDF after a verified upload; `--remote` is any rclone
+Tropical-cyclone batch (skips tags whose `manifest.txt` is already on the
+remote, which is uploaded last, and deletes each local NetCDF after a
+verified upload; `--remote` is any rclone
 destination prefix):
 
 ```bash
 python -m initial_conditions.run_tc_batch \
   --work-root "$WORK" --hiccup-root "$WORK/HICCUP" \
-  --map map/map_721x1440_to_ne1024pg2.nc \
+  --map "$WORK/map/map_721x1440_to_ne1024pg2.nc" \
   --dst-scrip "$AUX_DATA_ROOT/ne1024pg2_scrip.nc" \
   --latlon "$AUX_DATA_ROOT/latlon_ne1024pg2.nc" --scream-ref "$WORK/scream_static" \
   --remote REMOTE:PREFIX/era5_ic \

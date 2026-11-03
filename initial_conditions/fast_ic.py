@@ -13,7 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Build SCREAM ne1024pg2 Zarr ICs from ERA5 on one GPU in under a minute each.
+"""Build SCREAM ne1024pg2 Zarr ICs from ERA5 on one GPU (about 80 s for one IC).
 
 This is a torch port of the HICCUP EAMxx steps that ``run_hiccup_eamxx`` drives
 through HICCUP's NetCDF multifile workflow (HICCUP commit 3dd04f3):
@@ -129,6 +129,27 @@ def _check_grid(lat: np.ndarray, lon: np.ndarray, plev_hpa: np.ndarray) -> None:
         raise SystemExit("ERA5 pressure levels must increase from top to bottom")
 
 
+def check_store_layout(
+    root: zarr.Group,
+    names_3d: list[str],
+    names_2d: list[str],
+    time_units: str,
+    url: str,
+) -> None:
+    """Stop on a store whose time epoch or dimension order the readers do not assume."""
+    units = str(root["time"].attrs.get("units", ""))
+    if not units.startswith(time_units):
+        raise SystemExit(f"{url}: time units are {units!r}, expected {time_units!r}")
+    expected = {
+        **{name: ["time", "level", "latitude", "longitude"] for name in names_3d},
+        **{name: ["time", "latitude", "longitude"] for name in names_2d},
+    }
+    for name, dims in expected.items():
+        got = list(root[name].attrs.get("_ARRAY_DIMENSIONS", []))
+        if got != dims:
+            raise SystemExit(f"{url}: {name} dimensions are {got}, expected {dims}")
+
+
 def fetch_era5_arco(timestamp: str, era5_zarr: str, workers: int) -> Era5:
     """Read one hourly ERA5 time from the ARCO Zarr store with parallel requests."""
     root = zarr.open_group(era5_zarr, mode="r")
@@ -148,8 +169,15 @@ def fetch_era5_arco(timestamp: str, era5_zarr: str, workers: int) -> Era5:
     _check_grid(lat, lon, plev_hpa)
 
     names = [arco for arco, _ in (*ATM_FIELDS.values(), *SFC_FIELDS.values())]
+    check_store_layout(
+        root,
+        [arco for arco, _ in ATM_FIELDS.values()],
+        [arco for arco, _ in SFC_FIELDS.values()],
+        "hours since 1900-01-01",
+        era5_zarr,
+    )
     units = {name: str(root[name].attrs.get("units", "")) for name in names}
-    if "Pa" not in units["vertical_velocity"]:
+    if "Pa" not in units["vertical_velocity"] or "hPa" in units["vertical_velocity"]:
         raise SystemExit(f"vertical velocity units are {units['vertical_velocity']}")
     if units["temperature"] != "K" or units["2m_temperature"] != "K":
         raise SystemExit("ERA5 temperatures are not in K")
