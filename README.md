@@ -204,8 +204,7 @@ and hydrostatic heights.
   the reference the fast path is validated against.
 
 Each IC is a one-frame Zarr store with flat `ncol` and the 32 model levels
-STRATA uses. `run_screamcast_nudged.py` does not take such a store as its
-initial state yet: it reads the initial state from `SCREAM_MAIN_ZARR_PATH`.
+STRATA uses.
 
 One-time inputs: the SCREAM `phis`, `sgh30` and `landfrac` arrays from the
 `nvidia/STRATA-SCREAM-sdy1` dataset, the L128 coordinate file from HICCUP,
@@ -221,6 +220,23 @@ python -m initial_conditions.fast_ic \
   --phis "$WORK/scream_phis.zarr" \
   --latlon "$AUX_DATA_ROOT/latlon_ne1024pg2.nc" --scream-ref "$WORK/scream_static" \
   --vert "$WORK/vert_coord_E3SM_L128.nc"
+```
+
+To forecast from it, run the v1 forecast above with `--ic-store` in place of
+`SCREAM_MAIN_ZARR_PATH` and `--initial-time`. The forecast starts at the
+store's `initial_time`. A one-frame store has no later truth, so
+`--correction none` is required:
+
+```bash
+torchrun --nproc_per_node=4 scripts/ace/run_screamcast_nudged.py \
+  --run-name maria_2017091400 \
+  --checkpoint $AUX_DATA_ROOT/checkpoints/strata_v1.pth \
+  --ic-store "$WORK/ics/scream_hiccup_ne1024pg2_2017091400.zarr" \
+  --forecast-model screamcast --correction none --n-steps 2 \
+  --tile-size 128 --halo-width 16 --halo-adjoint --inference-batch-size 1 \
+  --tile-jitter 4 --tile-jitter-mode cycle16 --tile-jitter-fill replicate \
+  --sht-omega-lmax 0 --no-zarr-output \
+  $OUTPUT
 ```
 
 [`docs/initial_conditions.md`](docs/initial_conditions.md) has the downloads,

@@ -377,7 +377,9 @@ The NetCDF IC is float32 with `ncol = 25165824` and `lev = 128`. It contains
 `hybm`, `hyai`, `hybi` and `P0`.
 
 The Zarr v3 IC has one frame and flat `ncol`. There is no ncol-to-face
-reshape; that happens at rollout load time.
+reshape; that happens at rollout load time. `run_screamcast_nudged.py
+--ic-store <store> --correction none` starts a forecast from it at the
+store's `initial_time` (see the README).
 
 | Variables | Shape | Chunks |
 |---|---|---|
