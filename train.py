@@ -43,10 +43,9 @@ except ImportError:
 
 from screamcast import inference, model_pipelines
 from screamcast.checkpoint_io import (
-    link_best_collective,
-    recorded_best_valid_loss,
+    apply_best_valid_loss_floor,
+    choose_resume_checkpoint,
     save_checkpoint_atomic,
-    select_resume_checkpoint,
 )
 from screamcast.config import DiTConfig, PixelDiTConfig
 from screamcast.constructors import (
@@ -809,37 +808,11 @@ def train(
 
     # Checkpoint an interrupted run resumes from: latest.pth, or, when it does
     # not pass its CRC check (e.g. truncated by a walltime kill), the newest
-    # steps_*.pth that does. A steps_*.pth fallback predates validations whose
-    # best_valid_loss best.pth may still record; that loss is kept as the floor
-    # (applied after the state is restored) so best.pth is not replaced by a
-    # worse state. Rank 0 checks the files; every rank uses its answer.
-    _resume_choice = None
-    if fabric.global_rank == 0:
-        try:
-            _path, _notes, _error = select_resume_checkpoint(cfg.experiment.rundir)
-            _best_floor = None
-            if _path is not None and os.path.basename(_path) != "latest.pth":
-                _best_floor = recorded_best_valid_loss(
-                    os.path.join(cfg.experiment.rundir, "best.pth")
-                )
-            _resume_choice = (_path, _notes, _error, _best_floor)
-        except Exception as exc:  # noqa: BLE001 - raised on every rank below
-            _resume_choice = (
-                None,
-                [],
-                f"choosing the checkpoint to resume from failed: "
-                f"{type(exc).__name__}: {exc}",
-                None,
-            )
-    _resume_path, _resume_notes, _resume_error, _resume_best_floor = fabric.broadcast(
-        _resume_choice, src=0
+    # steps_*.pth that does. The best_valid_loss best.pth records is applied
+    # as a floor after the state is restored.
+    _resume_path, _resume_best_floor = choose_resume_checkpoint(
+        fabric, cfg.experiment.rundir
     )
-    for _note in _resume_notes:
-        fabric.print(f"WARNING: {_note}")
-    if _resume_error is not None:
-        raise RuntimeError(_resume_error)
-    if _resume_path is not None and os.path.basename(_resume_path) != "latest.pth":
-        fabric.print(f"WARNING: resuming from {_resume_path} instead of latest.pth")
 
     # _resume_path is latest.pth or its steps_*.pth fallback (chosen above);
     # either way this is an interrupted run resuming, not a foreign checkpoint.
@@ -946,12 +919,7 @@ def train(
     except FileNotFoundError:
         fabric.print("Training from scratch")
 
-    if _resume_best_floor is not None and _resume_best_floor < state["best_valid_loss"]:
-        fabric.print(
-            f"best_valid_loss {state['best_valid_loss']:.6g} from {_resume_path} "
-            f"-> {_resume_best_floor:.6g}, recorded in best.pth"
-        )
-        state["best_valid_loss"] = _resume_best_floor
+    apply_best_valid_loss_floor(fabric, state, _resume_best_floor)
 
     steps = state["steps"]
     nimg = state["nimg"]
@@ -1435,9 +1403,11 @@ def train(
                         link_to_best = False
 
                     if not cfg.training.no_save:
-                        save_checkpoint_atomic(fabric, "latest.pth", state)
-                        link_best_collective(
-                            fabric, link_to_best, "latest.pth", "best.pth"
+                        save_checkpoint_atomic(
+                            fabric,
+                            "latest.pth",
+                            state,
+                            best="best.pth" if link_to_best else None,
                         )
                         if cfg.training.save_ckpt_every_epoch:
                             save_checkpoint_atomic(fabric, f"steps_{steps}.pth", state)

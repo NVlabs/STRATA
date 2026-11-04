@@ -38,6 +38,7 @@ leaving the others waiting in a barrier.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import zipfile
@@ -82,15 +83,31 @@ def _fsync_dir(directory: str) -> None:
         os.close(fd)
 
 
-def save_checkpoint_atomic(fabric: Fabric, path: str, state: dict) -> None:
+def save_checkpoint_atomic(
+    fabric: Fabric, path: str, state: dict, best: str | None = None
+) -> None:
     """``fabric.save(path, state)``, written to ``<path>.tmp``, verified and renamed onto ``path`` by rank 0.
 
+    With ``best`` (rank 0's value counts), rank 0 also points ``best`` at the
+    new file, before renaming it onto ``path``. A kill between the two then
+    leaves ``best`` on the new state and ``path`` on the previous one, and
+    ``choose_resume_checkpoint`` keeps ``best``'s lower loss when resuming.
+    The other order would leave a ``path`` recording a loss that no
+    ``best`` holds, and ``best`` would stay on the older state.
+
     Collective: every rank must call it, and every rank raises if any rank's
-    part failed (``path`` is then left as it was).
+    part failed. When rank 0's part fails, ``path`` and ``best`` are left as
+    they were; when only another rank's part fails, rank 0 has already
+    replaced them.
     """
     tmp_path = path + ".tmp"
     error = None
     try:
+        if fabric.global_rank == 0 and os.path.lexists(tmp_path):
+            # Left by a run killed after its fabric.save. fabric.save would copy
+            # over it, and fsspec ignores a failed copy onto an existing file,
+            # so this stale file could pass the check below and be promoted.
+            os.unlink(tmp_path)
         fabric.save(tmp_path, state)
     except Exception as exc:  # noqa: BLE001 - shared with every rank below
         error = f"fabric.save: {_describe(exc)}"
@@ -104,50 +121,39 @@ def save_checkpoint_atomic(fabric: Fabric, path: str, state: dict) -> None:
             problem = checkpoint_problem(tmp_path)
             if problem is not None:
                 raise RuntimeError(f"{tmp_path}: {problem}; leaving {path} untouched")
+            if best is not None:
+                link_best(tmp_path, best)
             os.replace(tmp_path, path)
             _fsync_dir(os.path.dirname(os.path.abspath(path)))
         except Exception as exc:  # noqa: BLE001 - shared with every rank below
             error = _describe(exc)
+    if error is not None and fabric.global_rank == 0:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
     error = _first_error(fabric, error)
     if error is not None:
         raise RuntimeError(f"checkpoint save to {path} failed: {error}")
 
 
-def link_best(latest: str, best: str) -> None:
-    """Point ``best`` at the file ``latest`` names now.
+def link_best(src: str, best: str) -> None:
+    """Point ``best`` at the file ``src`` names now.
 
-    A hard link costs no copy and stays the best state because ``latest`` is
-    only ever replaced by rename, never rewritten in place. Linked to a temp
-    name and renamed, so ``best`` never disappears in between.
+    A hard link costs no copy and stays the best state because checkpoints
+    are only ever replaced by rename, never rewritten in place. Linked to a
+    temp name and renamed, so ``best`` never disappears in between.
     """
     tmp_path = best + ".tmp"
     if os.path.lexists(tmp_path):
         os.unlink(tmp_path)
-    os.link(latest, tmp_path)
+    os.link(src, tmp_path)
     os.replace(tmp_path, best)
-
-
-def link_best_collective(fabric: Fabric, link: bool, latest: str, best: str) -> None:
-    """Rank 0 runs ``link_best`` when ``link`` is true there; every rank raises if it failed.
-
-    Collective: call it on every rank after every save, whatever ``link`` is
-    on that rank, so the ranks never disagree about entering it.
-    """
-    error = None
-    if link and fabric.global_rank == 0:
-        try:
-            link_best(latest, best)
-        except Exception as exc:  # noqa: BLE001 - shared with every rank below
-            error = _describe(exc)
-    error = fabric.broadcast(error, src=0)
-    if error is not None:
-        raise RuntimeError(f"linking {best} to {latest} failed on rank 0: {error}")
 
 
 def recorded_best_valid_loss(path: str) -> float | None:
     """``best_valid_loss`` stored in the checkpoint at ``path``, or None when it is missing, unusable or has none.
 
-    Memory-maps the file, so the weights are not read.
+    Reads the whole file once for the CRC check (a few seconds per GB), then
+    memory-maps it to read the value without loading the weights.
     """
     if not os.path.exists(path) or checkpoint_problem(path) is not None:
         return None
@@ -162,22 +168,36 @@ def select_resume_checkpoint(rundir: str) -> tuple[str | None, list[str], str | 
     Returns ``(path, notes, error)``. ``path`` is ``latest.pth`` when it passes
     the CRC check, else the newest ``steps_<N>.pth`` that does; None with no
     error when ``latest.pth`` does not exist (a fresh run, or one starting
-    from ``experiment.resume_from``). ``notes`` describe every rejected file;
+    from ``experiment.resume_from``). ``notes`` describe every rejected file,
+    and warn when ``latest.pth`` is missing but ``steps_*.pth`` exist;
     ``error`` is set when ``latest.pth`` is unusable and no ``steps_*.pth``
     can replace it.
     """
     latest = os.path.join(rundir, "latest.pth")
+    steps = []
+    if os.path.isdir(rundir):
+        for name in os.listdir(rundir):
+            match = _STEPS_CKPT.match(name)
+            if match is not None:
+                steps.append((int(match.group(1)), os.path.join(rundir, name)))
     if not os.path.exists(latest):
+        if steps:
+            # Usually a corrupt latest.pth deleted by hand; resuming from a
+            # steps_*.pth then needs experiment.resume_from.
+            return (
+                None,
+                [
+                    f"{latest} does not exist but {len(steps)} steps_*.pth do; "
+                    "starting from experiment.resume_from or from scratch, "
+                    "not resuming this run"
+                ],
+                None,
+            )
         return None, [], None
     problem = checkpoint_problem(latest)
     if problem is None:
         return latest, [], None
     notes = [f"{latest} is unusable ({problem})"]
-    steps = []
-    for name in os.listdir(rundir):
-        match = _STEPS_CKPT.match(name)
-        if match is not None:
-            steps.append((int(match.group(1)), os.path.join(rundir, name)))
     for _, path in sorted(steps, reverse=True):
         problem = checkpoint_problem(path)
         if problem is None:
@@ -189,3 +209,84 @@ def select_resume_checkpoint(rundir: str) -> tuple[str | None, list[str], str | 
         "Tried: " + "; ".join(notes)
     )
     return None, notes, error
+
+
+_STALE_TMP = re.compile(r"^(latest|best|steps_\d+)\.pth\.tmp$")
+
+
+def remove_stale_tmp_files(rundir: str) -> list[str]:
+    """Delete the ``*.pth.tmp`` files a killed run left in ``rundir``; return a note for each.
+
+    Call only before this run's first save, when every such file is a
+    leftover. A ``steps_<N>.pth.tmp`` would otherwise stay forever, because
+    no later save uses the same N.
+    """
+    if not os.path.isdir(rundir):
+        return []
+    notes = []
+    for name in sorted(os.listdir(rundir)):
+        if _STALE_TMP.match(name) is not None:
+            path = os.path.join(rundir, name)
+            size_gb = os.path.getsize(path) / 1e9
+            os.unlink(path)
+            notes.append(
+                f"removed {path} ({size_gb:.2f} GB), left by an interrupted save"
+            )
+    return notes
+
+
+def choose_resume_checkpoint(
+    fabric: Fabric, rundir: str
+) -> tuple[str | None, float | None]:
+    """The checkpoint this run resumes from, and the ``best_valid_loss`` floor to apply after loading it.
+
+    Rank 0 removes leftover ``*.pth.tmp`` files, runs
+    ``select_resume_checkpoint`` and, when this run is resuming, reads the
+    ``best_valid_loss`` that ``best.pth`` records; every rank gets its answer.
+    ``best.pth`` can record a lower loss than the resumed file: a
+    ``steps_*.pth`` fallback predates later validations, and a kill inside
+    ``save_checkpoint_atomic`` can leave ``latest.pth`` one save behind
+    ``best.pth``. Applying the floor (``apply_best_valid_loss_floor``) keeps
+    ``best.pth`` from being replaced by a worse state.
+
+    Collective: every rank must call it. Every rank raises when rank 0 found
+    no usable checkpoint to resume from, or failed while looking.
+    """
+    choice = None
+    if fabric.global_rank == 0:
+        try:
+            notes = remove_stale_tmp_files(rundir)
+            path, select_notes, error = select_resume_checkpoint(rundir)
+            notes += select_notes
+            floor = None
+            if path is not None:
+                floor = recorded_best_valid_loss(os.path.join(rundir, "best.pth"))
+            choice = (path, notes, error, floor)
+        except Exception as exc:  # noqa: BLE001 - raised on every rank below
+            choice = (
+                None,
+                [],
+                f"choosing the checkpoint to resume from failed: {_describe(exc)}",
+                None,
+            )
+    path, notes, error, floor = fabric.broadcast(choice, src=0)
+    for note in notes:
+        fabric.print(f"WARNING: {note}")
+    if error is not None:
+        raise RuntimeError(error)
+    if path is not None and os.path.basename(path) != "latest.pth":
+        fabric.print(f"WARNING: resuming from {path} instead of latest.pth")
+    return path, floor
+
+
+def apply_best_valid_loss_floor(
+    fabric: Fabric, state: dict, floor: float | None
+) -> None:
+    """Lower ``state["best_valid_loss"]`` to ``floor`` when ``floor`` is lower; never raise it."""
+    if floor is None or floor >= state["best_valid_loss"]:
+        return
+    fabric.print(
+        f"best_valid_loss {state['best_valid_loss']:.6g} -> {floor:.6g}, "
+        "recorded in best.pth"
+    )
+    state["best_valid_loss"] = floor
