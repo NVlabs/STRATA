@@ -304,15 +304,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--halo-adjoint-cross-face",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help=(
             "Let the halo adjoint project predictions made on the cube-face "
-            "extension back onto real grid points. Those targets do not coincide "
-            "with the neighbour face's grid, so the KNN operator interpolates "
-            "them and the adjoint mixes a grid-scale-smoothed estimate into the "
-            "outermost few pixels of every face. --no-halo-adjoint-cross-face "
-            "keeps the overlap-add at intra-face tile seams and drops it across "
-            "cube-face edges. Only used when --halo-adjoint is set."
+            "extension back onto real grid points. Off by default: those targets "
+            "do not coincide with the neighbour face's grid, so the KNN operator "
+            "interpolates them and the adjoint mixes a grid-scale-smoothed "
+            "estimate into the outermost few pixels of every face (see "
+            "docs/halo-adjoint-cross-face.md). The default keeps the overlap-add "
+            "at intra-face tile seams and drops it across cube-face edges; "
+            "--halo-adjoint-cross-face restores the old behaviour. Only used when "
+            "--halo-adjoint is set."
         ),
     )
     parser.add_argument(
