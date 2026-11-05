@@ -33,7 +33,7 @@ never sees them; anything that reads all 32 output levels must not use these ICs
 
 Run from the repository root on one GPU, or with ``--device cpu`` (about 5 min on 64 cores)::
 
-    python -m initial_conditions.hres_ic --timestamp 2022-09-26T12:00:00 \\
+    python -m scripts.initial_conditions.hres_ic --timestamp 2022-09-26T12:00:00 \\
         --tag 2022092612_ian_post_hres --out-dir DIR --map map_721x1440_to_ne1024pg2.nc \\
         --phis PHIS --latlon latlon_ne1024pg2.nc --scream-ref DIR --vert L128.nc
 """
@@ -49,7 +49,9 @@ import numpy as np
 import torch
 import zarr
 
-from initial_conditions.fast_ic import (
+from screamcast.history import history_entry
+from scripts.initial_conditions.fast_ic import (
+    RD,
     ChunkWriter,
     Era5,
     _check_grid,
@@ -60,14 +62,12 @@ from initial_conditions.fast_ic import (
     load_vert,
     log,
 )
-from initial_conditions.hiccup_l128_to_zarr import (
+from scripts.initial_conditions.ic_store import (
     compute_coszr,
     load_latlon,
     load_static_array,
 )
-from initial_conditions.layout import NCOL, zarr_name
-from initial_conditions.run_hiccup_eamxx import RD
-from screamcast.history import history_entry
+from scripts.initial_conditions.layout import NCOL, zarr_name
 
 WB2_HRES_T0 = (
     "https://storage.googleapis.com/weatherbench2/datasets/hres_t0/"
@@ -166,7 +166,9 @@ def parse_args() -> argparse.Namespace:
         "--scream-ref", required=True, help="dir with sgh30.zarr and landfrac.zarr"
     )
     p.add_argument(
-        "--vert", required=True, help="L128 coordinate (float64 HICCUP file)"
+        "--vert",
+        required=True,
+        help="L128 hybrid coefficients (E3SM vert_coord_E3SM_L128.nc)",
     )
     p.add_argument("--hres-zarr", default=WB2_HRES_T0)
     p.add_argument("--device", default="cuda", help="cuda, or cpu (slower)")
@@ -178,7 +180,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    argv = [sys.executable, "-m", "initial_conditions.hres_ic", *sys.argv[1:]]
+    argv = [sys.executable, "-m", "scripts.initial_conditions.hres_ic", *sys.argv[1:]]
     timestamp = str(np.datetime64(args.timestamp, "s"))
     device = torch.device(args.device)
     start = time.perf_counter()
@@ -205,7 +207,7 @@ def main() -> None:
             out,
             NCOL,
             timestamp,
-            f"ECMWF HRES t0 {args.hres_zarr} via initial_conditions.hres_ic",
+            f"ECMWF HRES t0 {args.hres_zarr} via scripts.initial_conditions.hres_ic",
             history_entry(argv),
             writers,
         )

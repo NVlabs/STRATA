@@ -13,22 +13,61 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# Portions of this file are derived from HICCUP
+# (https://github.com/E3SM-Project/HICCUP), released under the following license:
+#
+# HICCUP is released under the following 3-Clause BSD Open Source license.
+#
+# *******************************************************************************
+# Copyright 2026, Lawrence Livermore National Security, LLC All Rights Reserved
+#
+# Software Name: Hindcast Initial Condition Creation Utility/Processor (HICCUP)
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+# 1. Redistributions of source code must retain the above copyright notice, this
+# list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright notice,
+# this list of conditions and the following disclaimer in the documentation
+# and/or other materials provided with the distribution.
+# 3. Neither the names of Lawrence Livermore National Security, LLC or the
+# Department of Energy nor the names of its contributors may be used to endorse
+# or promote products derived from this software without specific prior written
+# permission.
+#
+# THE SOFTWARE IS SUPPLIED "AS IS" WITHOUT WARRANTY OF ANY KIND.
+#
+# NEITHER THE UNITED STATES GOVERNMENT, NOR THE UNITED STATES DEPARTMENT OF
+# ENERGY, NOR LAWRENCE LIVERMORE NATIONAL SECURITY, LLC, NOR ANY OF THEIR
+# EMPLOYEES, MAKES ANY WARRANTY, EXPRESS OR IMPLIED, OR ASSUMES ANY LEGAL
+# LIABILITY OR RESPONSIBILITY FOR THE ACCURACY, COMPLETENESS, OR USEFULNESS OF
+# ANY INFORMATION, DATA, APPARATUS, PRODUCT, OR PROCESS DISCLOSED, OR REPRESENTS
+# THAT ITS USE WOULD NOT INFRINGE PRIVATELY OWNED RIGHTS.
+#
+# *******************************************************************************
 """Build SCREAM ne1024pg2 Zarr ICs from ERA5 on one GPU (about 80 s for one IC).
 
-This is a torch port of the HICCUP EAMxx steps that ``run_hiccup_eamxx`` drives
-through HICCUP's NetCDF multifile workflow (HICCUP commit 3dd04f3):
+This is a torch port of the HICCUP EAMxx steps in HICCUP's NetCDF multifile
+workflow (HICCUP commit 3dd04f3; these routines are the same at 0dec8bb, which
+added the license above):
 
 1. ``remap_horizontal_multifile``: apply the ncremap ``fv2fv_flx`` map file.
 2. ``adjust_surface_pressure``: adjust ps from ERA5 to SCREAM PHIS.
 3. ``remap_vertical_py``: log-pressure interpolation onto L128.
 4. ``remove_supersaturation``: clip qv to saturation over liquid.
 
-PotentialTemperature and hydrostatic z_mid follow ``run_hiccup_eamxx``. Each
-kernel keeps the float32/float64 promotion and operation order that HICCUP gets
-from numpy 2, so the output matches the HICCUP pipeline bit for bit apart from
-rare last-bit differences in transcendental functions. The output is the
-one-frame Zarr v3 store that ``hiccup_l128_to_zarr`` writes; no L128 NetCDF is
-produced.
+PotentialTemperature and hydrostatic z_mid (with virtual temperature) are then
+computed on L128. Each kernel keeps the float32/float64 promotion and operation
+order that HICCUP gets from numpy 2: on ten tropical-cyclone cases the output
+matched the HICCUP pipeline bit for bit apart from rare last-bit differences in
+transcendental functions. The output is a one-frame Zarr v3 store (see
+``ic_store``); no L128 NetCDF is produced.
+
+The output is on the ne1024pg2 physics grid that STRATA is trained on. It is not
+an initial condition EAMxx can start from: EAMxx reads its ICs on the np4 GLL
+grid.
 
 The vertical steps run one target level at a time over every column, bottom
 up, so z_mid accumulates in HICCUP's order and each output level is handed to
@@ -36,7 +75,7 @@ the Zarr writer threads as soon as it is final.
 
 Run from the repository root in the STRATA Docker image::
 
-    python -m initial_conditions.fast_ic --timestamp 2017-09-14T00:00:00 \\
+    python -m scripts.initial_conditions.fast_ic --timestamp 2017-09-14T00:00:00 \\
         --out-dir ics --map map_721x1440_to_ne1024pg2.nc ...
 """
 from __future__ import annotations
@@ -57,23 +96,32 @@ import zarr
 from numcodecs import Zstd
 from zarr.codecs import BytesCodec, Endian, ZstdCodec
 
-from initial_conditions.hiccup_l128_to_zarr import (
+from screamcast.history import history_entry
+from scripts.initial_conditions.ic_store import (
     compute_coszr,
     create_ic_store,
     load_latlon,
     load_static_array,
     validate_zarr,
 )
-from initial_conditions.layout import NCOL, NLEV, NLEV_SUBSET, VARS_3D, zarr_name
-from initial_conditions.run_hiccup_eamxx import (
-    ARCO_ERA5,
-    GRAV,
-    KAPPA,
-    RD,
-    RV_OVER_RD_M1,
+from scripts.initial_conditions.layout import (
+    NCOL,
+    NLEV,
+    NLEV_SUBSET,
+    VARS_3D,
+    zarr_name,
 )
-from screamcast.history import history_entry
 
+ARCO_ERA5 = (
+    "https://storage.googleapis.com/gcp-public-data-arco-era5/ar/"
+    "full_37-1h-0p25deg-chunk-1.zarr-v3"
+)
+# PotentialTemperature and z_mid
+RD = 287.05
+CP = 1004.0
+KAPPA = RD / CP
+GRAV = 9.80616
+RV_OVER_RD_M1 = 461.5 / RD - 1.0
 # hiccup/hiccup_constants.py
 STD_LAPSE = 0.0065
 GRAVIT = 9.80616
@@ -85,18 +133,18 @@ PHIS_THRESHOLD = 1e-3
 QV_MIN = 1.0e-9
 T_LAPSE_PER_PA = 6.5e-4
 
-# ERA5 field names: (ARCO name, HICCUP-extracted NetCDF name)
+# Era5 key -> ARCO ERA5 variable
 ATM_FIELDS = {
-    "T_mid": ("temperature", "t"),
-    "qv": ("specific_humidity", "q"),
-    "U": ("u_component_of_wind", "u"),
-    "V": ("v_component_of_wind", "v"),
-    "omega": ("vertical_velocity", "w"),
+    "T_mid": "temperature",
+    "qv": "specific_humidity",
+    "U": "u_component_of_wind",
+    "V": "v_component_of_wind",
+    "omega": "vertical_velocity",
 }
 SFC_FIELDS = {
-    "ps": ("surface_pressure", "sp"),
-    "phis": ("geopotential_at_surface", "z"),
-    "T_2m": ("2m_temperature", "t2m"),
+    "ps": "surface_pressure",
+    "phis": "geopotential_at_surface",
+    "T_2m": "2m_temperature",
 }
 # output level j is model level OUTPUT_LEVEL0 + OUTPUT_STRIDE * j (128[3::4])
 OUTPUT_LEVEL0 = 3
@@ -168,11 +216,11 @@ def fetch_era5_arco(timestamp: str, era5_zarr: str, workers: int) -> Era5:
     plev_hpa = np.asarray(root["level"][:])
     _check_grid(lat, lon, plev_hpa)
 
-    names = [arco for arco, _ in (*ATM_FIELDS.values(), *SFC_FIELDS.values())]
+    names = [*ATM_FIELDS.values(), *SFC_FIELDS.values()]
     check_store_layout(
         root,
-        [arco for arco, _ in ATM_FIELDS.values()],
-        [arco for arco, _ in SFC_FIELDS.values()],
+        list(ATM_FIELDS.values()),
+        list(SFC_FIELDS.values()),
         "hours since 1900-01-01",
         era5_zarr,
     )
@@ -189,41 +237,10 @@ def fetch_era5_arco(timestamp: str, era5_zarr: str, workers: int) -> Era5:
             )
         )
     return Era5(
-        atm={key: data[arco] for key, (arco, _) in ATM_FIELDS.items()},
-        sfc={key: data[arco] for key, (arco, _) in SFC_FIELDS.items()},
+        atm={key: data[arco] for key, arco in ATM_FIELDS.items()},
+        sfc={key: data[arco] for key, arco in SFC_FIELDS.items()},
         plev_pa=plev_hpa.astype(np.float64) * 100.0,
     )
-
-
-def read_era5_netcdf(atm_path: str, sfc_path: str, timestamp: str) -> Era5:
-    """Read the ERA5.{atm,sfc}.<date>.<HH>.nc files written by run_hiccup_eamxx."""
-    with netCDF4.Dataset(atm_path) as atm, netCDF4.Dataset(sfc_path) as sfc:
-        for ds in (atm, sfc):
-            t = ds.variables["time"]
-            when = netCDF4.num2date(t[:], t.units, only_use_cftime_datetimes=False)
-            if len(when) != 1 or np.datetime64(when[0], "s") != np.datetime64(
-                timestamp, "s"
-            ):
-                raise SystemExit(f"{ds.filepath()} time is {when}, not {timestamp}")
-        if atm.variables["level"].units != "hPa":
-            raise SystemExit("ERA5 level units are not hPa")
-        plev_hpa = np.asarray(atm.variables["level"][:])
-        _check_grid(
-            np.asarray(atm.variables["latitude"][:]),
-            np.asarray(atm.variables["longitude"][:]),
-            plev_hpa,
-        )
-        return Era5(
-            atm={
-                key: np.asarray(atm.variables[nc][0], dtype=np.float32)
-                for key, (_, nc) in ATM_FIELDS.items()
-            },
-            sfc={
-                key: np.asarray(sfc.variables[nc][0], dtype=np.float32)
-                for key, (_, nc) in SFC_FIELDS.items()
-            },
-            plev_pa=plev_hpa.astype(np.float64) * 100.0,
-        )
 
 
 def load_map(path: str, device: torch.device) -> torch.Tensor:
@@ -394,7 +411,7 @@ def remove_supersaturation(
 
 
 def potential_temperature(t: torch.Tensor, p: torch.Tensor, p0: float):
-    """``T (P0/p)^(Rd/cp)`` in float64, as in ``run_hiccup_eamxx.theta_and_zmid``."""
+    """``T (P0/p)^(Rd/cp)`` in float64."""
     return t * torch.pow(p0 / p.clamp(min=1.0), KAPPA)
 
 
@@ -453,7 +470,7 @@ def build_ic(
         t = interp_level(st, fields["T_mid"], p_source, log_p_source, lapse=True)
         qv_raw = interp_level(st, fields["qv"], p_source, log_p_source, lapse=False)
         qv = remove_supersaturation(qv_raw, t, st.p / 1e2)
-        # hydrostatic heights in run_hiccup_eamxx.theta_and_zmid's order
+        # hydrostatic heights, summed over the interfaces from the surface up
         tv = t.double() * (1.0 + RV_OVER_RD_M1 * qv.clamp(min=0.0))
         scale = RD * tv / GRAV
         p_int_top = hybrid_pressure(hyai[k], hybi[k], p0, ps).clamp(min=1.0e-6)
@@ -580,11 +597,9 @@ def parse_args():
     p.add_argument(
         "--vert",
         required=True,
-        help="L128 hybrid coefficients, e.g. HICCUP files_vert/vert_coord_E3SM_L128.nc",
+        help="L128 hybrid coefficients (E3SM vert_coord_E3SM_L128.nc)",
     )
     p.add_argument("--era5-zarr", default=ARCO_ERA5)
-    p.add_argument("--era5-atm", help="read ERA5 from this NetCDF instead of ARCO")
-    p.add_argument("--era5-sfc", help="surface file paired with --era5-atm")
     p.add_argument("--fetch-workers", type=int, default=8)
     p.add_argument("--write-workers", type=int, default=os.cpu_count())
     p.add_argument("--rows-per-chunk", type=int, default=8 * 1024 * 1024)
@@ -593,17 +608,13 @@ def parse_args():
 
 def main() -> None:
     args = parse_args()
-    argv = [sys.executable, "-m", "initial_conditions.fast_ic", *sys.argv[1:]]
+    argv = [sys.executable, "-m", "scripts.initial_conditions.fast_ic", *sys.argv[1:]]
     timestamps = [str(np.datetime64(t, "s")) for t in args.timestamp]
     tags = args.tag or [t.replace("-", "").replace("T", "")[:10] for t in timestamps]
     if len(tags) != len(timestamps):
         raise SystemExit("--tag needs one tag per --timestamp")
     if len(set(tags)) != len(tags):
         raise SystemExit(f"tags must be unique (one output store each): {tags}")
-    if (args.era5_atm is None) != (args.era5_sfc is None):
-        raise SystemExit("--era5-atm and --era5-sfc go together")
-    if args.era5_atm is not None and len(timestamps) != 1:
-        raise SystemExit("--era5-atm/--era5-sfc take a single --timestamp")
     os.makedirs(args.out_dir, exist_ok=True)
     device = torch.device("cuda")
     start = clock = time.perf_counter()
@@ -633,7 +644,7 @@ def main() -> None:
 
     # HDF5 is not thread-safe, so every NetCDF read stays on this thread; only
     # the ARCO fetch (Zarr over HTTPS) and coszr (numpy) run in the background.
-    era5_next = fetch(timestamps[0]) if args.era5_atm is None else None
+    era5_next = fetch(timestamps[0])
     lat, lon, lat_deg, lon_deg = load_latlon(args.latlon)
     coszr_next = background.submit(compute_coszr, timestamps[0], lat_deg, lon_deg)
     statics = {
@@ -655,14 +666,9 @@ def main() -> None:
 
     for i, (timestamp, tag) in enumerate(zip(timestamps, tags)):
         log(f"{timestamp} -> {tag}")
-        if args.era5_atm is None:
-            era5 = era5_next.result()
-            ic_source = f"ERA5 {args.era5_zarr}"
-            if i + 1 < len(timestamps):
-                era5_next = fetch(timestamps[i + 1])
-        else:
-            era5 = read_era5_netcdf(args.era5_atm, args.era5_sfc, timestamp)
-            ic_source = f"ERA5 {os.path.abspath(args.era5_atm)}"
+        era5 = era5_next.result()
+        if i + 1 < len(timestamps):
+            era5_next = fetch(timestamps[i + 1])
         if remap.shape[1] != era5.sfc["ps"].size:
             raise SystemExit("map n_a does not match the ERA5 grid")
         coszr = coszr_next.result()
@@ -677,7 +683,7 @@ def main() -> None:
             out,
             NCOL,
             timestamp,
-            ic_source + " via initial_conditions.fast_ic",
+            f"ERA5 {args.era5_zarr} via scripts.initial_conditions.fast_ic",
             history_entry(argv),
             writers,
         )

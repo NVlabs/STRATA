@@ -255,7 +255,7 @@ def parse_args() -> argparse.Namespace:
         "--ic-store",
         default=None,
         help=(
-            "Start from a one-frame IC store built by initial_conditions/ "
+            "Start from a one-frame IC store built by scripts/initial_conditions/ "
             "instead of SCREAM_MAIN_ZARR_PATH. Needs --correction none."
         ),
     )

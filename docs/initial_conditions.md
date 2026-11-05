@@ -1,45 +1,41 @@
-# SCREAM-like initial conditions from ERA5 (and ECMWF HRES) with HICCUP
+# STRATA initial conditions from ERA5 and ECMWF HRES
 
-`initial_conditions/` builds EAMxx/SCREAM atmospheric initial conditions on
-**ne1024pg2** (`ncol = 25165824`) with the **E3SM L128** hybrid vertical grid
-from ERA5, as one-frame Zarr v3 stores with flat `ncol` and 32 of the L128
-levels (see [Output layouts](#output-layouts)).
-There are two pipelines:
+`scripts/initial_conditions/` builds STRATA initial conditions on the SCREAM
+**ne1024pg2** physics grid (`ncol = 25165824`) with the **E3SM L128** hybrid
+vertical grid, from ERA5 or the ECMWF HRES analysis. Each IC is a one-frame
+Zarr v3 store with flat `ncol` and 32 of the L128 levels (see
+[Output layouts](#output-layouts)). These are STRATA inputs on the grid STRATA
+is trained on, not initial conditions EAMxx can start from: EAMxx reads its ICs
+on the np4 GLL grid.
 
-- **`fast_ic.py` (use this).** A torch port of the HICCUP steps that runs on
-  one GPU. It builds an IC for any ERA5 hour in about 80 s end to end, and
-  further ICs in the same run take about 25 s each. Its output matches the
-  HICCUP pipeline bit for bit apart from last-bit differences in a few `qv`
-  values.
-- **`run_hiccup_eamxx.py` + `hiccup_l128_to_zarr.py` (reference).** Calls the
-  E3SM [HICCUP](https://github.com/E3SM-Project/HICCUP) functions directly
-  through HICCUP's NetCDF multifile workflow. It takes 2.5-3 h per IC and is
-  kept as the ground truth the fast path is validated against.
+The computation is a torch port of the E3SM
+[HICCUP](https://github.com/E3SM-Project/HICCUP) steps (see
+[License](#license)). It builds an IC for any ERA5 hour in about 80 s on one
+GPU, and further ICs in the same run take about 25 s each. Its output matches
+HICCUP's own bit for bit apart from last-bit differences in a few `qv` values
+(see [Validation against HICCUP](#validation-against-hiccup)).
 
-| Script | Role |
+| Module | Role |
 |---|---|
-| `fast_ic.py` | ERA5 timestamp(s) to Zarr IC(s) on one GPU (see [Fast GPU path](#fast-gpu-path)) |
-| `run_hiccup_eamxx.py` | One timestamp: ERA5 extraction, HICCUP pipeline, PotentialTemperature and `z_mid`, combined NetCDF IC |
-| `hiccup_l128_to_zarr.py` | NetCDF IC to a one-frame Zarr v3 store (32 levels, flat `ncol`, consolidated metadata) |
-| `run_tc_batch.py` | Loops over `layout.CASES` (10 tropical-cyclone ICs): build, convert, upload to an rclone remote with a manifest |
+| `fast_ic.py` | The HICCUP steps on the GPU; ERA5 timestamp(s) to Zarr IC(s) (see [ERA5 initial conditions](#era5-initial-conditions)) |
+| `hres_ic.py` | The same steps on the ECMWF HRES analysis (see [HRES initial conditions](#hres-initial-conditions)) |
 | `build_map.py` | Builds (in parallel) or reuses the ERA5 721x1440 to ne1024pg2 `fv2fv_flx --lrg2sml` map |
-| `layout.py` | Grid and level constants, Zarr variable lists, the TC case list, file-name helpers |
-| `hiccup_time_calendar.patch` | Required local fix to HICCUP (see below) |
-| `hres_ic.py` | The same HICCUP steps on the ECMWF HRES analysis (see [HRES initial conditions](#hres-initial-conditions)) |
+| `ic_store.py` | lat/lon and static inputs, `coszr`, creating and checking a one-frame store |
+| `layout.py` | Grid and level constants, Zarr variable lists, the store name |
 
-All Python entry points are modules. Run them from the repository root with
-`python -m initial_conditions.<name>`.
+Run them from the repository root with
+`python -m scripts.initial_conditions.<name>`.
 
 ## Inputs
 
 | Input | Notes |
 |---|---|
-| ERA5 | ARCO `gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3`, read over HTTPS. **37 pressure levels** (1-1000 hPa), 0.25 deg 721x1440, north-to-south, starting at Greenwich. Time index is hours since 1900-01-01. The HICCUP path extracts each timestamp to `<data-root>/data/ERA5.{atm,sfc}.<date>.<HH>.nc`. |
+| ERA5 | ARCO `gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3`, read over HTTPS. **37 pressure levels** (1-1000 hPa), 0.25 deg 721x1440, north-to-south, starting at Greenwich. Time index is hours since 1900-01-01. |
 | SCREAM `phis`, `sgh30`, `landfrac` | The `phis`, `sgh30` and `landfrac` arrays of the [nvidia/STRATA-SCREAM-sdy1](https://huggingface.co/datasets/nvidia/STRATA-SCREAM-sdy1) dataset (about 60 MB together; see below). |
 | Map | `map_721x1440_to_ne1024pg2.nc` (3.2 GB), `ncremap -a fv2fv_flx --lrg2sml` from the ERA5 grid to ne1024pg2, with a `.command.txt` sidecar next to it. Build it once with `build_map.py`, about 30 min on 72 cores (see [Map](#map)). `fast_ic` and `hres_ic` only read it. |
 | ne1024pg2 SCRIP | `ne1024pg2_scrip.nc`, the destination grid for the map (`grid_size = 25165824`) |
 | lat/lon | `latlon_ne1024pg2.nc`, NetCDF with `lat`/`lon` on `ncol`. They are written to the Zarr as stored, and `coszr` is computed from them in degrees (converted first when the `lat` units start with `rad`; the scripts stop if the result is not a latitude). `generate_all.sh` writes degrees. |
-| L128 coordinate | HICCUP `files_vert/vert_coord_E3SM_L128.nc` (8 KB; default `--vert`, see below) |
+| L128 coordinate | HICCUP `files_vert/vert_coord_E3SM_L128.nc` (8 KB; see below) |
 
 `ne1024pg2_scrip.nc` and `latlon_ne1024pg2.nc` are the auxiliary files the
 README's setup section generates with
@@ -60,22 +56,22 @@ mv "$WORK/sdy1_static/landfrac" "$WORK/scream_static/landfrac.zarr"
 Give one `--include` per pattern: the `hf` CLI reads further bare patterns as
 file names.
 
-The fast path and `hres_ic` only need the L128 coordinate file from HICCUP,
-not a clone:
+The L128 coordinate file comes from the HICCUP repository (no clone needed):
 
 ```bash
 curl -L -o "$WORK/vert_coord_E3SM_L128.nc" \
-  https://raw.githubusercontent.com/E3SM-Project/HICCUP/3dd04f300bd722ac935df4a20f8ecb0356be9cc1/files_vert/vert_coord_E3SM_L128.nc
+  https://raw.githubusercontent.com/E3SM-Project/HICCUP/0dec8bba33600625bd6109990bcb63e7930bb264/files_vert/vert_coord_E3SM_L128.nc
 ```
 
 ### Map
 
 `build_map.py` builds the map in parallel. It needs conda-forge `nco` and
 `tempest-remap` (see [Environment](#environment)), and writes the ERA5 SCRIP
-file with HICCUP's `ncremap -G` command if `--src-scrip` does not exist:
+file with HICCUP's `ncremap -G` grid description if `--src-scrip` does not
+exist:
 
 ```bash
-python -m initial_conditions.build_map \
+python -m scripts.initial_conditions.build_map \
   --dst-scrip "$AUX_DATA_ROOT/ne1024pg2_scrip.nc" \
   --src-scrip "$WORK/grid/scrip_ERA5_721x1440.nc" \
   --map "$WORK/map/map_721x1440_to_ne1024pg2.nc"
@@ -108,25 +104,23 @@ finished, as long as the grids are the same.
 
 An existing map is reused when its `.command.txt` sidecar is next to it
 (`build_map.py` writes one), and a map without a sidecar is adopted after its
-`n_a`/`n_b` sizes are checked. `run_hiccup_eamxx.py` reuses the map only when
-the sidecar is there; otherwise it asks HICCUP to build a new map serially, so
-run `build_map.py` first.
+`n_a`/`n_b` sizes are checked.
 
-## Fast GPU path
+## ERA5 initial conditions
 
 `fast_ic.py` takes one or more UTC timestamps, reads those hours from the ARCO
 ERA5 store and writes one Zarr IC per timestamp to
 `<out-dir>/scream_hiccup_ne1024pg2_<tag>.zarr`. The tag defaults to
 `YYYYMMDDHH`. It needs a CUDA GPU with about 50 GB of memory and the STRATA
 Docker image (torch, zarr 3, netCDF4 and gcsfs). It does not need NCO,
-TempestRemap or a HICCUP clone; it reads the map, static arrays and L128
-coordinate file from [Inputs](#inputs).
+TempestRemap or HICCUP; it reads the map, static arrays and L128 coordinate
+file from [Inputs](#inputs).
 
 ```bash
 docker run --rm --gpus all --ipc=host --user "$(id -u):$(id -g)" \
   -v "$PWD:$PWD" -v "$WORK:$WORK" -w "$PWD" -e PYTHONPATH="$PWD" \
   strata \
-  python -m initial_conditions.fast_ic \
+  python -m scripts.initial_conditions.fast_ic \
     --timestamp 2017-09-14T00 2017-09-18T12 \
     --out-dir "$WORK/ics" \
     --map "$WORK/map/map_721x1440_to_ne1024pg2.nc" \
@@ -145,29 +139,35 @@ docker run --rm --gpus all --ipc=host --user "$(id -u):$(id -g)" \
   in [Inputs](#inputs)). The repository's
   `data/scream_vertical_coordinate.nc` is a float32 copy of the same
   coordinate; it also works but shifts results by float32 rounding.
-- `--era5-atm`/`--era5-sfc` read the `ERA5.{atm,sfc}.<date>.<HH>.nc` files
-  that `run_hiccup_eamxx.py` extracts instead of ARCO; this is how the
-  validation below isolates the computation from the download.
 - The stores are consolidated when they are written.
 
 ### How it works
 
-The computation follows HICCUP step by step, with the float32/float64 types and
-operation order that HICCUP gets from numpy 2:
+The computation follows HICCUP's EAMxx steps one by one, with the
+float32/float64 types and operation order that HICCUP gets from numpy 2:
 
 1. `remap_horizontal`: the ncremap map as a CSR matrix on the GPU, applied to
    all 188 ERA5 level-fields in one sparse matmul, accumulated in float64 and
-   stored as float32 (as ncremap does).
+   stored as float32 (as ncremap does). The fields are `T`, `qv`, `U`, `V`,
+   `omega`, `ps`, `phis` and `T_2m`; cloud water, ice and ozone are not used.
+   `omega` is ERA5 `vertical_velocity`, already in Pa s-1, not derived from w.
 2. `adjust_surface_pressure`: HICCUP's formula, using T on the 1000 hPa level
-   and `del_phis = PHIS_ERA5 - PHIS_SCREAM`.
+   and `del_phis = PHIS_ERA5 - PHIS_SCREAM`. `phis` is then SCREAM's, bit for
+   bit.
 3. Bottom-up loop over the 128 target levels across all columns:
    `log_pressure_stencil` and `interp_level` reproduce HICCUP's
-   `_interp_block`. The bracketing indices and weights depend only on
-   pressure, so they are computed once per level and shared by T, qv, U, V
-   and omega. Then come `remove_supersaturation`, the hydrostatic `z_mid`
-   accumulation in `run_hiccup_eamxx`'s order, and PotentialTemperature. On
-   the 46 pure pressure levels (above 146 hPa) the pressure is the same in
-   every column, so those float64 logs and powers are evaluated once.
+   `_interp_block`: linear in log pressure, with the end values held outside
+   the 1-1000 hPa source range, except temperature below 1000 hPa, which
+   follows a 6.5 K per 100 hPa lapse rate. The bracketing indices and weights
+   depend only on pressure, so they are computed once per level and shared by
+   T, qv, U, V and omega. Then `remove_supersaturation` clips `qv` above
+   saturation over liquid (Bolton) to saturation and sets negative `qv` to
+   1e-9; temperature is an input only. Last come hydrostatic `z_mid`, which
+   integrates the virtual temperature upward from `phis/g` over the hybrid
+   interfaces, and `PotentialTemperature = T (P0/p)^(Rd/cp)`, with
+   Rd = 287.05, cp = 1004 and g = 9.80616. On the 46 pure pressure levels
+   (above 146 hPa) the pressure is the same in every column, so those float64
+   logs and powers are evaluated once. `T_2m` gets only the horizontal remap.
 4. Each output level goes to a pool of writer threads as soon as it is final.
    They zstd-encode the chunk with the codec from the store's own metadata and
    write it to the key its chunk key encoding gives. zarr's own writer encodes
@@ -180,9 +180,12 @@ while the next IC runs on the GPU.
 
 ### Validation against HICCUP
 
-The fast path rebuilt the ten tropical-cyclone ICs in `layout.CASES` from
-ARCO, and each was compared value by value with the HICCUP-pipeline store of
-the same name. Across the ten:
+`fast_ic.py` rebuilt ten tropical-cyclone ICs from ARCO (Maria 2017-09-14T00
+and 09-18T12, Michael 2018-10-06T00 and 10-09T12, Dorian 2019-08-26T00 and
+09-01T00, Ian 2022-09-22T00 and 09-26T12, Otis 2023-10-21T00 and 10-24T06).
+Each was compared value by value with an IC built by running HICCUP itself
+(commit 3dd04f3, its EAMxx NetCDF multifile workflow, with the same map, L128
+file and SCREAM `phis`). Across the ten:
 
 - `ps`, `T_2m`, `U`, `V`, `omega`, `PotentialTemperature` and all statics are
   bitwise identical, except for a single last-bit difference in
@@ -205,10 +208,10 @@ On one NVIDIA GB300 (72 Grace cores), starting from ARCO:
 | Last store's remaining writes, consolidation and read-back | 15 s | 16 s |
 | **Wall time** | **77 s** | **285 s (about 24 s per further IC)** |
 
-The HICCUP path takes 2.5-3 h per IC on the same machine. 81 min of that is the
-vertical remap, and 27 min goes to NetCDF combine and attribute cleanup.
-Writing is CPU-bound: the 192 3D chunks are about 1,000 CPU-seconds of zstd
-at the reference stores' compression level.
+Running HICCUP itself took 2.5-3 h per IC on the same machine: 81 min of that
+is the vertical remap, and 27 min goes to NetCDF combine and attribute
+cleanup. Writing is CPU-bound: the 192 3D chunks are about 1,000 CPU-seconds
+of zstd at the stores' compression level.
 
 ## HRES initial conditions
 
@@ -241,7 +244,7 @@ levels from 50 to 1000 hPa) for the whole globe. It runs on one GPU, or with
 Run it in the STRATA Docker image as for `fast_ic` (it imports torch):
 
 ```bash
-python -m initial_conditions.hres_ic \
+python -m scripts.initial_conditions.hres_ic \
   --device cpu --timestamp 2022-09-26T12:00:00 \
   --tag 2022092612_ian_post_hres --out-dir "$WORK/ics" \
   --map "$WORK/map/map_721x1440_to_ne1024pg2.nc" --phis "$WORK/scream_phis.zarr" \
@@ -264,117 +267,13 @@ level, against IBTrACS (1-min 10-m wind):
 
 ## Environment
 
-The fast path and `hres_ic` only need the STRATA Docker image. The HICCUP
-reference path and the map build need:
-
-- A conda environment with conda-forge `nco` (provides `ncremap`; the PyPI
-  `nco` wrapper does not work) and `tempest-remap`, plus `xarray`, `dask`,
-  `netcdf4`, `zarr>=3`, `fsspec`, `aiohttp`, `cftime`, `scipy`, `psutil`
-  (`fsspec` and `aiohttp` let zarr read ARCO ERA5 over HTTPS). The validation ICs were
-  built with nco 5.4.1, tempest-remap 2.2.0, xarray 2026.9.0, zarr 3.1.6 and
-  Python 3.11.
-- A HICCUP clone at commit `3dd04f3` with the calendar patch applied:
-
-  ```bash
-  git clone https://github.com/E3SM-Project/HICCUP.git && git -C HICCUP checkout 3dd04f3
-  git -C HICCUP apply "$REPO/initial_conditions/hiccup_time_calendar.patch"
-  ```
-
-  Without the patch, `add_time_date_variables_multifile` fails on current
-  xarray because it refuses to overwrite the `calendar` attribute that HICCUP
-  sets on `time`. The patch moves that attribute into the write encoding.
-
-- `rclone`, only for `run_tc_batch.py`'s uploads.
-
-The scripts only import `numpy`, `xarray`, `zarr`, `netCDF4`, HICCUP and the
-light `screamcast.history` / `screamcast.astronomy` modules, so they run in
-the HICCUP environment without installing `screamcast`.
-
-## Pipeline
-
-`run_hiccup_eamxx.py` follows the HICCUP EAMxx multifile order:
-
-1. Horizontal remap of every variable with the `fv2fv_flx` map
-   (`remap_horizontal_multifile`), then `rename_vars_multifile` and
-   `add_time_date_variables_multifile`. The variables are `T_mid`, `qv`, `U`,
-   `V`, `ps`, `phis`, `omega` and `T_2m`. Cloud water, ice and ozone are dropped.
-2. A check that the remapped ERA5 surface geopotential correlates with SCREAM
-   `phis` (r >= 0.8). This catches flipped or shifted grids.
-3. `surface_adjustment_multifile(adj_PS=True, adj_TS=False, adj_T_eam=False)`.
-   This adjusts `ps` for `del_phis = PHIS_ERA5 - PHIS_SCREAM`. `phis` is then
-   replaced by SCREAM's, bit for bit.
-4. `remap_vertical_multifile` from the ERA5 pressure levels onto L128, using
-   the adjusted `ps`. HICCUP interpolates linearly in log pressure. Outside
-   the 1-1000 hPa source range it holds the end values constant. The
-   exception is temperature below 1000 hPa, which follows a 6.5 K per 100 hPa
-   lapse rate.
-5. Optionally (`--save-qv-before-sat PATH`), `qv` at this point is kept as a
-   separate NetCDF. Its history records the clip fraction.
-6. `atmos_state_adjustment_multifile(adjust_sat=True, adjust_wtr=True)`.
-   `remove_supersaturation` changes only `qv`: it clips `qv > qv_sat(T, p)` to
-   saturation and sets `qv < 0` to 1e-9. Temperature is an input only.
-7. Derived fields: `PotentialTemperature = T (P0/p)^(Rd/cp)` and hydrostatic
-   `z_mid`. `z_mid` integrates the virtual temperature upward from `phis/g`
-   over the hybrid interfaces, with Rd = 287.05, cp = 1004 and g = 9.80616.
-8. `combine_files` into one float32 NetCDF with 3D fields stored as
-   `(time, lev, ncol)`, followed by `clean_global_attributes`. The `history`
-   attribute records the map command and the exact driver command.
-
-`omega` is ERA5 `vertical_velocity`, already in Pa s-1. It is not derived from
-w. It goes through the same horizontal and vertical remaps as the other 3D
-fields. `T_2m` gets only the horizontal remap.
-
-One timestamp takes about 2.5-3 h on one GB300 node. The L128 vertical remap
-dominates, at roughly 15 min per 3D field with 8 dask workers
-(`--vremap-workers`, `--vremap-chunk-mem-gb`, `--state-adj-workers`).
-
-## Commands
-
-Build the map with `build_map.py` first (see [Map](#map)): without a map and
-its `.command.txt` sidecar at `--map`, HICCUP builds one serially (13-18 h).
-Single IC (`--phis-zarr` defaults to `<data-root>/scream_phis.zarr`):
-
-```bash
-python -m initial_conditions.run_hiccup_eamxx \
-  --timestamp 2016-08-01T00:00:00 \
-  --map "$WORK/map/map_721x1440_to_ne1024pg2.nc" \
-  --dst-scrip "$AUX_DATA_ROOT/ne1024pg2_scrip.nc" \
-  --data-root "$WORK" --hiccup-root "$WORK/HICCUP" \
-  --out "$WORK/out/HICCUP.atm_era5.2016-08-01.00.ne1024pg2.L128.nc" \
-  --save-qv-before-sat "$WORK/out/HICCUP.atm_era5.2016-08-01.00.ne1024pg2.L128.qv_before_sat.nc"
-
-python -m initial_conditions.hiccup_l128_to_zarr \
-  --ic "$WORK/out/HICCUP.atm_era5.2016-08-01.00.ne1024pg2.L128.nc" \
-  --out "$WORK/out/scream_hiccup_ne1024pg2_2016080100.zarr" \
-  --timestamp 2016-08-01T00:00:00 \
-  --latlon "$AUX_DATA_ROOT/latlon_ne1024pg2.nc" --scream-ref "$WORK/scream_static" \
-  --workers 16
-```
-
-`--save-qv-before-sat` hard-links HICCUP's temporary `qv` file, so the path
-must be on the same filesystem as `--tmp-dir`.
-
-Tropical-cyclone batch (skips tags whose `manifest.txt` is already on the
-remote, which is uploaded last, and deletes each local NetCDF after a
-verified upload; `--remote` is any rclone
-destination prefix):
-
-```bash
-python -m initial_conditions.run_tc_batch \
-  --work-root "$WORK" --hiccup-root "$WORK/HICCUP" \
-  --map "$WORK/map/map_721x1440_to_ne1024pg2.nc" \
-  --dst-scrip "$AUX_DATA_ROOT/ne1024pg2_scrip.nc" \
-  --latlon "$AUX_DATA_ROOT/latlon_ne1024pg2.nc" --scream-ref "$WORK/scream_static" \
-  --remote REMOTE:PREFIX/era5_ic \
-  --python "$CONDA_PREFIX/bin/python" [--tags 2017091400_maria_pre ...]
-```
+`fast_ic` and `hres_ic` only need the STRATA Docker image. `build_map` needs a
+conda environment with conda-forge `nco` (provides `ncremap`; the PyPI `nco`
+wrapper does not work) and `tempest-remap`, plus `numpy` and `netcdf4`. The
+validation ICs were built in an environment with nco 5.4.1 and tempest-remap
+2.2.0.
 
 ## Output layouts
-
-The NetCDF IC is float32 with `ncol = 25165824` and `lev = 128`. It contains
-`T_mid`, `qv`, `U`, `V`, `omega`, `PotentialTemperature` and `z_mid` as
-`(time, lev, ncol)`; `ps`, `phis` and `T_2m` as `(time, ncol)`; and `hyam`,
-`hybm`, `hyai`, `hybi` and `P0`.
 
 The Zarr v3 IC has one frame and flat `ncol`. There is no ncol-to-face
 reshape; that happens at rollout load time. `run_screamcast_nudged.py
@@ -388,11 +287,19 @@ store's `initial_time` (see the README).
 | `phis`, `lat`, `lon`, `sgh30`, `landfrac` | `(ncol,)` | `(ncol,)` |
 
 Root attributes: `grid = ne1024pg2`, `initial_time`, `level_subset = 128[3::4]`,
-`ic_source`, and `history` (the NetCDF history plus the converter command).
+`ic_source`, and `history` (the command that wrote the store).
 `coszr` comes from `screamcast.astronomy.calculate_cosine_zenith_direct` and is
 0 on the night side.
 
-**Consolidate after writing.** The converter calls
-`zarr.consolidate_metadata(out)` after the last array write, because SCREAM
-loaders open stores with `zarr.open_consolidated`. Any other workflow that
-writes or patches one of these stores must do the same.
+**Consolidate after writing.** The writers call
+`zarr.consolidate_metadata(out)` after the last chunk, because SCREAM loaders
+open stores with `zarr.open_consolidated`. Any other workflow that writes or
+patches one of these stores must do the same.
+
+## License
+
+`fast_ic.py` contains code ported from HICCUP, Copyright 2026, Lawrence
+Livermore National Security, LLC, released under the 3-Clause BSD license.
+The full HICCUP notice is kept at the top of `fast_ic.py`, as that license
+requires. The L128 coordinate file downloaded above is part of HICCUP and is
+covered by the same license.

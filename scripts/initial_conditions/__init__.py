@@ -12,4 +12,4 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""ERA5 -> HICCUP -> SCREAM-like ne1024pg2 initial condition workflow scripts."""
+"""STRATA initial conditions on the SCREAM ne1024pg2 grid from ERA5 or ECMWF HRES."""

@@ -17,11 +17,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 import torch
+import xarray as xr
 import zarr
 
-from initial_conditions import fast_ic as F
-from initial_conditions.layout import NLEV, NLEV_SUBSET, VARS_3D
-from initial_conditions.run_hiccup_eamxx import GRAV, KAPPA, RD
+from scripts.initial_conditions import fast_ic as F
+from scripts.initial_conditions.fast_ic import GRAV, KAPPA, RD
+from scripts.initial_conditions.ic_store import load_latlon
+from scripts.initial_conditions.layout import NLEV, NLEV_SUBSET, VARS_3D
 
 P0 = 1.0e5
 P_SOURCE = torch.tensor(
@@ -496,3 +498,37 @@ def test_fetch_era5_arco_selects_the_hour_and_keeps_north_to_south(tmp_path):
     _write_arco_like_store(bad, omega_units="hPa s**-1")
     with pytest.raises(SystemExit, match="vertical velocity units"):
         F.fetch_era5_arco("2021-07-15T12:00:00", str(bad), workers=1)
+
+
+def test_latlon_units_must_match_the_values(tmp_path):
+    lat_deg = np.array([-89.5, 0.0, 45.0, 89.5])
+    lon_deg = np.array([0.5, 90.0, 180.0, 359.5])
+    for units, convert in (("degrees_north", np.asarray), ("radians", np.radians)):
+        path = tmp_path / f"{units}.nc"
+        xr.Dataset(
+            {
+                "lat": ("ncol", convert(lat_deg), {"units": units}),
+                "lon": ("ncol", convert(lon_deg), {"units": units}),
+            }
+        ).to_netcdf(path)
+        _, _, lat, lon = load_latlon(str(path))
+        np.testing.assert_allclose(lat, lat_deg, atol=1e-5)
+        np.testing.assert_allclose(lon, lon_deg, atol=1e-4)
+
+    # degree values labelled radians would scale coszr's latitudes by 57.3
+    bad = tmp_path / "mislabelled.nc"
+    xr.Dataset(
+        {
+            "lat": ("ncol", lat_deg, {"units": "rad"}),
+            "lon": ("ncol", lon_deg, {"units": "rad"}),
+        }
+    ).to_netcdf(bad)
+    with pytest.raises(SystemExit, match="does not match"):
+        load_latlon(str(bad))
+
+    unlabelled = tmp_path / "unlabelled.nc"
+    xr.Dataset({"lat": ("ncol", lat_deg), "lon": ("ncol", lon_deg)}).to_netcdf(
+        unlabelled
+    )
+    with pytest.raises(SystemExit, match="neither degrees nor radians"):
+        load_latlon(str(unlabelled))

@@ -24,15 +24,14 @@ file into contiguous column ranges, runs the same two commands on each range
 in a process pool and stacks the pieces in column order. On 72 Grace cores
 the whole map took 32 min; the two ranges that hold the poles finish last.
 
-An existing map is reused when its ``.command.txt`` sidecar is next to it, as
-run_hiccup_eamxx.py does. One without a sidecar is adopted after its n_a/n_b
-sizes are checked. The ERA5 SCRIP file is made with the ``ncremap -G`` command
+An existing map is reused when its ``.command.txt`` sidecar is next to it. One
+without a sidecar is adopted after its n_a/n_b sizes are checked. The ERA5 SCRIP file is made with the ``ncremap -G`` command
 HICCUP uses when it does not exist.
 
 Run from the repository root in an environment with conda-forge ``nco`` and
 ``tempest-remap``::
 
-    python -m initial_conditions.build_map --dst-scrip ne1024pg2_scrip.nc \\
+    python -m scripts.initial_conditions.build_map --dst-scrip ne1024pg2_scrip.nc \\
         --src-scrip grid/scrip_ERA5_721x1440.nc --map map/map_721x1440_to_ne1024pg2.nc
 """
 from __future__ import annotations
@@ -49,8 +48,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import netCDF4
 import numpy as np
 
-from initial_conditions.layout import NCOL
 from screamcast.history import history_entry
+from scripts.initial_conditions.layout import NCOL
 
 ERA5_NLAT, ERA5_NLON = 721, 1440
 N_SRC = ERA5_NLAT * ERA5_NLON
@@ -175,7 +174,7 @@ def merge_parts(
         attrs.update(
             grid_file_dst=dst_scrip,
             domain_b=dst_scrip,
-            grid_file_ovr="per-part overlap meshes (initial_conditions.build_map)",
+            grid_file_ovr="per-part overlap meshes (scripts.initial_conditions.build_map)",
             history=history,
         )
         dst.setncatts(attrs)
@@ -300,7 +299,7 @@ def main() -> None:
     args.src_scrip = os.path.abspath(args.src_scrip)
     args.map = os.path.abspath(args.map)
     sidecar = args.map + ".command.txt"
-    argv = [sys.executable, "-m", "initial_conditions.build_map"]
+    argv = [sys.executable, "-m", "scripts.initial_conditions.build_map"]
     argv += ["--dst-scrip", args.dst_scrip, "--src-scrip", args.src_scrip]
     argv += ["--map", args.map]
     command = shlex.join(argv)

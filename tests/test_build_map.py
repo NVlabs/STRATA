@@ -22,12 +22,11 @@ from __future__ import annotations
 import shutil
 import subprocess
 
+import netCDF4
 import numpy as np
 import pytest
 
-netCDF4 = pytest.importorskip("netCDF4")
-
-from initial_conditions.build_map import build, looks_complete  # noqa: E402
+from scripts.initial_conditions.build_map import build, looks_complete
 
 TOOLS = ("ncremap", "GenerateCSMesh", "GenerateOverlapMesh", "GenerateOfflineMap")
 pytestmark = pytest.mark.skipif(

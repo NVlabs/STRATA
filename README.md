@@ -188,23 +188,23 @@ account and GPU constraint. The exports and `sbatch` line are in
 
 ## Initial conditions from ERA5 or ECMWF HRES
 
-`initial_conditions/` builds SCREAM atmospheric initial conditions (ICs) on
-ne1024pg2 with the E3SM L128 vertical grid, for any hour of ERA5 or of the
-ECMWF HRES analysis (2016-2022). It follows the E3SM
+`scripts/initial_conditions/` builds STRATA initial conditions (ICs) on the
+SCREAM ne1024pg2 physics grid with the E3SM L128 vertical grid, for any hour of
+ERA5 or of the ECMWF HRES analysis (2016-2022). It follows the E3SM
 [HICCUP](https://github.com/E3SM-Project/HICCUP) steps: conservative
 horizontal remap, surface-pressure adjustment to the SCREAM topography,
 vertical remap to L128, supersaturation removal, then potential temperature
 and hydrostatic heights.
 
-- `fast_ic.py` is a torch port of those steps. It reads ERA5 from the public
-  ARCO store and builds one IC in about 80 s on one GPU. Its output matches
-  HICCUP itself bit for bit, apart from last-bit differences in a few values.
+- `fast_ic.py` is a torch port of those steps (HICCUP is BSD-3-licensed; its
+  notice is kept in the file). It reads ERA5 from the public ARCO store and
+  builds one IC in about 80 s on one GPU. Its output matched HICCUP itself bit
+  for bit on ten cases, apart from last-bit differences in a few values.
 - `hres_ic.py` does the same from the WeatherBench2 HRES `hres_t0` store.
-- `run_hiccup_eamxx.py` runs HICCUP itself (2.5-3 h per IC) and is kept as
-  the reference the fast path is validated against.
 
 Each IC is a one-frame Zarr store with flat `ncol` and the 32 model levels
-STRATA uses.
+STRATA uses. They are STRATA inputs, not ICs EAMxx can start from (EAMxx reads
+its ICs on the np4 GLL grid).
 
 One-time inputs: the SCREAM `phis`, `sgh30` and `landfrac` arrays from the
 `nvidia/STRATA-SCREAM-sdy1` dataset, the L128 coordinate file from HICCUP,
@@ -213,7 +213,7 @@ in about 30 min on 72 cores; it needs conda-forge `nco` and `tempest-remap`.
 Then, from the repository root:
 
 ```bash
-python -m initial_conditions.fast_ic \
+python -m scripts.initial_conditions.fast_ic \
   --timestamp 2017-09-14T00 \
   --out-dir "$WORK/ics" \
   --map "$WORK/map/map_721x1440_to_ne1024pg2.nc" \
