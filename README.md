@@ -161,17 +161,11 @@ evaluate from 2020-10-11 onwards. Initial conditions come from sdecadal only.
 ### Forecast
 
 The forecast runs under `torchrun` with one process per GPU; the commands
-below use 4 × H100 80 GB. Start the Docker image with this repository,
-`AUX_DATA_ROOT` and an output directory mounted:
-
-```bash
-docker run --rm -it --gpus all --ipc=host \
-  -v $PWD:/workspace/strata -v /path/to/strata_v1:/path/to/strata_v1 \
-  -v /path/to/output:/path/to/output \
-  -w /workspace/strata strata bash
-```
-
-Inside, from the repository root:
+below use 4 × H100 80 GB. Run them from the repository root in an environment
+from [Setup](#setup). The Docker image does not contain this repository, so
+mount it, `AUX_DATA_ROOT` and the output directory into the container; on a
+cluster, use its own container setup for interactive or batch jobs (for
+example Pyxis/Enroot, Apptainer or Shifter):
 
 ```bash
 export PYTHONPATH=$PWD   # the script imports data_catalog, which is not in the installed package
