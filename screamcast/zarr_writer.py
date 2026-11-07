@@ -30,6 +30,20 @@ from einops import rearrange
 logger = logging.getLogger(__name__)
 
 
+def output_frame_index(step_index: int, output_steps: int) -> int | None:
+    """Return the output frame that model step ``step_index`` is written to.
+
+    ``step_index`` is zero-based, so its forecast is at lead
+    ``(step_index + 1) * dt``. Output stores label frame ``k`` as lead
+    ``(k + 1) * output_steps * dt`` (see :func:`prepare_output_store`), so the
+    forecast is saved only when its lead is a multiple of ``output_steps``.
+    Returns ``None`` for steps that are not saved.
+    """
+    if (step_index + 1) % output_steps != 0:
+        return None
+    return (step_index + 1) // output_steps - 1
+
+
 def _split_variable_levels(
     variable_names: list[str],
 ) -> OrderedDict[str, list[tuple[int | None, int]]]:
@@ -486,15 +500,15 @@ class FaceZarrWriteStep:
                 break
             time_index, out_index, faces = item
             logger.debug(
-                "face-zarr rank=%s step=%d starting store write",
+                "face-zarr rank=%s frame=%d starting store write",
                 self.topology.rank,
-                out_index * self.output_steps,
+                out_index,
             )
             self._write_faces(time_index, out_index, faces)
             logger.debug(
-                "face-zarr rank=%s step=%d store write done",
+                "face-zarr rank=%s frame=%d store write done",
                 self.topology.rank,
-                out_index * self.output_steps,
+                out_index,
             )
 
     def _write_faces(
@@ -516,10 +530,10 @@ class FaceZarrWriteStep:
                 ]
 
     def __call__(self, step_index: int, out_tensor: torch.Tensor) -> None:
-        """Write one output step when ``step_index`` matches ``output_steps``."""
-        if step_index % self.output_steps != 0:
+        """Write step ``step_index`` if :func:`output_frame_index` saves it."""
+        out_index = output_frame_index(step_index, self.output_steps)
+        if out_index is None:
             return
-        out_index = step_index // self.output_steps
         logger.debug(
             "face-zarr rank=%s step=%d starting channel exchange",
             self.topology.rank,
