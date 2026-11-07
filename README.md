@@ -159,8 +159,15 @@ cp data/scream_vertical_coordinate.nc $AUX_DATA_ROOT/
 its intermediate Exodus meshes (`*.g`, about 7 GB) in the output directory;
 they are not read afterwards and can be deleted.
 
-A `.env` file is not required if you export `AUX_DATA_ROOT` and
-`SCREAM_MAIN_ZARR_PATH`.
+The `.env` file is optional: the code loads it when present, and exported
+variables work the same. Which variables are needed depends on the task:
+
+| Task | Variables |
+|---|---|
+| Forecast with the released checkpoint | `AUX_DATA_ROOT`, `SCREAM_MAIN_ZARR_PATH` |
+| Training | also `PROJECT_ROOT` (outputs; required by `experiment_manager.py`) and `ZARR_ROOT` (directory or `s3://` prefix holding the stores) |
+| Weights & Biases logging | `WANDB_API_KEY`, optionally `WANDB_PROJECT` and `WANDB_ENTITY`; without the key, training runs and skips wandb |
+| `s3://` store paths | `SCREAM_ZARR_PROFILE`, the name of a remote in `~/.config/rclone/rclone.conf`; the S3 endpoint and keys are read from that remote |
 
 ## Running the STRATA v1 checkpoint
 
@@ -253,12 +260,9 @@ compilation) and later steps 87 s, against about 130 s per step eager, and the
 global means agreed with the eager run to floating-point precision. Dynamo
 logs a `recompile_limit` warning during the first step; it is harmless.
 
-Each step also logs `global mean precip: liq=0.002 mm/day ice=0.000 mm/day`.
-The liquid value is 1000 times too small: the precipitation outputs are
-water-depth rates in m/s, and the log converts them as if they were
-kg m⁻² s⁻¹, so the number is in m/day. The actual global mean is about
-2.6 mm/day. Ice precip `0.000` is a known bug of this checkpoint, not normal
-behavior: ice precip is a diagnostic, and training applied a ReLU
+Each step also logs the global-mean liquid and ice precipitation in mm/day
+(`global mean precip: liq=... mm/day ice=0.000 mm/day`). Ice precip `0.000`
+is a known bug of this checkpoint, not normal behavior: ice precip is a diagnostic, and training applied a ReLU
 non-negative constraint (`do_precip_relu`), so ice precip was not learned
 well. It should not affect the other state variables.
 
@@ -318,11 +322,8 @@ cube faces:
 
 Variable units are SCREAM's: precipitation fluxes are in m/s.
 
-> **Known issue — keep `--output-steps 1` (the default).** With
-> `--output-steps N > 1` the writer saves the states after steps 1, N+1,
-> 2N+1, … but labels them with leads N, 2N, 3N, … steps, so every saved
-> frame is (N−1) × 10 minutes earlier than its `step` label says. Write
-> every step and subsample afterwards until this is fixed.
+`--output-steps N` writes every N-th step, at leads N, 2N, … × 10 minutes
+(`--output-steps 6` gives hourly output); `--n-steps` must be a multiple of N.
 
 On Perlmutter, do not hand-copy the launch. `perlmutter_scripts/strata_v1_rollout.sh`
 is this same forecast wrapped for Shifter, and it hardcodes the NERSC
