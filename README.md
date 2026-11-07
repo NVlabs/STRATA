@@ -188,18 +188,19 @@ torchrun --nproc_per_node=4 scripts/ace/run_screamcast_nudged.py \
   --halo-width 16 \
   --halo-adjoint \
   --no-halo-adjoint-cross-face \
-  --tile-jitter 0 \
+  --tile-jitter 4 \
+  --tile-jitter-mode cycle16 \
   --sht-omega-lmax 3 \
   --inference-batch-size 1 \
   --output-variables T_2m ps U V PotentialTemperature qv omega precip_liq_surf_mass_flux \
-  --output-levels 13,18,25,30 \
+  --output-levels 13,18,24,25,29,30 \
   --initial-time 2020-10-13T00:00:00 \
   $OUTPUT
 ```
 
-These are the recommended settings for this checkpoint: no tile jitter, no
-halo adjoint across cube-face edges, and omega filtered with SHT lmax 3. For a
-quick check, run `--n-steps 2` first; a finished run logs
+These are the recommended settings for this checkpoint: tile jitter on (4 px,
+`cycle16`), no halo adjoint across cube-face edges, and omega filtered with
+SHT lmax 3. For a quick check, run `--n-steps 2` first; a finished run logs
 `Forecast done: 2 steps`. Loading the model and the initial condition takes a
 few minutes, then each 10-minute step takes about 1.5–2.5 minutes on
 4 × H100. The network is compiled with `torch.compile`, which is about a third
@@ -239,8 +240,9 @@ Variable units are SCREAM's: precipitation fluxes are in m/s.
 ### Running under SLURM
 
 [`slurm/submit_inference.sh`](slurm/submit_inference.sh) is an example
-`sbatch` launcher for the same script on 16 GPUs: edit the checkpoint and
-output paths at the top. It needs the same environment variables, exported in
+`sbatch` launcher for the same forecast on 2 nodes × 8 GPUs, where
+`--inference-batch-size 4` fits: edit the checkpoint and output paths at the
+top. It needs the same environment variables, exported in
 the job or loaded from `.env`. On Perlmutter, use
 `perlmutter_scripts/strata_v1_rollout.sh` with the setup in
 [`docs/nersc_setup.md`](docs/nersc_setup.md).

@@ -46,6 +46,9 @@ srun python3 scripts/ace/run_screamcast_nudged.py \
     --tile-size 128 \
     --halo-width 16 \
     --halo-adjoint \
+    --no-halo-adjoint-cross-face \
+    --tile-jitter 4 \
+    --tile-jitter-mode cycle16 \
     --inference-batch-size 4 \
     --sht-omega-lmax 3 \
     --output-levels 13,18,24,25,29,30 \

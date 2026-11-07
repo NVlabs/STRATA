@@ -64,11 +64,12 @@ srun -N 1 --ntasks-per-node=1 --gpus-per-node=4 --cpu-bind=cores --mpi=pmix \
         --tile-size 128 \
         --halo-width 16 \
         --halo-adjoint \
+        --no-halo-adjoint-cross-face \
         --inference-batch-size 1 \
         --tile-jitter 4 \
         --tile-jitter-mode cycle16 \
         --tile-jitter-fill replicate \
-        --sht-omega-lmax 0 \
+        --sht-omega-lmax 3 \
         --no-zarr-output \
         --initial-time 2020-10-13T00:00:00 \
         $OUTPUT"
