@@ -70,7 +70,7 @@ loaded when present. Which ones you need depends on the task:
 | Task | Variables |
 |---|---|
 | Forecast with the released checkpoint | `AUX_DATA_ROOT` (auxiliary files, below) and `SCREAM_MAIN_ZARR_PATH` (the sdecadal store, for initial conditions) |
-| Training | also `PROJECT_ROOT` (outputs; required by `experiment_manager.py`) and `ZARR_ROOT` (directory or `s3://` prefix holding the stores) |
+| Training | also `PROJECT_ROOT` (run directories, and the checkpoints that chained configs resume from), `ZARR_ROOT` (directory or `s3://` prefix holding the stores), and `SCREAM_MAIN_ZARR_PATH` and `SCREAM_AUX_ZARR_PATH`, both set to the local sdecadal store, which the validation loader reads |
 | Weights & Biases logging | `WANDB_API_KEY`, optionally `WANDB_PROJECT` and `WANDB_ENTITY`; without the key, training skips wandb |
 | `s3://` store paths | `SCREAM_ZARR_PROFILE`, the name of a remote in `~/.config/rclone/rclone.conf` that holds the S3 endpoint and keys |
 
@@ -153,10 +153,14 @@ hf download nvidia/STRATA-SCREAM-sdecadal --repo-type dataset \
 export SCREAM_MAIN_ZARR_PATH=$ZARR_ROOT/sdecadal.ne1024pg2_ne1024pg2.F20TR-SCREAMv1.c10-sep11.out10min.cubesphere.zarr
 ```
 
-Time index 0 of sdecadal is `2020-10-01T00:00`, so valid initial times run
-from `2020-10-01T00:00` to `2020-10-15T00:00` in 10-minute steps. The model was
-trained on 2020-10-02 to 2020-10-10 of this store (plus sdy1 and sdy2), so
-evaluate from 2020-10-11 onwards. Initial conditions come from sdecadal only.
+The code labels sdecadal time index 0 as `2020-10-01T00:00`, so valid initial
+times run from `2020-10-01T00:00` to `2020-10-15T00:00` in 10-minute steps.
+The simulation used October 2020 sea-surface temperatures but started from a
+1994 atmospheric initial condition, so its weather does not follow October 2020
+observations: evaluate forecasts against the SCREAM output, not against
+observations or reanalysis. The model was trained on 2020-10-02 to 2020-10-10
+of this store (plus sdy1 and sdy2), so evaluate from 2020-10-11 onwards.
+Initial conditions come from sdecadal only.
 
 ### Forecast
 
@@ -236,10 +240,12 @@ Variable units are SCREAM's: precipitation fluxes are in m/s.
 [`slurm/submit_inference.sh`](slurm/submit_inference.sh) is an example
 `sbatch` launcher for the same forecast on 2 nodes × 8 GPUs, where
 `--inference-batch-size 4` fits: edit the checkpoint and output paths at the
-top. It needs the same environment variables, exported in
-the job or loaded from `.env`. On Perlmutter, use
-`perlmutter_scripts/strata_v1_rollout.sh` with the setup in
-[`docs/nersc_setup.md`](docs/nersc_setup.md).
+top, and submit it from the repository root (it sets `PYTHONPATH` from
+there). The path variables can be exported before `sbatch` or come from
+`.env`. On Perlmutter, `perlmutter_scripts/strata_v1_rollout.sh` runs a 2-step
+check with the same model settings (eager, regional means only; setup in
+[`docs/nersc_setup.md`](docs/nersc_setup.md)); for a full forecast, raise
+`--n-steps` and drop `--no-zarr-output`.
 `python3 scripts/ace/run_screamcast_nudged.py --help` lists all options.
 
 ## Training
@@ -252,12 +258,22 @@ launch it on a GPU node, not a login node:
     python train.py <config_name>                                  # single GPU
     torchrun --nproc_per_node=<num_gpus> train.py <config_name>    # one node, several GPUs
 
-The released checkpoint comes from the config
-`pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_unfreeze_3src_const1em5_t128_4stepft`
-(a 4-step finetune), which reads all three stores under the directory names
-in the table above. Checkpoints (`best.pth` / `latest.pth`) and logs are
-written to the config's `rundir` (default `output/`). For multi-node jobs, run
-the same entry point under SLURM `srun`.
+For multi-node jobs, run the same entry point under SLURM `srun`. For queued
+SLURM jobs, `experiment_manager.py submit --name <run> train.py <config_name>`
+copies the code to `$PROJECT_ROOT/<run>` and submits it with `sbatch` through
+the script named by `SUBMIT_SCRIPT`; see
+[`docs/nersc_setup.md`](docs/nersc_setup.md) for a Perlmutter example.
+Checkpoints (`best.pth` / `latest.pth`) and logs are written to the config's
+`rundir` (default `output/`).
+
+The released checkpoint was trained with the config
+`pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_unfreeze_3src_const1em5_t128_4stepft`,
+which reads all three stores under the directory names in the table above. A
+recommended training recipe will be added in a future update.
+
+To fine-tune from the released `strata_v1.pth` (via `experiment.resume_from`),
+turn off `torch.compile` (`compute.do_torch_compile=False`) for now: with
+compilation on, its weights are not loaded, and the log does not flag this.
 
 ## Local evaluation
 

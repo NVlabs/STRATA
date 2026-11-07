@@ -621,10 +621,10 @@ def main() -> None:
     checkpoint_path = resolve_checkpoint_path(args)
     tile_size = args.tile_size
     n_steps = args.n_steps
-    if n_steps % args.output_steps != 0:
+    if args.output_steps < 1 or n_steps % args.output_steps != 0:
         raise ValueError(
-            f"--n-steps ({n_steps}) must be a multiple of --output-steps "
-            f"({args.output_steps})"
+            "--output-steps must be >= 1 and divide --n-steps; got "
+            f"--output-steps {args.output_steps}, --n-steps {n_steps}"
         )
     n_steps_outer = args.n_steps_outer
     coarsen = args.coarsen

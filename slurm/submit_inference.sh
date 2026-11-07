@@ -30,6 +30,9 @@
 
 set -euo pipefail
 
+# Submit from the repository root: the script imports data_catalog from there.
+export PYTHONPATH="${PWD}${PYTHONPATH:+:${PYTHONPATH}}"
+
 # --- edit these for your environment ---
 RUN_NAME="my_run"
 CHECKPOINT="/path/to/checkpoint/best.pth"
