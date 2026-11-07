@@ -1,14 +1,18 @@
 # Strata
 
+[![Paper](https://img.shields.io/badge/Paper-NeurIPS%202026-b31b1b?logo=arxiv&logoColor=white)](https://arxiv.org/abs/2606.31248)
+[![Project page](https://img.shields.io/badge/Project-page-76b900?logo=nvidia&logoColor=white)](https://research.nvidia.com/labs/climate/strata/)
+[![Model](https://img.shields.io/badge/Model-nvidia%2Fstrata-ffd21e?logo=huggingface)](https://huggingface.co/nvidia/strata)
+[![Data](https://img.shields.io/badge/Data-SCREAM%20Zarr-ffd21e?logo=huggingface)](#availability)
+[![License](https://img.shields.io/badge/License-Apache%202.0%20%7C%20OpenMDW%20%7C%20CC%20BY%204.0-lightgrey)](#license)
+
+Code for *Scaling Storm-Resolving Atmospheric AI Simulation to the Entire
+Planet* (NeurIPS 2026, Main Track).
+
 Strata is a deep-learning weather emulator for the
 [SCREAM](https://e3sm.org/scream/) global atmosphere model. It trains
 transformer-based neural networks to emulate SCREAM atmospheric physics on
 the cubed-sphere grid and supports multi-day global forecasting.
-
-- 📄 **Paper:** [Scaling Storm-Resolving Atmospheric AI Simulation to the Entire Planet](https://arxiv.org/html/2606.31248v1) — Accepted at **NeurIPS 2026, Main Track**.
-- 🌐 **Project page:** <https://research.nvidia.com/labs/climate/strata/>
-- 🤗 **Model weights:** [nvidia/strata](https://huggingface.co/nvidia/strata)
-- 🤗 **Training data (Zarr):** [nvidia/STRATA-SCREAM-sdecadal](https://huggingface.co/datasets/nvidia/STRATA-SCREAM-sdecadal), [nvidia/STRATA-SCREAM-sdy1](https://huggingface.co/datasets/nvidia/STRATA-SCREAM-sdy1), [nvidia/STRATA-SCREAM-sdy2](https://huggingface.co/datasets/nvidia/STRATA-SCREAM-sdy2)
 
 The Strata architecture (a two-stage 3D neighborhood-attention transformer
 with stereographic rotary position embeddings) lives in
