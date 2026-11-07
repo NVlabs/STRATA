@@ -30,6 +30,9 @@
 
 set -euo pipefail
 
+# Submit from the repository root: the script imports data_catalog from there.
+export PYTHONPATH="${PWD}${PYTHONPATH:+:${PYTHONPATH}}"
+
 # --- edit these for your environment ---
 RUN_NAME="my_run"
 CHECKPOINT="/path/to/checkpoint/best.pth"
@@ -46,6 +49,9 @@ srun python3 scripts/ace/run_screamcast_nudged.py \
     --tile-size 128 \
     --halo-width 16 \
     --halo-adjoint \
+    --no-halo-adjoint-cross-face \
+    --tile-jitter 4 \
+    --tile-jitter-mode cycle16 \
     --inference-batch-size 4 \
     --sht-omega-lmax 3 \
     --output-levels 13,18,24,25,29,30 \

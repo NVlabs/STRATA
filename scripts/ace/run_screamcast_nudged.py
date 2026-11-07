@@ -98,6 +98,7 @@ from screamcast.zarr_writer import (
     FaceZarrWriteStep,
     ZarrWriter,
     _split_variable_levels,
+    output_frame_index,
     prepare_latlon_plev_store,
     prepare_output_store,
 )
@@ -249,7 +250,10 @@ def parse_args() -> argparse.Namespace:
         "--output-steps",
         type=int,
         default=1,
-        help="Write output every N steps (default: 1 = every step).",
+        help=(
+            "Write every N-th forecast step, at leads N*dt, 2N*dt, ... "
+            "(default: 1 = every step). --n-steps must be a multiple of N."
+        ),
     )
     parser.add_argument(
         "--output-chunk-size",
@@ -617,6 +621,11 @@ def main() -> None:
     checkpoint_path = resolve_checkpoint_path(args)
     tile_size = args.tile_size
     n_steps = args.n_steps
+    if args.output_steps < 1 or n_steps % args.output_steps != 0:
+        raise ValueError(
+            "--output-steps must be >= 1 and divide --n-steps; got "
+            f"--output-steps {args.output_steps}, --n-steps {n_steps}"
+        )
     n_steps_outer = args.n_steps_outer
     coarsen = args.coarsen
     correction = args.correction
@@ -869,7 +878,7 @@ def main() -> None:
 
     logger.info("output: %s", output_path)
     output_steps = args.output_steps
-    n_output_steps = len(range(0, n_steps, output_steps))
+    n_output_steps = n_steps // output_steps
     if args.zarr_output and rank == 0:
         prepare_output_store(
             output_path=output_path,
@@ -1067,9 +1076,9 @@ def main() -> None:
         writer = ZarrWriter(store, grouped_variables, tile_size)
 
         def write_step(step_index: int, out_tensor: torch.Tensor) -> None:
-            if step_index % output_steps != 0:
+            out_index = output_frame_index(step_index, output_steps)
+            if out_index is None:
                 return
-            out_index = step_index // output_steps
             for local_idx, (face, ti, tj) in enumerate(my_tiles):
                 tile = out_tensor[0, :, local_idx]
                 writer.write(0, out_index, face, ti * tile_size, tj * tile_size, tile)
@@ -1201,7 +1210,8 @@ def main() -> None:
         )
 
         _inner_write_step = write_step
-        _kg_m2_s_to_mm_day = 86400.0
+        # SCREAM precip fluxes are water-depth rates in m/s.
+        _m_s_to_mm_day = 1000.0 * 86400.0
 
         def write_step(step_index: int, out_tensor: torch.Tensor) -> None:
             if _inner_write_step is not None:
@@ -1212,13 +1222,13 @@ def main() -> None:
             if "precip_liq_surf_mass_flux" in global_means:
                 parts.append(
                     "liq="
-                    f"{global_means['precip_liq_surf_mass_flux'] * _kg_m2_s_to_mm_day:.3f}"
+                    f"{global_means['precip_liq_surf_mass_flux'] * _m_s_to_mm_day:.3f}"
                     " mm/day"
                 )
             if "precip_ice_surf_mass_flux" in global_means:
                 parts.append(
                     "ice="
-                    f"{global_means['precip_ice_surf_mass_flux'] * _kg_m2_s_to_mm_day:.3f}"
+                    f"{global_means['precip_ice_surf_mass_flux'] * _m_s_to_mm_day:.3f}"
                     " mm/day"
                 )
             if parts:

@@ -22,4 +22,10 @@ All notable changes to this project will be documented in this file.
   Pre-migration checkpoints load transparently. The `nvidia-modulus`
   dependency was replaced by `nvidia-physicsnemo` (pinned source archive
   until the 2.2 release).
+- `scripts/ace/run_screamcast_nudged.py --output-steps N`: frame k of every
+  output store now holds the forecast at lead (k+1)·N·10 min, matching its
+  `step` coordinate; with N > 1 earlier versions saved the forecasts after
+  steps 1, N+1, 2N+1, …, (N−1)·10 min earlier than labelled. `--n-steps` must
+  now be a multiple of `--output-steps`. The per-step precipitation log line
+  is now in mm/day (it printed m/day under an mm/day label).
 - Initial public Apache-2.0 release of Strata.
