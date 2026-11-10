@@ -117,7 +117,8 @@ class ScreamData:
 
         main_group = open_consolidated_zarr_group(self.path, storage_env=self.profile)
         var_group = {key: main_group for key in main_group}
-        return ScreamDataSource(var_group=var_group)
+        reference = self.reference_time.astype("datetime64[s]").item()
+        return ScreamDataSource(var_group=var_group, reference_datetime=reference)
 
     def to_zarr(self) -> zarr.Group:
         return open_consolidated_zarr_group(self.path, storage_env=self.profile)

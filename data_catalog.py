@@ -12,12 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import dataclasses
 import os
 
 import dotenv
 import numpy as np
 
 from screamcast.catalog_core import ScreamData
+from screamcast.dali_ext_src import open_consolidated_zarr_group
 
 dotenv.load_dotenv(".")
 
@@ -38,3 +40,17 @@ scream_sdecadal = ScreamData(
 
 def scream():
     return scream_sdecadal.to_data_source()
+
+
+def ic_store(path: str, profile: str = "") -> ScreamData:
+    """A one-frame initial-condition store from ``screamcast/initial_conditions/``.
+
+    Its single frame is at the store's ``initial_time`` attribute.
+    """
+    root = open_consolidated_zarr_group(path, storage_env=profile)
+    return dataclasses.replace(
+        scream_sdecadal,
+        path=path,
+        profile=profile,
+        reference_time=np.datetime64(root.attrs["initial_time"], "s"),
+    )

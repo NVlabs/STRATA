@@ -68,7 +68,6 @@ from physicsnemo.distributed import DistributedManager
 from scipy.signal.windows import kaiser_bessel_derived
 
 import data_catalog
-from data_catalog import scream
 from screamcast.cubesphere_transforms import faces_to_unstructured
 from screamcast.dali_ext_src import unstructured_to_6faces
 from screamcast.distributed_halo import (
@@ -245,7 +244,22 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Max faces per pipeline.step call. Default 1 processes one face at a time.",
     )
-    parser.add_argument("--initial-time", default="2020-10-13T00:00:00")
+    parser.add_argument(
+        "--initial-time",
+        default=None,
+        help=(
+            "Forecast start time; must be in SCREAM_MAIN_ZARR_PATH. Default "
+            "2020-10-13T00:00:00, or the store's initial_time with --ic-store."
+        ),
+    )
+    parser.add_argument(
+        "--ic-store",
+        default=None,
+        help=(
+            "Start from a one-frame IC store built by screamcast/initial_conditions/ "
+            "instead of SCREAM_MAIN_ZARR_PATH. Needs --correction none."
+        ),
+    )
     parser.add_argument(
         "--output-steps",
         type=int,
@@ -631,7 +645,24 @@ def main() -> None:
     n_steps_outer = args.n_steps_outer
     coarsen = args.coarsen
     correction = args.correction
-    t0 = np.datetime64(args.initial_time)
+    if args.ic_store is None:
+        scream_data = data_catalog.scream_sdecadal
+        t0 = np.datetime64(args.initial_time or "2020-10-13T00:00:00")
+    else:
+        if correction != "none":
+            raise ValueError(
+                "--ic-store holds one frame; nudging and ACE correction need "
+                "SCREAM_MAIN_ZARR_PATH. Use --correction none."
+            )
+        scream_data = data_catalog.ic_store(
+            args.ic_store, os.getenv("SCREAM_ZARR_PROFILE", "")
+        )
+        t0 = scream_data.reference_time
+        if args.initial_time is not None and np.datetime64(args.initial_time) != t0:
+            raise ValueError(
+                f"--initial-time {args.initial_time} is not the IC store's "
+                f"initial_time {t0}."
+            )
 
     DistributedManager.initialize()
     dist_mgr = DistributedManager()
@@ -738,7 +769,7 @@ def main() -> None:
         topology.tiles_per_rank,
     )
 
-    ds = scream()
+    ds = scream_data.to_data_source()
 
     ace_model = None
     scream2ace = None
@@ -874,7 +905,7 @@ def main() -> None:
         pad_width_data : pad_width_data + nside,
     ].numpy()
 
-    hyam, hybm, _ = data_catalog.scream_sdecadal.to_hybrid_vertical_coordinates()
+    hyam, hybm, _ = scream_data.to_hybrid_vertical_coordinates()
     hyam = hyam.astype(np.float32)
     hybm = hybm.astype(np.float32)
 
@@ -1186,9 +1217,7 @@ def main() -> None:
         )
         logger.info("regional-averages output: %s", regional_output_path)
         area_face = load_grid_area_face(GRID_PATH, ne=1024, npg=npg)
-        landfrac_face = load_landfrac_face(
-            data_catalog.scream_sdecadal, ne=1024, npg=npg
-        )
+        landfrac_face = load_landfrac_face(scream_data, ne=1024, npg=npg)
         lat_face_t = torch.from_numpy(lat_face).to(torch.float32)
         # Use un-filtered grouping so every output channel is averaged,
         # independent of --output-variables / --output-levels zarr filters.
