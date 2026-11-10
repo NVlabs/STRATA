@@ -188,7 +188,7 @@ account and GPU constraint. The exports and `sbatch` line are in
 
 ## Initial conditions from ERA5 or ECMWF HRES
 
-`scripts/initial_conditions/` builds STRATA initial conditions (ICs) on the
+`screamcast.initial_conditions` builds STRATA initial conditions (ICs) on the
 SCREAM ne1024pg2 physics grid with the E3SM L128 vertical grid, for any hour of
 ERA5 or of the ECMWF HRES analysis (2016-2022). It follows the E3SM
 [HICCUP](https://github.com/E3SM-Project/HICCUP) steps: conservative
@@ -210,10 +210,10 @@ One-time inputs: the SCREAM `phis`, `sgh30` and `landfrac` arrays from the
 `nvidia/STRATA-SCREAM-sdy1` dataset, the L128 coordinate file from HICCUP,
 and the ERA5 to ne1024pg2 remap map. `build_map.py` builds the map (3.2 GB)
 in about 30 min on 72 cores; it needs conda-forge `nco` and `tempest-remap`.
-Then, from the repository root:
+Then:
 
 ```bash
-python -m scripts.initial_conditions.fast_ic \
+python -m screamcast.initial_conditions.fast_ic \
   --timestamp 2017-09-14T00 \
   --out-dir "$WORK/ics" \
   --map "$WORK/map/map_721x1440_to_ne1024pg2.nc" \
@@ -233,9 +233,9 @@ torchrun --nproc_per_node=4 scripts/ace/run_screamcast_nudged.py \
   --checkpoint $AUX_DATA_ROOT/checkpoints/strata_v1.pth \
   --ic-store "$WORK/ics/scream_hiccup_ne1024pg2_2017091400.zarr" \
   --forecast-model screamcast --correction none --n-steps 2 \
-  --tile-size 128 --halo-width 16 --halo-adjoint --inference-batch-size 1 \
-  --tile-jitter 4 --tile-jitter-mode cycle16 --tile-jitter-fill replicate \
-  --sht-omega-lmax 0 --no-zarr-output \
+  --tile-size 128 --halo-width 16 --halo-adjoint --no-halo-adjoint-cross-face \
+  --tile-jitter 4 --tile-jitter-mode cycle16 --sht-omega-lmax 3 \
+  --inference-batch-size 1 --no-zarr-output \
   $OUTPUT
 ```
 

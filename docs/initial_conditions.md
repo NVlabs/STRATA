@@ -1,6 +1,6 @@
 # STRATA initial conditions from ERA5 and ECMWF HRES
 
-`scripts/initial_conditions/` builds STRATA initial conditions on the SCREAM
+`screamcast/initial_conditions/` builds STRATA initial conditions on the SCREAM
 **ne1024pg2** physics grid (`ncol = 25165824`) with the **E3SM L128** hybrid
 vertical grid, from ERA5 or the ECMWF HRES analysis. Each IC is a one-frame
 Zarr v3 store with flat `ncol` and 32 of the L128 levels (see
@@ -23,8 +23,9 @@ HICCUP's own bit for bit apart from last-bit differences in a few `qv` values
 | `ic_store.py` | lat/lon and static inputs, `coszr`, creating and checking a one-frame store |
 | `layout.py` | Grid and level constants, Zarr variable lists, the store name |
 
-Run them from the repository root with
-`python -m scripts.initial_conditions.<name>`.
+Run them with `python -m screamcast.initial_conditions.<name>` once the package
+is installed (see the README's Setup), or with the thin wrappers
+`python scripts/initial_conditions/<name>.py`.
 
 ## Inputs
 
@@ -71,7 +72,7 @@ file with HICCUP's `ncremap -G` grid description if `--src-scrip` does not
 exist:
 
 ```bash
-python -m scripts.initial_conditions.build_map \
+python -m screamcast.initial_conditions.build_map \
   --dst-scrip "$AUX_DATA_ROOT/ne1024pg2_scrip.nc" \
   --src-scrip "$WORK/grid/scrip_ERA5_721x1440.nc" \
   --map "$WORK/map/map_721x1440_to_ne1024pg2.nc"
@@ -120,7 +121,7 @@ file from [Inputs](#inputs).
 docker run --rm --gpus all --ipc=host --user "$(id -u):$(id -g)" \
   -v "$PWD:$PWD" -v "$WORK:$WORK" -w "$PWD" -e PYTHONPATH="$PWD" \
   strata \
-  python -m scripts.initial_conditions.fast_ic \
+  python -m screamcast.initial_conditions.fast_ic \
     --timestamp 2017-09-14T00 2017-09-18T12 \
     --out-dir "$WORK/ics" \
     --map "$WORK/map/map_721x1440_to_ne1024pg2.nc" \
@@ -244,7 +245,7 @@ levels from 50 to 1000 hPa) for the whole globe. It runs on one GPU, or with
 Run it in the STRATA Docker image as for `fast_ic` (it imports torch):
 
 ```bash
-python -m scripts.initial_conditions.hres_ic \
+python -m screamcast.initial_conditions.hres_ic \
   --device cpu --timestamp 2022-09-26T12:00:00 \
   --tag 2022092612_ian_post_hres --out-dir "$WORK/ics" \
   --map "$WORK/map/map_721x1440_to_ne1024pg2.nc" --phis "$WORK/scream_phis.zarr" \

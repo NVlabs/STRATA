@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Reading a one-frame IC store (``scripts/initial_conditions/``) as the rollout does."""
+"""Reading a one-frame IC store (``screamcast/initial_conditions/``) as the rollout does."""
 import dataclasses
 
 import numpy as np

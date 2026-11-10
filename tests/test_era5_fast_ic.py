@@ -20,10 +20,10 @@ import torch
 import xarray as xr
 import zarr
 
-from scripts.initial_conditions import fast_ic as F
-from scripts.initial_conditions.fast_ic import GRAV, KAPPA, RD
-from scripts.initial_conditions.ic_store import load_latlon
-from scripts.initial_conditions.layout import NLEV, NLEV_SUBSET, VARS_3D
+from screamcast.initial_conditions import fast_ic as F
+from screamcast.initial_conditions.fast_ic import GRAV, KAPPA, RD
+from screamcast.initial_conditions.ic_store import load_latlon
+from screamcast.initial_conditions.layout import NLEV, NLEV_SUBSET, VARS_3D
 
 P0 = 1.0e5
 P_SOURCE = torch.tensor(

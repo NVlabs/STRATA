@@ -26,7 +26,7 @@ import netCDF4
 import numpy as np
 import pytest
 
-from scripts.initial_conditions.build_map import build, looks_complete
+from screamcast.initial_conditions.build_map import build, looks_complete
 
 TOOLS = ("ncremap", "GenerateCSMesh", "GenerateOverlapMesh", "GenerateOfflineMap")
 pytestmark = pytest.mark.skipif(

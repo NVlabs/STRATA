@@ -43,7 +43,7 @@ def scream():
 
 
 def ic_store(path: str, profile: str = "") -> ScreamData:
-    """A one-frame initial-condition store from ``scripts/initial_conditions/``.
+    """A one-frame initial-condition store from ``screamcast/initial_conditions/``.
 
     Its single frame is at the store's ``initial_time`` attribute.
     """

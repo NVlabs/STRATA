@@ -29,7 +29,7 @@ import xarray as xr
 import zarr
 
 from screamcast.astronomy import calculate_cosine_zenith_direct
-from scripts.initial_conditions.layout import (
+from screamcast.initial_conditions.layout import (
     GRID,
     NLEV_SUBSET,
     VARS_1D,

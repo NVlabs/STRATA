@@ -18,8 +18,8 @@ import numpy as np
 import pytest
 import zarr
 
-from scripts.initial_conditions.fast_ic import RD
-from scripts.initial_conditions.hres_ic import fetch_hres_t0, surface_geopotential
+from screamcast.initial_conditions.fast_ic import RD
+from screamcast.initial_conditions.hres_ic import fetch_hres_t0, surface_geopotential
 
 # isothermal hydrostatic atmosphere: z(p) = RD * T * ln(P_REF / p)
 T_ISO = 250.0
