@@ -42,6 +42,11 @@ except ImportError:
     wandb_lib = None
 
 from screamcast import inference, model_pipelines
+from screamcast.checkpoint_io import (
+    apply_best_valid_loss_floor,
+    choose_resume_checkpoint,
+    save_checkpoint_atomic,
+)
 from screamcast.config import DiTConfig, PixelDiTConfig
 from screamcast.constructors import (
     get_dampened_cosine_with_hard_restarts_schedule_with_warmup,
@@ -801,9 +806,19 @@ def train(
     if scheduler is not None:
         state["scheduler_state"] = scheduler.state_dict()
 
-    checkpoint_path = os.path.join(cfg.experiment.rundir, "latest.pth")
+    # Checkpoint an interrupted run resumes from: latest.pth, or, when it does
+    # not pass its CRC check (e.g. truncated by a walltime kill), the newest
+    # steps_*.pth that does. The best_valid_loss best.pth records is applied
+    # as a floor after the state is restored.
+    _resume_path, _resume_best_floor = choose_resume_checkpoint(
+        fabric, cfg.experiment.rundir
+    )
+
+    # _resume_path is latest.pth or its steps_*.pth fallback (chosen above);
+    # either way this is an interrupted run resuming, not a foreign checkpoint.
+    checkpoint_path = _resume_path or os.path.join(cfg.experiment.rundir, "latest.pth")
     checkpoint_path_best = os.path.join(cfg.experiment.rundir, "best.pth")
-    latest_pth_exists = os.path.exists(checkpoint_path)
+    latest_pth_exists = _resume_path is not None
     if not latest_pth_exists and cfg.experiment.resume_from:
         checkpoint_path = cfg.experiment.resume_from
 
@@ -903,6 +918,8 @@ def train(
             fabric.print("Auto-detected adaln path change: reinitialized pixel blocks")
     except FileNotFoundError:
         fabric.print("Training from scratch")
+
+    apply_best_valid_loss_floor(fabric, state, _resume_best_floor)
 
     steps = state["steps"]
     nimg = state["nimg"]
@@ -1239,7 +1256,7 @@ def train(
                 and steps % cfg.training.backup_every_steps == 0
                 and not cfg.training.no_save
             ):
-                fabric.save("latest.pth", state)
+                save_checkpoint_atomic(fabric, "latest.pth", state)
 
             if (steps % cfg.debug.print_steps == 0) or (steps % validate_steps == 0):
                 torch.cuda.synchronize()
@@ -1386,17 +1403,14 @@ def train(
                         link_to_best = False
 
                     if not cfg.training.no_save:
-                        fabric.save("latest.pth", state)
-                        if link_to_best:
-                            if fabric.global_rank == 0:
-                                try:
-                                    os.unlink("best.pth")
-                                except FileNotFoundError:
-                                    pass
-
-                                os.link("latest.pth", "best.pth")
+                        save_checkpoint_atomic(
+                            fabric,
+                            "latest.pth",
+                            state,
+                            best="best.pth" if link_to_best else None,
+                        )
                         if cfg.training.save_ckpt_every_epoch:
-                            fabric.save(f"steps_{steps}.pth", state)
+                            save_checkpoint_atomic(fabric, f"steps_{steps}.pth", state)
 
                     if (
                         not cfg.debug.skip_india_ocean_eval

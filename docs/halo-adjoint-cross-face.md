@@ -26,14 +26,15 @@ pressure errors are 107x enriched in the outermost 2 px, against a hard ceiling
 of 256x.
 
 `--no-halo-adjoint-cross-face` zeroes the adjoint's window on targets that leave
-the tile's own face. Default behaviour is unchanged, so the A/B is one flag.
+the tile's own face. **This is now the default** (it used to be opt-in), so the
+A/B is one flag:
 
 ```bash
-# baseline (unchanged default)
-python scripts/ace/run_screamcast_nudged.py ... --halo-adjoint --halo-width 16
-# fixed
+# old behaviour (cross-face overlap-add, the baseline measured below)
 python scripts/ace/run_screamcast_nudged.py ... --halo-adjoint --halo-width 16 \
-    --no-halo-adjoint-cross-face
+    --halo-adjoint-cross-face
+# default (fixed)
+python scripts/ace/run_screamcast_nudged.py ... --halo-adjoint --halo-width 16
 ```
 
 > `--halo-width` **defaults to 32**, but every number in this document is for
@@ -196,8 +197,8 @@ Zero the adjoint's window on padded targets that leave the tile's own face.
   `NormalizedHaloAdjoint(..., own_face_only=True)` which applies it. The
   adjoint also accepts a per-tile `(tiles_per_rank, padded, padded)` window.
 - `scripts/ace/run_screamcast_nudged.py`: `--halo-adjoint-cross-face /
-  --no-halo-adjoint-cross-face`, default True (current behaviour), recorded in
-  the output zarr attrs.
+  --no-halo-adjoint-cross-face`, default False (own-face only; it was True
+  before 2026-11-05), recorded in the output zarr attrs.
 
 Read the functions rather than a code excerpt here — an inlined copy would rot.
 

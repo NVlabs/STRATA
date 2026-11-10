@@ -268,8 +268,37 @@ Checkpoints (`best.pth` / `latest.pth`) and logs are written to the config's
 
 The released checkpoint was trained with the config
 `pixeldit_sem1024d24l_pix128d4l_bilineardwgeluproject_unfreeze_3src_const1em5_t128_4stepft`,
-which reads all three stores under the directory names in the table above. A
-recommended training recipe will be added in a future update.
+which reads all three stores under the directory names in the table above.
+
+### Recommended schedule (production checkpoint)
+
+The 5 km production recipe trains in four stages; each resumes the previous stage's
+`best.pth` (`experiment.resume_from`). "Images" counts training tiles (batch size is 1 per
+GPU, so one step on 2 nodes / 16 GPUs is 16 images).
+
+We recommend training with the precipitation ReLU off (`pipeline.do_precip_relu=False`)
+and clipping precipitation at inference instead: with the ReLU inside the forward pass a
+precipitation head can saturate below zero during training (zero output, zero gradient)
+and never recover.
+
+1. **Pretrain on 64×64 tiles** at a learning rate of 1e-4 (5k-step warm-up, then
+   constant) for about 10M images, or until convergence. The production run reached
+   10M images in total (started on 1 node, moved to 2 nodes at the same learning rate);
+   starting on 2 nodes should need about the same number of images.
+2. **Anneal on 64×64 tiles**: one cosine from 1e-4 down to 1e-6 over the next ~3M images
+   (200k steps on 2 nodes), keeping the optimizer state. In `train.py` that is
+   `scheduler_type="dampened_cosine_with_hard_restarts"` with `cosine_n_cycles=1`,
+   `warmup_steps=0` (otherwise the stage-1 warm-up runs again) and `cosine_t_max=10`
+   validations × `validate_steps=20000`; its floor is `min_ratio=0.01` × lr = 1e-6. The LR
+   drops to 0 after those 200k steps, so stop there. (`scheduler_type="cosine"` only
+   decays to 0.1 × lr = 1e-5.)
+3. **Fine-tune on 128×128 tiles** at a constant 1e-5 (2k-step warm-up) with a fresh
+   optimizer. Better: fine-tune directly on tile + 2×halo, the padded tile the rollout
+   feeds the model. This converges within about 0.5-1M images.
+4. **Multi-step fine-tuning** once stage 3 has converged: 2-step, then 4-step, both at a
+   constant 1e-5. `add_multistep_finetune_configs("<stage-3 config>")` in
+   `train_configs.py` defines `<stage-3 config>_2stepft` and `_4stepft`; run the 2-step
+   config, then the 4-step one (it resumes the 2-step run's `best.pth`).
 
 To fine-tune from the released `strata_v1.pth` (via `experiment.resume_from`),
 turn off `torch.compile` (`compute.do_torch_compile=False`) for now: with
