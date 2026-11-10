@@ -24,8 +24,7 @@ HICCUP's own bit for bit apart from last-bit differences in a few `qv` values
 | `layout.py` | Grid and level constants, Zarr variable lists, the store name |
 
 Run them with `python -m screamcast.initial_conditions.<name>` once the package
-is installed (see the README's Setup), or with the thin wrappers
-`python scripts/initial_conditions/<name>.py`.
+is installed (see the README's Setup), or from the repository root.
 
 ## Inputs
 
