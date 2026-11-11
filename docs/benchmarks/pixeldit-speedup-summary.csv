@@ -1,0 +1,26 @@
+change,decoder_ms,full_model_ms,commit,status
+Original,190.44287872314453,457.3738250732422,6ca17f49f7ce62605c03f72669a16ac74abf6803,baseline
+Shared padding,181.0362548828125,448.02833557128906,6ca17f49f7ce62605c03f72669a16ac74abf6803,recorded accepted
+Fused preparation,172.4818878173828,439.3919372558594,02cce44a63adb83144d65e59d48b987ac1d81a1d,recorded accepted
+Coarse-row reuse,170.02796936035156,436.93043518066406,de6eb1d4842773f73c36487efcaa89bb0329f671,recorded accepted
+Decoder attention layout,148.5605697631836,414.32403564453125,e97fa209,recorded accepted
+Compiler recalibration*,148.5344467163086,406.5669860839844,0a552626,recorded accepted
+Conditioning norm,145.44744110107422,403.6643371582031,a06cc980,recorded accepted
+Backbone attention layout†,nan,366.5182342529297,dc327258,recorded accepted
+Rounded output fusion,nan,365.1834716796875,a9218b72,accepted; latest passing run for this change
+Native-sum column attention,nan,355.31536865234375,d44d0fc0,accepted; latest passing run for this change
+Persistent attention,nan,354.3179473876953,154ca65a0e1d6c6668dfdf809b985e36cf85003e,accepted; latest passing run for this change
+Exact GELU lookup,nan,347.7674102783203,cc8e930cd75b85aae948156ef26517f515c6b0f7,accepted; latest passing run for this change
+Native-order normalization,nan,340.03907775878906,114f4682828a8bf1041f7a5792227acda96b39fa,accepted; latest passing run for this change
+Column output + gate,nan,338.95680236816406,adeef59988b105379fae468311ae0a07f17dd2b7,accepted; latest passing run for this change
+Column RMS + attention,nan,332.9507141113281,08ff278a7f3cf1f6fe0ac8fc6757c83a0334b7aa,accepted; latest passing run for this change
+Column residual layout,nan,332.20384216308594,9dcdb95aec35c1fd7f17693fa5424efda1406740,accepted; latest passing run for this change
+Packed RoPE layout,nan,326.13511657714844,2b88f1f9a19d72e12d50f7f56c6133369ce5aaf7,accepted; latest passing run for this change
+Pixel QKV packing,142.57076263427734,325.1508483886719,12c2e9d4608bdf5a6f4278b1a029228c1419b8aa,accepted; latest passing run for this change
+Pixel persistent + norm,140.2123031616211,322.51368713378906,15c95ae0f81d90c2d2c85471c86a28a970670d00,accepted; latest passing run for this change
+Conditioning conv + norm,126.5987663269043,308.86305236816406,774d7a75faca5ecc4dc0fd7ae5894b23affbcc21,accepted; latest passing run for this change
+Pixel norm1 modulation,125.59859085083008,308.3440399169922,50db30690db18dcf3fae57dc4d5383a6ac94a56f,accepted; latest passing run for this change
+Pixel norm2 modulation,125.17265701293945,307.8362274169922,dc076052d42f0a8bc7269fb8ebd8718ae3c808aa,accepted; latest passing run for this change
+Normalization schedules,nan,306.8895263671875,d0e68b03cedd1aacf32ffcc51bfda74a928bafa7,accepted; latest passing run for this change
+Final-block attention axis,124.88711929321289,306.52745056152344,8d5d203ab3c3ee95b6ae2bc240c4f89d2e5c28dd,accepted; independent confirmation
+Pixel row-state layout,124.60628890991211,306.3618469238281,68b6d8750965f73569715c0ca238257eb59c25e5,accepted; independent confirmation
