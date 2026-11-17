@@ -309,8 +309,9 @@ the map build, the Docker command, the HRES path and the validation.
 ## Regional windows
 
 `--region face,i0,i1,j0,j1` runs STRATA on a window of tiles instead of the whole
-globe; an 8 x 8-tile window (about 5,000 km across) runs 24 h in about 8 minutes
-on one node of 8 H100 GPUs. The window's edge
+globe; on one node of 8 H100 GPUs an 8 x 8-tile window (about 5,000 km across) runs
+24 h in about 8 minutes and a 4 x 4-tile window (about 2,500 km) in about 4. The
+window's edge
 is the initial state plus the large-scale change of a driver, for example an ECMWF HRES
 forecast built with `screamcast.initial_conditions.hres_forecast`, and STRATA runs
 freely inside. `python -m screamcast.regional --lat .. --lon .. --tiles 8 --latlon

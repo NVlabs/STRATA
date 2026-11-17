@@ -8,7 +8,8 @@ it.
 
 A window of 8 x 8 tiles of 128 px (1,024 x 1,024 cells, about 5,000 km across) has 64
 tiles instead of the globe's 1,536. On one node of 8 H100 GPUs it runs 24 hours in
-about 8 minutes (see [Resources](#resources)).
+about 8 minutes, and a 4 x 4-tile window (about 2,500 km) in about 4 minutes (see
+[Resources](#resources)).
 
 ## Choose a window
 
@@ -114,20 +115,22 @@ analyses from `hres_ic` for a hindcast.
 
 ## Resources
 
-Measured on one node of 8 NVIDIA H100 80 GB GPUs (2026-11-17), 8 x 8-tile window,
-Hurricane Helene with the HRES forecast of 2024-09-25 12 UTC as the driver (5 stores,
-+0 to +24 h):
+Measured on one node of 8 NVIDIA H100 80 GB GPUs (2026-11-17), Hurricane Helene with
+the HRES forecast of 2024-09-25 12 UTC as the driver (5 stores, +0 to +24 h). The
+8 x 8-tile window is `3,9,17,5,13` (it reaches one tile row into the north polar face);
+the 4 x 4-tile window is `3,10,14,7,11`, all on face 3. Building the 5 HRES stores
+(`hres_forecast`, one GPU, downloads included) took 134 s.
 
-| Step | Wall time |
-|---|---|
-| Build the 5 HRES stores (`hres_forecast`, one GPU, downloads included) | 134 s |
-| Start-up: container, model, halo plan, initial condition and 5 drivers | about 3 min |
-| 24 h (144 steps), eager (`TORCH_COMPILE_DISABLE=1`) | 6 min 45 s (2.8 s per step) |
-| 24 h (144 steps), `torch.compile` | 4 min 28 s (1.9 s per step), plus 32 s to compile |
-| Whole run, `torch.compile` | 8 min 13 s |
+| Step | 8 x 8 tiles (64) | 4 x 4 tiles (16) |
+|---|---|---|
+| Start-up: container, model, halo plan, initial condition and 5 drivers | about 3 min | about 2 min |
+| 24 h (144 steps), eager (`TORCH_COMPILE_DISABLE=1`) | 6 min 45 s (2.8 s per step) | not measured |
+| 24 h (144 steps), `torch.compile` | 4 min 28 s (1.9 s per step) | 73 s (0.5 s per step) |
+| Compile | 32 s | 30 s |
+| Whole run, `torch.compile` | 8 min 13 s | 4 min |
 
-A window this size also fits in one GPU's memory, but then all 64 tiles run on it:
-expect several times the per-step time above.
+These windows also fit in one GPU's memory, but then all their tiles run on it: expect
+several times the per-step times above.
 
 Each driver time is loaded once at the start, as the initial condition is (the full
 globe, then cut to the window and its ring), so start-up grows with the number of

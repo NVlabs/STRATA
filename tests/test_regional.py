@@ -472,7 +472,9 @@ def test_anchored_ring_is_linear_in_time():
     drivers = {0.0: _box(REGION, seed=2), 6.0: _box(REGION, seed=3)}
     _, boundary = _anchored(REGION, ic, drivers, block=8)
     r0, r6 = boundary.ring_at(0.0), boundary.ring_at(6.0)
-    torch.testing.assert_close(boundary.ring_at(3.0), 0.5 * (r0 + r6), rtol=0, atol=1e-6)
+    torch.testing.assert_close(
+        boundary.ring_at(3.0), 0.5 * (r0 + r6), rtol=0, atol=1e-6
+    )
     # a quarter of the way: mostly the earlier driver
     torch.testing.assert_close(
         boundary.ring_at(1.5), 0.75 * r0 + 0.25 * r6, rtol=0, atol=1e-6
