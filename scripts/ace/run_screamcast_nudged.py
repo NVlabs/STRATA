@@ -625,7 +625,8 @@ def run_scream(
     logger.info(
         "run_scream start n_steps=%d F=%s", n_steps, "yes" if F is not None else "no"
     )
-    in_vars = list(coords["variable"])
+    in_variable = coords["variable"]
+    in_vars = list(in_variable)
     omega_channel_indices = _get_omega_channel_indices(in_vars)
     model_coords = topology.pad_coords(coords)
     model_coords["batch"] = np.empty(1)
@@ -681,6 +682,9 @@ def run_scream(
             )
     logger.info("run_scream done in %.1fs", time.perf_counter() - t_run0)
     if return_coords:
+        # the loop carries the model's output coords; the state holds the inputs
+        coords = dict(coords)
+        coords["variable"] = in_variable
         return x_tensor, coords
     return x_tensor
 

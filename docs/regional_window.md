@@ -48,7 +48,7 @@ the large-scale change of a *driver* since the start:
     ring(t) = IC + (smooth(D(t)) - smooth(D(t0)))
 
 - `D` is a sequence of states on the SCREAM grid at known valid times, given as
-  one-frame stores with `--boundary-stores` (the same layout as `--ic-store`). Between
+  one-frame stores with `--driver-stores` (the same layout as `--ic-store`). Between
   two driver times the ring is linear in time.
 - `smooth` is a block mean over `--boundary-block` x `--boundary-block` cells (default 8,
   about 40 km), upsampled back bilinearly. Only the driver's large-scale evolution
@@ -58,8 +58,8 @@ the large-scale change of a *driver* since the start:
   temperature) is kept from the initial state; the driver's own version of it cancels
   in the difference.
 - If no store is at the initial time, `D(t0)` is the initial condition itself.
-- Without `--boundary-stores` and without `--ic-store`, the driver is the SCREAM run in
-  `SCREAM_MAIN_ZARR_PATH` itself, every `--boundary-every-hours` (default 6). That is a
+- Without `--driver-stores` and without `--ic-store`, the driver is the SCREAM run in
+  `SCREAM_MAIN_ZARR_PATH` itself, every `--driver-every-hours` (default 6). That is a
   test of the window against a known truth.
 
 `--region-boundary replicate` extends the window's own edge pixels outward instead. No
@@ -90,7 +90,7 @@ python -m screamcast.initial_conditions.hres_forecast \
 If the AWS bucket answers HTTP 503 (`SlowDown`), read the same files from ECMWF's
 Google Cloud mirror with `--opendata-root https://storage.googleapis.com/ecmwf-open-data`.
 
-Then run the window. `--boundary-stores` takes the stores in any order; their
+Then run the window. `--driver-stores` takes the stores in any order; their
 `initial_time` attributes are the valid times:
 
 ```bash
@@ -100,7 +100,7 @@ torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \
   --ic-store "$WORK/ics/scream_hiccup_ne1024pg2_erin_f000.zarr" \
   --region "$(python -m screamcast.regional --lat 25 --lon -70 --tiles 8 \
       --latlon $AUX_DATA_ROOT/latlon_ne1024pg2.nc | head -1)" \
-  --boundary-stores "$WORK"/ics/scream_hiccup_ne1024pg2_erin_f0*.zarr \
+  --driver-stores "$WORK"/ics/scream_hiccup_ne1024pg2_erin_f0*.zarr \
   --forecast-model screamcast --correction none --n-steps 144 \
   --tile-size 128 --halo-width 16 --halo-adjoint --no-halo-adjoint-cross-face \
   --tile-jitter 4 --tile-jitter-mode cycle16 --inference-batch-size 1 \

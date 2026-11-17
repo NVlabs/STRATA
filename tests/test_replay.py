@@ -23,6 +23,7 @@ identity model, whose replayed state must land on the driver.
 """
 
 import threading
+from collections import OrderedDict
 
 import numpy as np
 import pytest
@@ -327,3 +328,57 @@ def test_each_analysis_sees_the_predicted_state_not_the_corrected_one():
     np.testing.assert_allclose(by_hour[15], 12.0)
     np.testing.assert_allclose(by_hour[21], 18.0)
     np.testing.assert_allclose(final, 18.0)  # hours 22-24 are free
+
+
+# ------------------------------------------------------------------ runner segments
+
+
+def _runner_module():
+    import importlib.util
+    from pathlib import Path
+
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "ace"
+        / "run_screamcast_nudged.py"
+    )
+    spec = importlib.util.spec_from_file_location("run_screamcast_nudged", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class _ToyModel:
+    """Inputs (a, b); outputs (b, p, a) in another order plus a diagnostic p."""
+
+    def output_coords(self, coords):
+        out = dict(coords)
+        out["variable"] = np.array(["b", "p", "a"])
+        return out
+
+    def __call__(self, x, coords):
+        a, b = x[:, 0], x[:, 1]
+        return torch.stack([2.0 * b, a * b, a + 1.0], dim=1), self.output_coords(coords)
+
+
+class _IdentityTopology:
+    def pad_coords(self, coords):
+        return dict(coords)
+
+    def crop_coords(self, coords):
+        return dict(coords)
+
+
+def test_runner_segments_continue_the_run_exactly():
+    """Replay runs the rollout hour by hour; two segments must equal one call, also
+    for a model whose outputs are not its inputs."""
+    runner = _runner_module()
+    x0 = torch.tensor([1.0, 0.5]).reshape(1, 2, 1, 1, 1)
+    coords = OrderedDict(variable=np.array(["a", "b"]))
+    args = (_ToyModel(), lambda x: x, lambda x: x, _IdentityTopology())
+    whole = runner.run_scream(x0, coords, 6, *args)
+    x3, c3 = runner.run_scream(x0, coords, 3, *args, return_coords=True)
+    x6, c6 = runner.run_scream(x3, c3, 3, *args, start_step=3, return_coords=True)
+    torch.testing.assert_close(x6, whole, rtol=0, atol=0)
+    assert list(c6["variable"]) == ["a", "b"]
