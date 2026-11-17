@@ -85,6 +85,13 @@ from screamcast.horizontal_regridding import (
     UnstructuredToLatLonRegridder,
 )
 from screamcast.omega_filter import low_pass
+from screamcast.regional import (
+    AnchoredBoundary,
+    ReplicateRing,
+    faces_to_box,
+    parse_region,
+    ring_box,
+)
 from screamcast.regional_averages import (
     RegionalAverager,
     load_grid_area_face,
@@ -258,6 +265,60 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Start from a one-frame IC store built by screamcast/initial_conditions/ "
             "instead of SCREAM_MAIN_ZARR_PATH. Needs --correction none."
+        ),
+    )
+    parser.add_argument(
+        "--region",
+        default=None,
+        help=(
+            "Regional window: predict only this rectangle of tiles, "
+            "'face,i0,i1,j0,j1' in tile units (half-open) on the plane of `face`; "
+            "i1 or j1 beyond the face's tiles joins the north polar face or the "
+            "next equatorial face to the east. `python -m screamcast.regional "
+            "--lat .. --lon .. --tiles N` prints one for a point. Needs "
+            "--correction none (see docs/regional_window.md)."
+        ),
+    )
+    parser.add_argument(
+        "--region-boundary",
+        choices=["anchored", "replicate"],
+        default="anchored",
+        help=(
+            "Lateral boundary of --region. 'anchored': the initial state plus the "
+            "large-scale change of a driver since the start, "
+            "IC + (smooth(D(t)) - smooth(D(t0))), with D from --boundary-stores. "
+            "'replicate': the window's own edge pixels extended outward (no "
+            "outside information)."
+        ),
+    )
+    parser.add_argument(
+        "--boundary-stores",
+        nargs="+",
+        default=None,
+        help=(
+            "--region-boundary anchored: one-frame stores built by "
+            "screamcast/initial_conditions/ (same layout as --ic-store), one per "
+            "driver time, e.g. HRES forecast leads 0, 6, ..., 24 h. Their "
+            "initial_time attributes are the valid times. A missing 0 h driver "
+            "is taken from the initial condition itself. Without this option the "
+            "driver is read from SCREAM_MAIN_ZARR_PATH every "
+            "--boundary-every-hours (not with --ic-store)."
+        ),
+    )
+    parser.add_argument(
+        "--boundary-every-hours",
+        type=int,
+        default=6,
+        help="Driver interval when the driver is read from SCREAM_MAIN_ZARR_PATH.",
+    )
+    parser.add_argument(
+        "--boundary-block",
+        type=int,
+        default=8,
+        help=(
+            "Block size (px) of the driver smoothing: block means, then bilinear "
+            "upsampling, so only the driver's large-scale change enters the ring. "
+            "1 uses the driver at full resolution."
         ),
     )
     parser.add_argument(
@@ -507,6 +568,7 @@ def run_scream(
     F=None,
     write_step=None,
     sht_highpass=None,
+    before_step=None,
 ):
     t_run0 = time.perf_counter()
     logger.info(
@@ -523,6 +585,8 @@ def run_scream(
 
     with torch.inference_mode():
         for step_index in range(n_steps):
+            if before_step is not None:
+                before_step(step_index)
             logger.debug("step %d/%d starting pad", step_index + 1, n_steps)
             x_with_halo = pad(x_tensor)
             logger.debug("step %d/%d pad done", step_index + 1, n_steps)
@@ -620,6 +684,84 @@ def load_scrip_lonlat(path: str) -> dict:
         }
 
 
+def build_anchored_boundary(
+    *,
+    args: argparse.Namespace,
+    topology: TileTopology,
+    ic_box: torch.Tensor,
+    t0: np.datetime64,
+    in_vars: list[str],
+    ds,
+    dt_hours: float,
+    n_steps: int,
+    device: torch.device,
+) -> AnchoredBoundary:
+    """The anchored ring of a regional run from ``--boundary-stores`` (or, without
+    them, from SCREAM_MAIN_ZARR_PATH every ``--boundary-every-hours``)."""
+    origin, size = ring_box(topology)
+
+    def box_at(source, time) -> torch.Tensor:
+        full = load_full_face_scream_state(
+            time,
+            in_vars,
+            topology.face_size,
+            source,
+            device,
+            args.ace_fetch_channel_chunk,
+            topology.world_size,
+            topology.rank,
+        )
+        return faces_to_box(full[0], topology, origin, size)
+
+    if args.boundary_stores:
+        profile = os.getenv("SCREAM_ZARR_PROFILE", "")
+        drivers = []
+        for path in args.boundary_stores:
+            entry = data_catalog.ic_store(path, profile)
+            t = np.datetime64(entry.reference_time)
+            hours = float((t - t0) / np.timedelta64(1, "h"))
+            drivers.append((hours, entry.to_data_source(), t, path))
+    else:
+        every = args.boundary_every_hours
+        if every <= 0:
+            raise ValueError("--boundary-every-hours must be positive")
+        last = int(np.ceil(n_steps * dt_hours / every)) * every
+        drivers = [
+            (float(h), ds, t0 + np.timedelta64(h, "h"), "SCREAM_MAIN_ZARR_PATH")
+            for h in range(0, last + 1, every)
+        ]
+    drivers.sort(key=lambda d: d[0])
+    hours = [d[0] for d in drivers]
+    if len(set(hours)) != len(hours):
+        raise ValueError(f"two boundary drivers share a valid time: {hours} h")
+    if hours[0] < 0:
+        raise ValueError(f"boundary driver at {hours[0]} h is before the initial time")
+    needed = (n_steps - 1) * dt_hours  # the last step pads the state at this time
+    if hours[-1] < needed:
+        raise ValueError(
+            f"boundary drivers end at +{hours[-1]} h; the run needs +{needed:.2f} h"
+        )
+    if hours[0] == 0.0:
+        _, source, t, label = drivers.pop(0)
+        driver0 = box_at(source, t)
+        logger.info("boundary driver +0 h: %s", label)
+    else:
+        driver0 = ic_box
+        logger.info("boundary driver +0 h: the initial condition (no 0 h store)")
+    boundary = AnchoredBoundary(
+        topology=topology,
+        ic_box=ic_box,
+        driver0=driver0,
+        block=args.boundary_block,
+        device=device,
+    )
+    del driver0
+    for h, source, t, label in drivers:
+        boundary.add(h, box_at(source, t))
+        logger.info("boundary driver +%g h: %s", h, label)
+    return boundary
+
+
 def main() -> None:
     args = parse_args()
     logging.getLogger().setLevel(getattr(logging, args.log_level))
@@ -664,6 +806,34 @@ def main() -> None:
                 f"initial_time {t0}."
             )
 
+    if args.region is not None:
+        if correction != "none":
+            raise ValueError("--region needs --correction none")
+        if args.pressure_levels is not None:
+            raise ValueError("--pressure-levels does not support --region yet")
+        if args.boundary_block < 1:
+            raise ValueError("--boundary-block must be >= 1")
+        if args.region_boundary == "replicate" and args.boundary_stores:
+            raise ValueError("--boundary-stores needs --region-boundary anchored")
+        if (
+            args.region_boundary == "anchored"
+            and not args.boundary_stores
+            and args.ic_store is not None
+        ):
+            raise ValueError(
+                "--region-boundary anchored with --ic-store needs --boundary-stores "
+                "(the IC store holds one frame)"
+            )
+        if args.halo_channel_chunk != 0:
+            logger.info("--region: halo exchange with every channel at once")
+            args.halo_channel_chunk = 0
+        if args.sht_omega_lmax > 0:
+            # The l < lmax omega modes are global; a window cannot know them.
+            logger.warning("--region: omega SHT high-pass OFF (a global operator)")
+            args.sht_omega_lmax = 0
+    elif args.boundary_stores:
+        raise ValueError("--boundary-stores needs --region")
+
     DistributedManager.initialize()
     dist_mgr = DistributedManager()
 
@@ -693,7 +863,20 @@ def main() -> None:
         face_size=1024 * npg,
         tile_size=tile_size,
         halo_width=args.halo_width,
+        active_tiles=(
+            parse_region(args.region, 1024 * npg // tile_size)
+            if args.region is not None
+            else None
+        ),
     )
+    if topology.is_regional:
+        logger.info(
+            "REGIONAL window %s: %d active tiles, %d ring tiles, boundary=%s",
+            args.region,
+            topology.total_tiles,
+            len(topology.ring_tiles),
+            args.region_boundary,
+        )
     my_tiles = topology.local_tiles
     tile_size = topology.tile_size
 
@@ -866,6 +1049,10 @@ def main() -> None:
         ),
         "tile_jitter": args.tile_jitter,
         "tile_jitter_mode": args.tile_jitter_mode if args.tile_jitter > 0 else None,
+        "region": args.region,
+        "region_boundary": args.region_boundary if args.region else None,
+        "boundary_stores": list(args.boundary_stores or []) if args.region else None,
+        "boundary_block": args.boundary_block if args.region else None,
     }
     # Build output variable grouping and output store before rollout so we can
     # write each step as it is produced.
@@ -1060,14 +1247,53 @@ def main() -> None:
             plev_store = zarr.open_group(plev_output_path, mode="a")
 
     logger.info("opening initial condition")
-    x0, coords = fetch_local_tiles(
-        ds,
-        in_coords,
-        topology,
-        device,
-        t0,
-        args.ace_fetch_channel_chunk,
-    )
+    before_step = None
+    if topology.is_regional:
+        full_faces = load_full_face_scream_state(
+            t0,
+            in_coords["variable"],
+            topology.face_size,
+            ds,
+            device,
+            args.ace_fetch_channel_chunk,
+            topology.world_size,
+            topology.rank,
+        )
+        x0 = topology.faces_to_local_tiles(full_faces)
+        coords = topology.interior_coords(in_coords, time=np.array([t0]))
+        if args.region_boundary == "anchored":
+            ic_box = faces_to_box(full_faces[0], topology, *ring_box(topology))
+            del full_faces
+            boundary = build_anchored_boundary(
+                args=args,
+                topology=topology,
+                ic_box=ic_box,
+                t0=t0,
+                in_vars=list(in_coords["variable"]),
+                ds=ds,
+                dt_hours=float(model.dt / np.timedelta64(1, "h")),
+                n_steps=n_steps,
+                device=device,
+            )
+            del ic_box
+            halo_exchange.ring_source = boundary
+            dt_hours = float(model.dt / np.timedelta64(1, "h"))
+
+            def before_step(step_index: int) -> None:
+                boundary.time_h = step_index * dt_hours
+
+        else:
+            del full_faces
+            halo_exchange.ring_source = ReplicateRing(topology)
+    else:
+        x0, coords = fetch_local_tiles(
+            ds,
+            in_coords,
+            topology,
+            device,
+            t0,
+            args.ace_fetch_channel_chunk,
+        )
     logger.info("initial condition loaded")
     in_vars = list(in_coords["variable"])
 
@@ -1282,6 +1508,7 @@ def main() -> None:
         F=f_nudge,
         write_step=write_step,
         sht_highpass=sht_highpass,
+        before_step=before_step,
     )
 
     if writer is not None:

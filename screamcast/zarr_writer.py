@@ -27,6 +27,8 @@ import torch.distributed as dist
 import zarr
 from einops import rearrange
 
+from screamcast.distributed_halo import plane_parts
+
 logger = logging.getLogger(__name__)
 
 
@@ -188,6 +190,7 @@ def prepare_output_store(
                 chunks=(1, 1, 1, tile_size, tile_size),
                 shards=(1, 1, *lon.shape),
                 dtype="f4",
+                fill_value=np.nan,
                 dimension_names=("time", "step", "face", "x", "y"),
             )
         else:
@@ -197,6 +200,7 @@ def prepare_output_store(
                 chunks=(1, 1, 1, 1, tile_size, tile_size),
                 shards=(1, 1, 1, *lon.shape),
                 dtype="f4",
+                fill_value=np.nan,
                 dimension_names=("time", "step", "level", "face", "x", "y"),
             )
 
@@ -425,7 +429,11 @@ class FaceZarrWriteStep:
                 f"{self.topology.face_size} and {self.topology.tile_size}"
             )
         tiles_per_dim = self.topology.face_size // self.topology.tile_size
-        expected_tiles = self.topology.n_faces * tiles_per_dim * tiles_per_dim
+        expected_tiles = (
+            len(self.topology.active_tiles)
+            if self.topology.is_regional
+            else self.topology.n_faces * tiles_per_dim * tiles_per_dim
+        )
         if self.topology.total_tiles != expected_tiles:
             raise ValueError(
                 f"Expected topology.total_tiles={expected_tiles}, got {self.topology.total_tiles}"
@@ -485,6 +493,12 @@ class FaceZarrWriteStep:
                 self.topology.tile_size,
             )
 
+        if self.topology.is_regional:
+            # regional: (b, c_owned, H, W) box of the region (see _write_region)
+            _, r0, r1, c0, c1 = self.topology.region_pixel_box()
+            return self.topology.tiles_to_box(
+                owned_tiles, self.topology.global_tiles, (r0, c0), (r1 - r0, c1 - c0)
+            )
         return rearrange(
             owned_tiles,
             "b c (f tx ty) x y -> b c f (tx x) (ty y)",
@@ -518,6 +532,9 @@ class FaceZarrWriteStep:
         faces: torch.Tensor,
     ) -> None:
         faces_np = faces.detach().cpu().numpy().astype(np.float32)
+        if self.topology.is_regional:
+            self._write_region(time_index, step_index, faces_np)
+            return
         for base_name, entries in self.local_grouped_variables.items():
             channel_indices = [ci for _, ci in entries]
             if entries[0][0] is None:
@@ -528,6 +545,29 @@ class FaceZarrWriteStep:
                 self.store[base_name][time_index, step_index] = faces_np[
                     channel_indices
                 ]
+
+    def _write_region(self, time_index: int, step_index: int, box: np.ndarray) -> None:
+        """Write the ``(c_owned, H, W)`` region box of a regional run: each face's
+        part of the box is turned back to the face's orientation and written there;
+        the rest of the store keeps its fill value (NaN)."""
+        _, r0, r1, c0, c1 = self.topology.region_pixel_box()
+        parts = plane_parts(
+            self.topology.region_plane, (r0, r1, c0, c1), self.topology.face_size
+        )
+        for face, (fr0, fr1, fc0, fc1), (pr0, pr1, pc0, pc1), k in parts:
+            part = np.rot90(
+                box[..., pr0 - r0 : pr1 - r0, pc0 - c0 : pc1 - c0], -k, axes=(-2, -1)
+            )
+            for base_name, entries in self.local_grouped_variables.items():
+                channel_indices = [ci for _, ci in entries]
+                if entries[0][0] is None:
+                    self.store[base_name][
+                        time_index, step_index, face, fr0:fr1, fc0:fc1
+                    ] = part[channel_indices[0]]
+                else:
+                    self.store[base_name][
+                        time_index, step_index, :, face, fr0:fr1, fc0:fc1
+                    ] = part[channel_indices]
 
     def __call__(self, step_index: int, out_tensor: torch.Tensor) -> None:
         """Write step ``step_index`` if :func:`output_frame_index` saves it."""

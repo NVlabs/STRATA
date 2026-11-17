@@ -46,7 +46,8 @@ from __future__ import annotations
 
 import itertools
 from dataclasses import dataclass
-from typing import TypeAlias
+from functools import cached_property
+from typing import Callable, TypeAlias
 
 import numpy as np
 import torch
@@ -54,10 +55,126 @@ from earth2grid import KNNS2Interpolator
 
 Tile: TypeAlias = tuple[int, int, int]
 
+# A regional run's region is a rectangle on a "plane": one face, or an equatorial face
+# (0-3) and one neighbour joined across their shared edge, either the next equatorial
+# face to the east (rows line up one to one) or the north polar face 5 (its edge that
+# meets equatorial face f's north edge lies there after f quarter turns). Each block is
+# ``(face, block row, block col, k)``: the face's data sits in the plane as
+# ``torch.rot90(data, k)``. tests/test_regional.py checks the joins on the grid.
+PlaneBlock: TypeAlias = tuple[int, int, int, int]
+NORTH_POLAR_FACE = 5
+
+
+def plane_blocks(
+    face: int, north: bool = False, east: bool = False
+) -> list[PlaneBlock]:
+    """The faces of the plane based on ``face``, with its north or east neighbour."""
+    if north and east:
+        raise ValueError("a region plane joins one neighbour, north or east")
+    if (north or east) and not 0 <= face < 4:
+        raise ValueError(f"only an equatorial face (0-3) joins a neighbour, not {face}")
+    blocks = [(face, 0, 0, 0)]
+    if east:
+        blocks.append(((face + 1) % 4, 0, 1, 0))
+    if north:
+        blocks.append((NORTH_POLAR_FACE, 1, 0, face))
+    return blocks
+
+
+def plane_shape(blocks: list[PlaneBlock], n: int) -> tuple[int, int]:
+    """Rows and columns of the plane, ``n`` per face side."""
+    return (
+        n * (1 + max(br for _, br, _, _ in blocks)),
+        n * (1 + max(bc for _, _, bc, _ in blocks)),
+    )
+
+
+def rot_position(p: int, q: int, n: int, k: int) -> tuple[int, int]:
+    """Where element ``(p, q)`` of an ``n x n`` array lands in ``torch.rot90(a, k)``."""
+    for _ in range(k % 4):
+        p, q = n - 1 - q, p
+    return p, q
+
+
+def to_plane(
+    blocks: list[PlaneBlock], face: int, p: int, q: int, n: int
+) -> tuple[int, int]:
+    """Plane position of ``(p, q)`` on ``face`` (``n`` per face side)."""
+    for f, br, bc, k in blocks:
+        if f == face:
+            a, b = rot_position(p, q, n, k)
+            return br * n + a, bc * n + b
+    raise ValueError(f"face {face} is not in the plane {blocks}")
+
+
+def from_plane(
+    blocks: list[PlaneBlock], P: int, Q: int, n: int
+) -> tuple[int, int, int]:
+    """``(face, p, q)`` at plane position ``(P, Q)``."""
+    for f, br, bc, k in blocks:
+        if P // n == br and Q // n == bc and P >= 0 and Q >= 0:
+            return (f, *rot_position(P - br * n, Q - bc * n, n, -k))
+    raise ValueError(f"plane position {(P, Q)} lies outside the plane {blocks}")
+
+
+def faces_to_plane(x: torch.Tensor, blocks: list[PlaneBlock]) -> torch.Tensor:
+    """``(..., 6, n, n)`` face-major fields as the ``(..., rows, cols)`` plane."""
+    n = x.shape[-1]
+    out = x.new_zeros(*x.shape[:-3], *plane_shape(blocks, n))
+    for f, br, bc, k in blocks:
+        out[..., br * n : (br + 1) * n, bc * n : (bc + 1) * n] = torch.rot90(
+            x[..., f, :, :], k, dims=(-2, -1)
+        )
+    return out
+
+
+def plane_parts(
+    blocks: list[PlaneBlock], box: tuple[int, int, int, int], n: int
+) -> list[tuple[int, tuple[int, int, int, int], tuple[int, int, int, int], int]]:
+    """The plane rectangle ``box = (r0, r1, c0, c1)`` split by face:
+    ``(face, face rows/cols (half-open), plane rows/cols, k)``; the plane part is the
+    face part turned ``k`` quarter turns (``torch.rot90(face part, k)``)."""
+    r0, r1, c0, c1 = box
+    rows, cols = plane_shape(blocks, n)
+    if not (0 <= r0 < r1 <= rows and 0 <= c0 < c1 <= cols):
+        raise ValueError(f"box {box} is not inside the plane ({rows} x {cols})")
+    parts = []
+    for f, br, bc, k in blocks:
+        pr0, pr1 = max(r0, br * n), min(r1, (br + 1) * n)
+        pc0, pc1 = max(c0, bc * n), min(c1, (bc + 1) * n)
+        if pr0 >= pr1 or pc0 >= pc1:
+            continue
+        corners = [
+            rot_position(a - br * n, b - bc * n, n, -k)
+            for a in (pr0, pr1 - 1)
+            for b in (pc0, pc1 - 1)
+        ]
+        fr = [p for p, _ in corners]
+        fc = [q for _, q in corners]
+        parts.append(
+            (
+                f,
+                (min(fr), max(fr) + 1, min(fc), max(fc) + 1),
+                (pr0, pr1, pc0, pc1),
+                k,
+            )
+        )
+    return parts
+
 
 @dataclass(frozen=True)
 class TileTopology:
-    """Describe the distributed cubed-sphere tile decomposition."""
+    """Describe the distributed cubed-sphere tile decomposition.
+
+    ``active_tiles`` restricts the rollout to a region (regional mode): only
+    those tiles are predicted and distributed over the ranks, in the given
+    order; ``global_tiles``/``total_tiles``/``local_tiles`` then refer to the
+    active set. The region must be a full rectangle of tiles on a region plane
+    (one face, or an equatorial face joined to its east or north neighbour,
+    see ``plane_blocks``) whose one-tile ``ring_tiles`` stays on that plane;
+    the ring is not predicted, it only supplies the halo sources at the region
+    boundary. ``None`` is the full cube.
+    """
 
     world_size: int
     rank: int
@@ -65,12 +182,16 @@ class TileTopology:
     tile_size: int
     halo_width: int
     n_faces: int = 6
+    active_tiles: tuple[Tile, ...] | None = None
 
     def __post_init__(self) -> None:
         if self.face_size % self.tile_size != 0:
             raise ValueError(
                 f"face_size={self.face_size} must be divisible by tile_size={self.tile_size}"
             )
+        if self.active_tiles is not None:
+            # region_box validates the rectangle and the ring.
+            self.region_box  # noqa: B018
         if self.total_tiles % self.world_size != 0:
             raise ValueError(
                 f"Number of tiles ({self.total_tiles}) must be divisible by "
@@ -83,7 +204,13 @@ class TileTopology:
 
     @property
     def total_tiles(self) -> int:
+        if self.active_tiles is not None:
+            return len(self.active_tiles)
         return self.n_faces * self.tiles_per_dim * self.tiles_per_dim
+
+    @property
+    def is_regional(self) -> bool:
+        return self.active_tiles is not None
 
     @property
     def tiles_per_rank(self) -> int:
@@ -95,6 +222,13 @@ class TileTopology:
 
     @property
     def global_tiles(self) -> list[Tile]:
+        """Predicted tiles in rank order: the active tiles, or the full cube."""
+        if self.active_tiles is not None:
+            return list(self.active_tiles)
+        return self.full_cube_tiles
+
+    @property
+    def full_cube_tiles(self) -> list[Tile]:
         return list(
             itertools.product(
                 range(self.n_faces),
@@ -102,6 +236,135 @@ class TileTopology:
                 range(self.tiles_per_dim),
             )
         )
+
+    @cached_property
+    def region_plane(self) -> list[PlaneBlock]:
+        """The plane (``plane_blocks``) the active tiles lie on."""
+        if self.active_tiles is None:
+            raise ValueError("region_plane is only defined for a regional topology")
+        faces = sorted({f for f, _, _ in self.active_tiles})
+        if len(faces) == 1:
+            return plane_blocks(faces[0])
+        if len(faces) == 2:
+            a, b = faces
+            if b == NORTH_POLAR_FACE and a < 4:
+                return plane_blocks(a, north=True)
+            if b < 4 and (a + 1) % 4 == b:
+                return plane_blocks(a, east=True)
+            if b < 4 and (b + 1) % 4 == a:
+                return plane_blocks(b, east=True)
+        raise ValueError(
+            f"active tiles span faces {faces}: need one face, or an equatorial face "
+            "and its east neighbour or the north polar face"
+        )
+
+    def tile_plane_position(self, tile: Tile) -> tuple[int, int, int]:
+        """``(row, col, k)`` of ``tile`` on the region plane in tile units; its data
+        lies there turned ``k`` quarter turns. The full cube: the tile's own face."""
+        face, ti, tj = tile
+        if self.active_tiles is None:
+            return ti, tj, 0
+        for f, _, _, k in self.region_plane:
+            if f == face:
+                return (
+                    *to_plane(self.region_plane, face, ti, tj, self.tiles_per_dim),
+                    k,
+                )
+        raise ValueError(f"tile {tile} is not on the region plane")
+
+    @cached_property
+    def region_box(self) -> tuple[int, int, int, int, int]:
+        """``(face, i0, i1, j0, j1)``: the active region in tile units (half-open) of
+        the plane based on ``face`` (``i1`` or ``j1`` beyond the face's tiles reach into
+        its north or east neighbour)."""
+        if self.active_tiles is None:
+            raise ValueError("region_box is only defined for a regional topology")
+        tiles = self.active_tiles
+        blocks = self.region_plane
+        pos = [self.tile_plane_position(t)[:2] for t in tiles]
+        i0 = min(i for i, _ in pos)
+        i1 = max(i for i, _ in pos) + 1
+        j0 = min(j for _, j in pos)
+        j1 = max(j for _, j in pos) + 1
+        if sorted(pos) != sorted(
+            itertools.product(range(i0, i1), range(j0, j1))
+        ) or len(set(tiles)) != len(tiles):
+            raise ValueError("active tiles must be a full rectangle without repeats")
+        rows, cols = plane_shape(blocks, self.tiles_per_dim)
+        if i0 < 1 or j0 < 1 or i1 > rows - 1 or j1 > cols - 1:
+            raise ValueError(
+                f"region tiles {i0}:{i1} x {j0}:{j1} must keep one ring tile on the "
+                f"plane of face {blocks[0][0]} ({rows} x {cols} tiles)"
+            )
+        return blocks[0][0], i0, i1, j0, j1
+
+    @cached_property
+    def ring_tiles(self) -> list[Tile]:
+        """The one-tile ring around the region (row-major on the plane), empty for the
+        full cube."""
+        if self.active_tiles is None:
+            return []
+        _, i0, i1, j0, j1 = self.region_box
+        return [
+            from_plane(self.region_plane, i, j, self.tiles_per_dim)
+            for i in range(i0 - 1, i1 + 1)
+            for j in range(j0 - 1, j1 + 1)
+            if not (i0 <= i < i1 and j0 <= j < j1)
+        ]
+
+    def region_pixel_box(self) -> tuple[int, int, int, int, int]:
+        """``(face, r0, r1, c0, c1)``: the region in plane pixels (half-open)."""
+        face, i0, i1, j0, j1 = self.region_box
+        ts = self.tile_size
+        return face, i0 * ts, i1 * ts, j0 * ts, j1 * ts
+
+    def tiles_to_box(
+        self,
+        x: torch.Tensor,
+        tiles: list[Tile],
+        origin: tuple[int, int],
+        size: tuple[int, int],
+    ) -> torch.Tensor:
+        """Place ``(..., len(tiles), ts, ts)`` tiles into a ``(..., *size)`` box whose
+        pixel (0, 0) is plane pixel ``origin``; the parts of tiles outside are dropped."""
+        ts = self.tile_size
+        out = x.new_zeros(*x.shape[:-3], *size)
+        for n, tile in enumerate(tiles):
+            ti, tj, k = self.tile_plane_position(tile)
+            r, c = ti * ts - origin[0], tj * ts - origin[1]
+            rs, cs = max(r, 0), max(c, 0)
+            re, ce = min(r + ts, size[0]), min(c + ts, size[1])
+            if rs < re and cs < ce:
+                data = x[..., n, :, :]
+                if k:
+                    data = torch.rot90(data, k, dims=(-2, -1))
+                out[..., rs:re, cs:ce] = data[..., rs - r : re - r, cs - c : ce - c]
+        return out
+
+    def box_to_tiles(
+        self, box: torch.Tensor, tiles: list[Tile], origin: tuple[int, int]
+    ) -> torch.Tensor:
+        """Cut ``(..., len(tiles), ts, ts)`` tiles out of a ``(..., H, W)`` box whose
+        pixel (0, 0) is plane pixel ``origin``; tile pixels outside the box are 0."""
+        ts = self.tile_size
+        H, W = box.shape[-2:]
+        out = box.new_zeros(*box.shape[:-2], len(tiles), ts, ts)
+        for n, tile in enumerate(tiles):
+            ti, tj, k = self.tile_plane_position(tile)
+            r, c = ti * ts - origin[0], tj * ts - origin[1]
+            rs, cs = max(r, 0), max(c, 0)
+            re, ce = min(r + ts, H), min(c + ts, W)
+            if rs < re and cs < ce:
+                if k:
+                    # in the plane's orientation, then turned back to the tile's
+                    data = box.new_zeros(*box.shape[:-2], ts, ts)
+                    data[..., rs - r : re - r, cs - c : ce - c] = box[..., rs:re, cs:ce]
+                    out[..., n, :, :] = torch.rot90(data, -k, dims=(-2, -1))
+                else:
+                    out[..., n, rs - r : re - r, cs - c : ce - c] = box[
+                        ..., rs:re, cs:ce
+                    ]
+        return out
 
     @property
     def local_tiles(self) -> list[Tile]:
@@ -206,8 +469,18 @@ class TileTopology:
         return out
 
 
+RingSource: TypeAlias = Callable[[torch.Tensor], torch.Tensor]
+
+
 class DistributedTileKNNHaloPadding_AllGather(torch.nn.Module):
-    """Materialize halo-padded local tiles from distributed interior tiles."""
+    """Materialize halo-padded local tiles from distributed interior tiles.
+
+    In regional mode (``topology.is_regional``) the source points are the
+    interiors of the active tiles followed by those of ``topology.ring_tiles``.
+    The ring values come from ``ring_source``, called with the all-gathered
+    active tiles ``(..., n_active, ts, ts)`` and returning
+    ``(..., n_ring, ts, ts)``; it must be set before the first call.
+    """
 
     def __init__(
         self,
@@ -220,8 +493,15 @@ class DistributedTileKNNHaloPadding_AllGather(torch.nn.Module):
         super().__init__()
         self.topology = topology
         self.regrid = regrid
+        self.ring_source: RingSource | None = None
         self.register_buffer("lat_deg", lat_deg, persistent=False)
         self.register_buffer("lon_deg", lon_deg, persistent=False)
+
+    @property
+    def n_src(self) -> int:
+        """Number of source points: active (or all) tiles, then ring tiles."""
+        t = self.topology
+        return (t.total_tiles + len(t.ring_tiles)) * t.tile_size**2
 
     @classmethod
     def from_padded_face_grid(
@@ -261,6 +541,13 @@ class DistributedTileKNNHaloPadding_AllGather(torch.nn.Module):
             ]
         )
 
+        # A regional operator is the full-cube operator with its source indices
+        # remapped onto active + ring tiles, so its halo is the global halo bit
+        # for bit (a KD-tree over a smaller source set could break distance
+        # ties differently).
+        src_tiles = (
+            topology.full_cube_tiles if topology.is_regional else topology.global_tiles
+        )
         src_lon = torch.cat(
             [
                 _select_tile_interior(
@@ -269,7 +556,7 @@ class DistributedTileKNNHaloPadding_AllGather(torch.nn.Module):
                     tile_size=topology.tile_size,
                     pad_width_data=pad_width_data,
                 ).flatten()
-                for tile in topology.global_tiles
+                for tile in src_tiles
             ]
         )
         src_lat = torch.cat(
@@ -280,22 +567,21 @@ class DistributedTileKNNHaloPadding_AllGather(torch.nn.Module):
                     tile_size=topology.tile_size,
                     pad_width_data=pad_width_data,
                 ).flatten()
-                for tile in topology.global_tiles
+                for tile in src_tiles
             ]
         )
 
-        regrid = (
-            KNNS2Interpolator(
-                src_lon,
-                src_lat,
-                local_lon.flatten(),
-                local_lat.flatten(),
-                k=k,
-                eps=eps,
-            )
-            .float()
-            .to(device)
-        )
+        regrid = KNNS2Interpolator(
+            src_lon,
+            src_lat,
+            local_lon.flatten(),
+            local_lat.flatten(),
+            k=k,
+            eps=eps,
+        ).float()
+        if topology.is_regional:
+            regrid.index.copy_(_remap_to_regional_sources(regrid.index, topology))
+        regrid = regrid.to(device)
         return cls(
             topology=topology,
             regrid=regrid,
@@ -318,6 +604,17 @@ class DistributedTileKNNHaloPadding_AllGather(torch.nn.Module):
         tensor_list = [torch.zeros_like(x) for _ in range(self.topology.world_size)]
         torch.distributed.all_gather(tensor_list, x.contiguous())
         gathered = torch.cat(tensor_list, dim=-3)
+        if self.topology.is_regional:
+            if self.ring_source is None:
+                raise ValueError("regional halo exchange needs a ring_source")
+            ring = self.ring_source(gathered)
+            n_ring = len(self.topology.ring_tiles)
+            if ring.shape != (*shape, n_ring, nx, ny):
+                raise ValueError(
+                    f"ring_source returned {tuple(ring.shape)}, expected "
+                    f"{(*shape, n_ring, nx, ny)}"
+                )
+            gathered = torch.cat([gathered, ring.to(gathered.dtype)], dim=-3)
         gathered = gathered.reshape(*shape, -1)
         y = self.regrid(gathered)
         return y.reshape(
@@ -392,6 +689,11 @@ class NormalizedHaloAdjoint(torch.nn.Module):
     applying the transpose of the regridding followed by a reduce scatter. The
     transpose of regridding is implemented as a vector-Jacobian product through
     the forward operator using torch.func.vjp.
+
+    Regional mode: the VJP also returns contributions to the ring sources, which
+    are dropped (the ring is not predicted). ``D_w`` is built the same way, so
+    points next to the region edge are normalised by the weights of the active
+    tiles alone and a constant field still round-trips.
     """
 
     weights: torch.Tensor
@@ -409,6 +711,7 @@ class NormalizedHaloAdjoint(torch.nn.Module):
         padded_size = topology.padded_tile_size
         self._local_src_chunk = topology.tiles_per_rank * topology.tile_size**2
         self._global_src_size = self._local_src_chunk * topology.world_size
+        self._n_src = halo_exchange.n_src
         device = halo_exchange.lon_deg.device
         dtype = halo_exchange.lon_deg.dtype
 
@@ -488,7 +791,7 @@ class NormalizedHaloAdjoint(torch.nn.Module):
                 cotangent = y.detach().clone()
                 primal = torch.zeros(
                     *cotangent.shape[:-1],
-                    self._global_src_size,
+                    self._n_src,
                     device=cotangent.device,
                     dtype=cotangent.dtype,
                 )
@@ -500,7 +803,7 @@ class NormalizedHaloAdjoint(torch.nn.Module):
         self,
         y: torch.Tensor,
     ) -> torch.Tensor:
-        global_adj = self._local_regrid_vjp(y)
+        global_adj = self._local_regrid_vjp(y)[..., : self._global_src_size]
         return self._reduce_scatter_local_shard(global_adj)
 
     def forward(self, padded: torch.Tensor) -> torch.Tensor:
@@ -554,3 +857,28 @@ def _select_tile_interior(
         pad_width_data + tile_i * tile_size : pad_width_data + (tile_i + 1) * tile_size,
         pad_width_data + tile_j * tile_size : pad_width_data + (tile_j + 1) * tile_size,
     ]
+
+
+def _remap_to_regional_sources(
+    index: torch.Tensor, topology: TileTopology
+) -> torch.Tensor:
+    """Map full-cube KNN source indices onto the regional source vector
+    (active tiles in ``global_tiles`` order, then ``ring_tiles``).
+
+    Raises if a halo target of an active tile reads a source outside active +
+    ring, i.e. if the ring is too thin for the halo.
+    """
+    npix = topology.tile_size**2
+    slot = {
+        tile: k for k, tile in enumerate(topology.global_tiles + topology.ring_tiles)
+    }
+    lookup = torch.tensor(
+        [slot.get(tile, -1) for tile in topology.full_cube_tiles], dtype=torch.long
+    )
+    tile_slot = lookup[index // npix]
+    if (tile_slot < 0).any():
+        raise ValueError(
+            f"{int((tile_slot < 0).sum())} halo sources lie outside the active "
+            "tiles and their ring"
+        )
+    return tile_slot * npix + index % npix
