@@ -319,6 +319,16 @@ $AUX_DATA_ROOT/latlon_ne1024pg2.nc` prints a window around a point.
 [`docs/regional_window.md`](docs/regional_window.md) has the commands and the
 limitations.
 
+## Replay to a driver forecast
+
+`--replay` keeps a run's large scales on the driver (`--driver-stores`, for example
+the HRES forecast stores) and leaves the scales below about 250 km to STRATA: every
+6 hours the low-passed difference between the driver and the run is added over the
+6 hours centred on that time, re-running each window. It works for global runs and for
+regional windows; a replayed 4 x 4-tile window runs 24 h in about 5 minutes on one
+node of 8 H100 GPUs. [`docs/replay.md`](docs/replay.md) has the method, the commands
+and the limitations.
+
 ## Training
 
 Training settings are named Python configs in `train_configs.py`; see

@@ -62,6 +62,9 @@ the large-scale change of a *driver* since the start:
   `SCREAM_MAIN_ZARR_PATH` itself, every `--driver-every-hours` (default 6). That is a
   test of the window against a known truth.
 
+Inside the window STRATA runs freely unless `--replay` is set: then the window's large
+scales are also replayed to the same driver every 6 hours ([replay.md](replay.md)).
+
 `--region-boundary replicate` extends the window's own edge pixels outward instead. No
 outside information enters, so the edge drifts; use it as a baseline.
 

@@ -81,7 +81,13 @@ def test_missing_driver_leaves_its_window_free():
 
 def test_no_driver_or_short_run_is_a_plain_run():
     assert replay_plan(24, 6, set()) == [ReplayStep("window", h) for h in range(1, 25)]
-    assert analysis_hours(replay_plan(5, 6, {6})) == []
+    assert analysis_hours(replay_plan(8, 6, {6})) == []
+
+
+def test_window_may_end_at_the_last_hour():
+    plan = replay_plan(9, 6, {6})
+    assert analysis_hours(plan) == [6]
+    assert [s.hour for s in plan if s.kind == "window" and s.main] == list(range(1, 10))
 
 
 def test_interval_must_be_even():
@@ -287,14 +293,16 @@ def test_non_finite_driver_is_refused():
 # ------------------------------------------------------------------ execution
 
 
-def _identity_run(n_hours, every, target_of, steps_per_hour=6):
-    """Identity model on a scalar state: each step adds only the forcing."""
+def _identity_run(n_hours, every, target_of, steps_per_hour=6, drift=0.0):
+    """Scalar model: each step adds ``drift / steps_per_hour`` and the forcing."""
     written: list[tuple[int, float]] = []
     window = every * steps_per_hour
 
     def advance(state, hour, forcing, write):
         for _ in range(steps_per_hour):
-            state = state + (0.0 if forcing is None else forcing)
+            state = (
+                state + drift / steps_per_hour + (0.0 if forcing is None else forcing)
+            )
         if write:
             written.append((hour, float(state)))
         return state
@@ -378,7 +386,24 @@ def test_runner_segments_continue_the_run_exactly():
     coords = OrderedDict(variable=np.array(["a", "b"]))
     args = (_ToyModel(), lambda x: x, lambda x: x, _IdentityTopology())
     whole = runner.run_scream(x0, coords, 6, *args)
-    x3, c3 = runner.run_scream(x0, coords, 3, *args, return_coords=True)
-    x6, c6 = runner.run_scream(x3, c3, 3, *args, start_step=3, return_coords=True)
+    seen: list[int] = []
+    written: list[int] = []
+    hooks = dict(before_step=seen.append, write_step=lambda i, out: written.append(i))
+    x3, c3 = runner.run_scream(x0, coords, 3, *args, return_coords=True, **hooks)
+    x6, c6 = runner.run_scream(
+        x3, c3, 3, *args, start_step=3, return_coords=True, **hooks
+    )
     torch.testing.assert_close(x6, whole, rtol=0, atol=0)
     assert list(c6["variable"]) == ["a", "b"]
+    assert seen == written == list(range(6))  # step numbers continue across segments
+
+
+def test_corrector_restarts_from_the_window_start():
+    """Model drifting 1 per hour, driver 2 per hour. Window of the analysis at 6 starts
+    at 3 (state 3); the predictor reaches 6, the increment is 12 - 6 = 6, and the
+    corrector from 3 reaches 9 + 6 = 15 at hour 9 (18 if it went on from the predictor)."""
+    written, _ = _identity_run(9, 6, lambda h: 2.0 * h, drift=1.0)
+    by_hour = dict(written)
+    np.testing.assert_allclose(by_hour[3], 3.0)
+    np.testing.assert_allclose(by_hour[6], 9.0)
+    np.testing.assert_allclose(by_hour[9], 15.0)
