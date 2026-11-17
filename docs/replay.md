@@ -104,7 +104,21 @@ Without `--driver-stores` and without `--ic-store`, the driver is the SCREAM run
 
 ## Resources
 
-RESOURCES_TODO
+Measured on NVIDIA H100 80 GB nodes (2026-11-17) with `torch.compile`, Hurricane Helene
+replayed to the HRES forecast of 2024-09-25 12 UTC (5 driver stores, +0 to +24 h; analyses
+at +6, +12 and +18 h):
+
+| Step | 4 x 4-tile window, 1 node (8 GPUs) | Global, 2 nodes (16 GPUs) |
+|---|---|---|
+| Start-up: model, halo plan, initial condition and drivers | about 2 min 40 s | about 2 min 15 s |
+| One model step | 0.5 s | about 21 s |
+| One analysis (increment and its low-pass) | about 5 s | about 3.5 min |
+| 24 h: 144 written steps + 54 re-run steps + 3 analyses | 2 min 23 s | 84 min |
+| Whole run | 5 min 19 s | 87 min |
+
+The free (not replayed) window takes about 4 minutes on the same node
+([regional_window.md](regional_window.md#resources)). A global analysis is slower because
+every rank evaluates about 172,000 spherical-harmonic modes on its 1.6 million pixels.
 
 ## Limitations
 
