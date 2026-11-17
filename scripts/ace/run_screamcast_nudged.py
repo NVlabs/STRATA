@@ -97,6 +97,15 @@ from screamcast.regional_averages import (
     load_grid_area_face,
     load_landfrac_face,
 )
+from screamcast.replay import (
+    DEFAULT_VARS as REPLAY_DEFAULT_VARS,
+)
+from screamcast.replay import (
+    Replay,
+    analysis_hours,
+    replay_plan,
+    run_with_replay,
+)
 from screamcast.sht_omega_filter import DistributedSHTHighpass
 from screamcast.tile_jitter import JitteredModel
 from screamcast.vertical_interpolation import log_pressure_interpolate
@@ -286,27 +295,31 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Lateral boundary of --region. 'anchored': the initial state plus the "
             "large-scale change of a driver since the start, "
-            "IC + (smooth(D(t)) - smooth(D(t0))), with D from --boundary-stores. "
+            "IC + (smooth(D(t)) - smooth(D(t0))), with D from --driver-stores. "
             "'replicate': the window's own edge pixels extended outward (no "
             "outside information)."
         ),
     )
     parser.add_argument(
+        "--driver-stores",
         "--boundary-stores",
+        dest="driver_stores",
         nargs="+",
         default=None,
         help=(
-            "--region-boundary anchored: one-frame stores built by "
-            "screamcast/initial_conditions/ (same layout as --ic-store), one per "
-            "driver time, e.g. HRES forecast leads 0, 6, ..., 24 h. Their "
-            "initial_time attributes are the valid times. A missing 0 h driver "
-            "is taken from the initial condition itself. Without this option the "
-            "driver is read from SCREAM_MAIN_ZARR_PATH every "
-            "--boundary-every-hours (not with --ic-store)."
+            "Driver of --region-boundary anchored and of --replay: one-frame stores "
+            "built by screamcast/initial_conditions/ (same layout as --ic-store), one "
+            "per driver time, e.g. HRES forecast leads 0, 6, ..., 24 h "
+            "(screamcast.initial_conditions.hres_forecast). Their initial_time "
+            "attributes are the valid times. A missing 0 h driver is taken from the "
+            "initial condition itself. Without this option the driver is read from "
+            "SCREAM_MAIN_ZARR_PATH every --driver-every-hours (not with --ic-store)."
         ),
     )
     parser.add_argument(
+        "--driver-every-hours",
         "--boundary-every-hours",
+        dest="driver_every_hours",
         type=int,
         default=6,
         help="Driver interval when the driver is read from SCREAM_MAIN_ZARR_PATH.",
@@ -320,6 +333,38 @@ def parse_args() -> argparse.Namespace:
             "upsampling, so only the driver's large-scale change enters the ring. "
             "1 uses the driver at full resolution."
         ),
+    )
+    parser.add_argument(
+        "--replay",
+        action="store_true",
+        help=(
+            "Replay the run to the driver (--driver-stores): every "
+            "--replay-every-hours, the large-scale difference between the driver and "
+            "the run is added over the window centred on that time (incremental "
+            "analysis update; the run is rewound and re-run over each window). Works "
+            "for global runs and --region windows. See docs/replay.md."
+        ),
+    )
+    parser.add_argument(
+        "--replay-every-hours",
+        type=int,
+        default=6,
+        help="Analysis interval (even hours); each analysis needs a driver state.",
+    )
+    parser.add_argument(
+        "--replay-ell-half",
+        type=float,
+        default=160.0,
+        help=(
+            "Spherical-harmonic degree at which the increment's Gaussian taper has "
+            "gain 1/2 (160 ~ 250 km wavelength, 40 ~ 1000 km): smaller keeps more of "
+            "the scales STRATA's own."
+        ),
+    )
+    parser.add_argument(
+        "--replay-vars",
+        default=",".join(REPLAY_DEFAULT_VARS),
+        help="Comma-separated input variables that receive the increment.",
     )
     parser.add_argument(
         "--output-steps",
@@ -569,7 +614,13 @@ def run_scream(
     write_step=None,
     sht_highpass=None,
     before_step=None,
+    start_step=0,
+    return_coords=False,
+    tag="",
 ):
+    """Run ``n_steps`` steps numbered ``start_step, start_step + 1, ...`` (the numbers
+    ``before_step`` and ``write_step`` see). ``F`` is added after every step. Returns the
+    final state, and its coords with ``return_coords``."""
     t_run0 = time.perf_counter()
     logger.info(
         "run_scream start n_steps=%d F=%s", n_steps, "yes" if F is not None else "no"
@@ -584,7 +635,7 @@ def run_scream(
     from_out_out = [out_var_idx[in_vars[i]] for i in from_out_in]
 
     with torch.inference_mode():
-        for step_index in range(n_steps):
+        for step_index in range(start_step, start_step + n_steps):
             if before_step is not None:
                 before_step(step_index)
             logger.debug("step %d/%d starting pad", step_index + 1, n_steps)
@@ -625,8 +676,12 @@ def run_scream(
             x_tensor = x_next
             coords = dict(out_coords)
             coords["batch"] = np.empty(1)
-            logger.info("run_scream step %d/%d", step_index + 1, n_steps)
+            logger.info(
+                "run_scream step %d/%d%s", step_index + 1, start_step + n_steps, tag
+            )
     logger.info("run_scream done in %.1fs", time.perf_counter() - t_run0)
+    if return_coords:
+        return x_tensor, coords
     return x_tensor
 
 
@@ -684,47 +739,31 @@ def load_scrip_lonlat(path: str) -> dict:
         }
 
 
-def build_anchored_boundary(
+Driver = tuple[float, object, np.datetime64, str]  # hours, data source, time, label
+
+
+def resolve_drivers(
     *,
     args: argparse.Namespace,
-    topology: TileTopology,
-    ic_box: torch.Tensor,
     t0: np.datetime64,
-    in_vars: list[str],
     ds,
-    dt_hours: float,
     n_steps: int,
-    device: torch.device,
-) -> AnchoredBoundary:
-    """The anchored ring of a regional run from ``--boundary-stores`` (or, without
-    them, from SCREAM_MAIN_ZARR_PATH every ``--boundary-every-hours``)."""
-    origin, size = ring_box(topology)
-
-    def box_at(source, time) -> torch.Tensor:
-        full = load_full_face_scream_state(
-            time,
-            in_vars,
-            topology.face_size,
-            source,
-            device,
-            args.ace_fetch_channel_chunk,
-            topology.world_size,
-            topology.rank,
-        )
-        return faces_to_box(full[0], topology, origin, size)
-
-    if args.boundary_stores:
+    dt_hours: float,
+) -> list[Driver]:
+    """Driver states, sorted by lead: ``--driver-stores`` or, without them,
+    SCREAM_MAIN_ZARR_PATH every ``--driver-every-hours`` over the run."""
+    if args.driver_stores:
         profile = os.getenv("SCREAM_ZARR_PROFILE", "")
         drivers = []
-        for path in args.boundary_stores:
+        for path in args.driver_stores:
             entry = data_catalog.ic_store(path, profile)
             t = np.datetime64(entry.reference_time)
             hours = float((t - t0) / np.timedelta64(1, "h"))
             drivers.append((hours, entry.to_data_source(), t, path))
     else:
-        every = args.boundary_every_hours
+        every = args.driver_every_hours
         if every <= 0:
-            raise ValueError("--boundary-every-hours must be positive")
+            raise ValueError("--driver-every-hours must be positive")
         last = int(np.ceil(n_steps * dt_hours / every)) * every
         drivers = [
             (float(h), ds, t0 + np.timedelta64(h, "h"), "SCREAM_MAIN_ZARR_PATH")
@@ -733,18 +772,62 @@ def build_anchored_boundary(
     drivers.sort(key=lambda d: d[0])
     hours = [d[0] for d in drivers]
     if len(set(hours)) != len(hours):
-        raise ValueError(f"two boundary drivers share a valid time: {hours} h")
+        raise ValueError(f"two drivers share a valid time: {hours} h")
     if hours[0] < 0:
-        raise ValueError(f"boundary driver at {hours[0]} h is before the initial time")
+        raise ValueError(f"driver at {hours[0]} h is before the initial time")
+    return drivers
+
+
+def load_driver(
+    args: argparse.Namespace, topology: TileTopology, driver: Driver, in_vars, device
+):
+    """A driver state as ``(1, C, 6, n, n)`` full faces on every rank."""
+    _, source, t, _ = driver
+    return load_full_face_scream_state(
+        t,
+        in_vars,
+        topology.face_size,
+        source,
+        device,
+        args.ace_fetch_channel_chunk,
+        topology.world_size,
+        topology.rank,
+    )
+
+
+def build_anchored_boundary(
+    *,
+    args: argparse.Namespace,
+    topology: TileTopology,
+    ic_box: torch.Tensor,
+    drivers: list[Driver],
+    in_vars: list[str],
+    dt_hours: float,
+    n_steps: int,
+    device: torch.device,
+    on_driver=None,
+) -> AnchoredBoundary:
+    """The anchored ring of a regional run. ``on_driver(hours, full_faces)`` sees every
+    driver state as it is loaded (the replay takes its targets from them)."""
+    origin, size = ring_box(topology)
+    hours = [d[0] for d in drivers]
     needed = (n_steps - 1) * dt_hours  # the last step pads the state at this time
     if hours[-1] < needed:
         raise ValueError(
             f"boundary drivers end at +{hours[-1]} h; the run needs +{needed:.2f} h"
         )
-    if hours[0] == 0.0:
-        _, source, t, label = drivers.pop(0)
-        driver0 = box_at(source, t)
-        logger.info("boundary driver +0 h: %s", label)
+
+    def box_of(driver: Driver) -> torch.Tensor:
+        full = load_driver(args, topology, driver, in_vars, device)
+        if on_driver is not None:
+            on_driver(driver[0], full)
+        return faces_to_box(full[0], topology, origin, size)
+
+    drivers = list(drivers)
+    if drivers[0][0] == 0.0:
+        driver = drivers.pop(0)
+        driver0 = box_of(driver)
+        logger.info("boundary driver +0 h: %s", driver[3])
     else:
         driver0 = ic_box
         logger.info("boundary driver +0 h: the initial condition (no 0 h store)")
@@ -756,9 +839,9 @@ def build_anchored_boundary(
         device=device,
     )
     del driver0
-    for h, source, t, label in drivers:
-        boundary.add(h, box_at(source, t))
-        logger.info("boundary driver +%g h: %s", h, label)
+    for driver in drivers:
+        boundary.add(driver[0], box_of(driver))
+        logger.info("boundary driver +%g h: %s", driver[0], driver[3])
     return boundary
 
 
@@ -813,15 +896,21 @@ def main() -> None:
             raise ValueError("--pressure-levels does not support --region yet")
         if args.boundary_block < 1:
             raise ValueError("--boundary-block must be >= 1")
-        if args.region_boundary == "replicate" and args.boundary_stores:
-            raise ValueError("--boundary-stores needs --region-boundary anchored")
+        if (
+            args.region_boundary == "replicate"
+            and args.driver_stores
+            and not args.replay
+        ):
+            raise ValueError(
+                "--driver-stores needs --region-boundary anchored or --replay"
+            )
         if (
             args.region_boundary == "anchored"
-            and not args.boundary_stores
+            and not args.driver_stores
             and args.ic_store is not None
         ):
             raise ValueError(
-                "--region-boundary anchored with --ic-store needs --boundary-stores "
+                "--region-boundary anchored with --ic-store needs --driver-stores "
                 "(the IC store holds one frame)"
             )
         if args.halo_channel_chunk != 0:
@@ -831,8 +920,16 @@ def main() -> None:
             # The l < lmax omega modes are global; a window cannot know them.
             logger.warning("--region: omega SHT high-pass OFF (a global operator)")
             args.sht_omega_lmax = 0
-    elif args.boundary_stores:
-        raise ValueError("--boundary-stores needs --region")
+    elif args.driver_stores and not args.replay:
+        raise ValueError("--driver-stores needs --region or --replay")
+    if args.replay:
+        if correction != "none":
+            raise ValueError("--replay needs --correction none")
+        if not args.driver_stores and args.ic_store is not None:
+            raise ValueError(
+                "--replay with --ic-store needs --driver-stores (the IC store holds "
+                "one frame)"
+            )
 
     DistributedManager.initialize()
     dist_mgr = DistributedManager()
@@ -1051,7 +1148,11 @@ def main() -> None:
         "tile_jitter_mode": args.tile_jitter_mode if args.tile_jitter > 0 else None,
         "region": args.region,
         "region_boundary": args.region_boundary if args.region else None,
-        "boundary_stores": list(args.boundary_stores or []) if args.region else None,
+        "driver_stores": list(args.driver_stores or []),
+        "replay": args.replay,
+        "replay_every_hours": args.replay_every_hours if args.replay else None,
+        "replay_ell_half": args.replay_ell_half if args.replay else None,
+        "replay_vars": args.replay_vars if args.replay else None,
         "boundary_block": args.boundary_block if args.region else None,
     }
     # Build output variable grouping and output store before rollout so we can
@@ -1246,6 +1347,60 @@ def main() -> None:
         if rank == 0:
             plev_store = zarr.open_group(plev_output_path, mode="a")
 
+    dt_hours = float(model.dt / np.timedelta64(1, "h"))
+    needs_drivers = args.replay or (
+        topology.is_regional and args.region_boundary == "anchored"
+    )
+    drivers = (
+        resolve_drivers(args=args, t0=t0, ds=ds, n_steps=n_steps, dt_hours=dt_hours)
+        if needs_drivers
+        else []
+    )
+    replay = None
+    replay_target = None
+    plan = []
+    if args.replay:
+        steps_per_hour = round(1.0 / dt_hours)
+        if abs(steps_per_hour * dt_hours - 1.0) > 1e-9 or n_steps % steps_per_hour:
+            raise ValueError(
+                f"--replay needs whole hours: {n_steps} steps of {dt_hours * 60:g} min"
+            )
+        driver_hours = {int(h) for h, *_ in drivers if float(h).is_integer()}
+        plan = replay_plan(
+            n_steps // steps_per_hour, args.replay_every_hours, driver_hours
+        )
+        analyses = set(analysis_hours(plan))
+        if not analyses:
+            raise ValueError(
+                f"--replay: no analysis fits; drivers at {sorted(driver_hours)} h, "
+                f"every {args.replay_every_hours} h, run of {n_steps // steps_per_hour} h "
+                "(an analysis at t needs t + every/2 <= the run length)"
+            )
+        replay = Replay(
+            in_vars=list(in_coords["variable"]),
+            replay_vars=args.replay_vars.split(","),
+            lat_face=lat_face,
+            lon_face=lon_face,
+            area_face=np.asarray(load_grid_area_face(GRID_PATH, ne=1024, npg=npg)),
+            topology=topology,
+            ell_half=args.replay_ell_half,
+            window_steps=args.replay_every_hours * steps_per_hour,
+            omega_lmax=args.sht_omega_lmax,
+        ).to(device)
+        logger.info(
+            "REPLAY every %d h at +%s h, ell_half=%g (lmax %d), %d channels",
+            args.replay_every_hours,
+            sorted(analyses),
+            args.replay_ell_half,
+            replay.lmax,
+            len(replay.channels),
+        )
+
+        def replay_target(hours: float, full: torch.Tensor) -> None:
+            if hours in analyses:
+                replay.add_target(int(hours), topology.faces_to_local_tiles(full))
+                logger.info("replay target +%g h loaded", hours)
+
     logger.info("opening initial condition")
     before_step = None
     if topology.is_regional:
@@ -1268,16 +1423,15 @@ def main() -> None:
                 args=args,
                 topology=topology,
                 ic_box=ic_box,
-                t0=t0,
+                drivers=drivers,
                 in_vars=list(in_coords["variable"]),
-                ds=ds,
-                dt_hours=float(model.dt / np.timedelta64(1, "h")),
+                dt_hours=dt_hours,
                 n_steps=n_steps,
                 device=device,
+                on_driver=replay_target,
             )
             del ic_box
             halo_exchange.ring_source = boundary
-            dt_hours = float(model.dt / np.timedelta64(1, "h"))
 
             def before_step(step_index: int) -> None:
                 boundary.time_h = step_index * dt_hours
@@ -1296,6 +1450,12 @@ def main() -> None:
         )
     logger.info("initial condition loaded")
     in_vars = list(in_coords["variable"])
+    if replay is not None:
+        for driver in drivers:
+            if driver[0] in analyses and int(driver[0]) not in replay.targets:
+                replay_target(
+                    driver[0], load_driver(args, topology, driver, in_vars, device)
+                )
 
     wind_mask = torch.zeros(1, len(in_vars), 1, 1, 1, device=device)
     for i, var_name in enumerate(in_vars):
@@ -1495,21 +1655,72 @@ def main() -> None:
                     " ".join(parts),
                 )
 
-    run_scream(
-        x0,
-        coords,
-        n_steps,
-        model,
-        pad,
-        unpad,
-        topology,
-        omega_filter_strength=args.omega_filter_strength,
-        omega_filter_coarsen=coarsen,
-        F=f_nudge,
-        write_step=write_step,
-        sht_highpass=sht_highpass,
-        before_step=before_step,
-    )
+    if replay is None:
+        run_scream(
+            x0,
+            coords,
+            n_steps,
+            model,
+            pad,
+            unpad,
+            topology,
+            omega_filter_strength=args.omega_filter_strength,
+            omega_filter_coarsen=coarsen,
+            F=f_nudge,
+            write_step=write_step,
+            sht_highpass=sht_highpass,
+            before_step=before_step,
+        )
+    else:
+
+        def advance_hour(state, hour, forcing, write):
+            x, c = state
+            start = (hour - 1) * steps_per_hour
+            if isinstance(model, JitteredModel):
+                model.step = start  # a re-run window sees the same jitter offsets
+            return run_scream(
+                x,
+                c,
+                steps_per_hour,
+                model,
+                pad,
+                unpad,
+                topology,
+                omega_filter_strength=args.omega_filter_strength,
+                omega_filter_coarsen=coarsen,
+                F=forcing,
+                write_step=write_step if write else None,
+                sht_highpass=sht_highpass,
+                before_step=before_step,
+                start_step=start,
+                return_coords=True,
+                tag="" if write else " (replay predictor)",
+            )
+
+        def increment(state, hour):
+            forcing, stats = replay.increment(state[0], hour)
+            for name in (
+                n
+                for n in replay.names
+                if n in ("U_24", "PotentialTemperature_24", "qv_24", "T_2m")
+            ):
+                raw, low = stats[name]
+                logger.info(
+                    "replay +%d h %s: increment rms %.3g, low-passed %.3g",
+                    hour,
+                    name,
+                    raw,
+                    low,
+                )
+            return forcing
+
+        run_with_replay(
+            (x0, coords),
+            plan,
+            advance_hour,
+            increment,
+            copy=lambda state: (state[0].clone(), dict(state[1])),
+        )
 
     if writer is not None:
         writer.close()
