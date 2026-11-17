@@ -22,8 +22,10 @@ two ranks gets the same forcing as a single-rank run. The executor tests use an
 identity model, whose replayed state must land on the driver.
 """
 
+import os
 import threading
 from collections import OrderedDict
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -353,7 +355,9 @@ def _runner_module():
     )
     spec = importlib.util.spec_from_file_location("run_screamcast_nudged", path)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # the script loads a .env at import; keep it out of the other tests' environment
+    with mock.patch.dict(os.environ):
+        spec.loader.exec_module(module)
     return module
 
 
