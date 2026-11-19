@@ -25,8 +25,13 @@ the increment is in by `t`. Spreading it over the window keeps the model from a 
 and scales below the taper stay STRATA's own throughout.
 
 - The replayed inputs are `U`, `V`, `PotentialTemperature`, `qv`, `z_mid`, `omega` and
-  `T_2m` on all model levels (`--replay-vars`). `strata_v1` predicts `ps` as a diagnostic,
-  so it is not replayed.
+  `T_2m` on all model levels. `--replay-vars` chooses among them: for example
+  `--replay-vars U,V,PotentialTemperature,qv,z_mid` leaves `omega` and `T_2m` to STRATA,
+  and a variable left out gets no increment at any level (`--replay-level-ramp` weights
+  the levels of the ones kept). These seven are all of `strata_v1`'s inputs; `ps` and
+  precipitation are diagnostics, outputs only, so they cannot be replayed. The choice
+  does not apply to a window's anchored ring, which is a boundary condition: it follows
+  the driver in every input variable.
 - An analysis at `t` needs a driver at `t` and `t + every/2` within the run. A 24 h run
   with drivers every 6 h to +24 h is replayed at +6, +12 and +18 h; the last 3 hours are
   a free forecast. Build drivers to +30 h and run 27 h or more to replay at +24 h too.
@@ -113,17 +118,27 @@ increment and of its low-passed part (`replay +6 h U_24: increment rms ...`).
 Without `--driver-stores` and without `--ic-store`, the driver is the SCREAM run in
 `SCREAM_MAIN_ZARR_PATH` every `--driver-every-hours`: a replay toward a known truth.
 
-## Targets built on the fly
+## Drivers built on the fly
 
-The replay uses the driver only as 8 x 8-block means at its analysis hours. Instead of
-building full-resolution driver stores first (about 9 GB each), the run can build these
-targets while it goes: `--replay-onthefly SPEC.json --replay-target-dir DIR` starts a
-producer process on rank 0's GPU (`screamcast/replay_targets.py`). For each analysis
-hour it fetches the source state, runs `fast_ic.build_ic` on it 2^21 columns at a time,
-and writes the block means of the replayed variables to
-`DIR/blocks_<YYYYMMDDHH>.zarr` (about 600 MB for the globe, 6 MB for a 4 x 4-tile
-window, whose producer builds only the window's columns). Each rank reads the blocks of
-its own tiles on a background thread. The fine state never goes to disk.
+The replay uses the driver only as 8 x 8-block means at its analysis hours, and the
+anchored ring of a window only as the 8 x 8-block means of the window and its ring at the
+driver hours (its `smooth`, `--boundary-block 8`). Instead of building full-resolution
+driver stores first (about 9 GB each), the run can build these targets while it goes:
+`--driver-onthefly SPEC.json --driver-target-dir DIR` replaces `--driver-stores` and
+starts a producer process on rank 0's GPU (`screamcast/replay_targets.py`). For each
+hour the run needs, it fetches the source state, runs `fast_ic.build_ic` on it 2^21
+columns at a time, and writes the block means to `DIR/blocks_<YYYYMMDDHH>.zarr` (about
+600 MB for the globe, 6 MB for a 4 x 4-tile window, 14 MB with its ring). A window's
+producer builds only the window's columns, and its ring's when the ring is anchored.
+Each rank reads the blocks it needs on a background thread. The fine state never goes
+to disk. Only the initial condition still comes from a store (`--ic-store`, e.g. the
+lead-0 store of `hres_forecast`).
+
+- With `--replay` the targets are at the analysis hours; with an anchored ring also at
+  every `--driver-every-hours` (default 6) from 0 to the first at or after the last step.
+  A window can use them without `--replay` too: then they drive the ring alone.
+- The ring takes every input variable from the targets; the replay takes
+  `--replay-vars`.
 
 The spec names the source and the `fast_ic` inputs:
 
@@ -140,40 +155,46 @@ bucket (`opendata_root` to use a mirror). The bucket holds the 00 and 12 UTC for
 with every field `build_ic` needs start with the 2024-03-05 12 UTC forecast: the files
 from 2024-02-29 to 2024-03-05 00 UTC lack four pressure levels and `w`. Checked on
 2026-11-19, when forecasts to 2026-11-18 were there. The analyses fall at the hours the
-source has.
+source has; the ring's driver hours must all be there. Older HRES forecasts (2016-2022 in
+WeatherBench2, 2023 at 0.4 deg) are not a source: build stores for them.
 
 ```bash
 torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \
   --run-name helene_window_replay_onthefly \
   --checkpoint $AUX_DATA_ROOT/checkpoints/strata_v1.pth \
   --ic-store "$WORK/ics/scream_hiccup_ne1024pg2_helene_f000.zarr" \
-  --region 3,10,14,7,11 --region-boundary replicate \
-  --replay --replay-onthefly hres_helene.json --replay-target-dir "$WORK/targets/helene" \
-  ... (the other options of the window command above)
+  --region 3,10,14,7,11 --replay \
+  --driver-onthefly hres_helene.json --driver-target-dir "$WORK/targets/helene" \
+  ... (the other options of the window command above, without --driver-stores)
 ```
 
-A window's anchored ring still needs `--driver-stores`; with on-the-fly targets alone
-use `--region-boundary replicate`, as here, or give the stores for the ring.
-
-- `--replay-producer gated` (default) builds the first target at once and each later
-  one when the run begins the analysis before it; rank 0 empties its CUDA cache first,
-  so the build does not meet STRATA's peak memory of start-up and compilation.
-  `ahead` builds every target as early as it can; `serial` builds each target when the
-  run asks for it and the run waits (for debugging). Outside `serial` the next source
-  state is fetched while the GPU builds the current one.
+- `--driver-producer gated` (default) builds the targets the run needs before its first
+  analysis at once (the ring's +0 and +6 h, the first analysis) and each later one when
+  the run begins the last analysis before it needs that target; rank 0 empties its CUDA
+  cache first, so the build does not meet STRATA's peak memory of start-up and
+  compilation. A window without `--replay` has no analyses and is not gated. `ahead`
+  builds every target as early as it can; `serial` builds each target when the run asks
+  for it and the run waits (for debugging). Outside `serial` the next source state is
+  fetched while the GPU builds the current one.
 - A target is written under `.partial<pid>` and renamed, so a rank never reads half a
   store. The producer writes `FAILED` (with the traceback) or `DONE` in the directory,
   and its log goes to `producer.log` there. A rank that waits longer than
-  `--replay-target-timeout` seconds (default 3600) for a target fails.
+  `--driver-target-timeout` seconds (default 3600) for a target fails.
 - The directory must be on a file system every rank sees. Targets already there are
   kept if they hold this run's channels and tiles, so a rerun builds nothing.
 - `python -m screamcast.replay_targets produce --spec SPEC.json --out-dir DIR
-  --run-init 2024-09-25T12 --hours 6 12 18 [--region R --tile-size 128]` builds
-  targets without a run, and `python -m screamcast.replay_targets compare A B` checks
-  that two target stores are equal bit for bit.
+  --run-init 2024-09-25T12 --hours 6 12 18 [--region R --tile-size 128 [--ring]]`
+  builds targets without a run, and `python -m screamcast.replay_targets compare A B`
+  checks that two target stores are equal bit for bit.
 
-No on-the-fly run has been timed on a GPU node yet; a `fast_ic` build takes about 80 s
-for the globe on one GPU.
+On the 4 x 4-tile Helene window (H100, 2026-11-19) a target took about 7 s to build
+(2.6 s to read the cached GRIB, 2 s on the GPU) and the replayed 24 h run took as long as
+with stores (327 s). Its targets were bitwise equal to the block means of the stores
+built from the same forecast; the run itself is not bitwise reproducible on GPU (two
+runs from stores differ by 0.8 m/s in `U` at +24 h), and the on-the-fly run differed
+from the stores run by as much. That run took its ring from stores; a ring built on the
+fly has not been timed yet. No global on-the-fly run yet; a `fast_ic` build of the globe
+takes about 80 s on one GPU.
 
 ## Resources
 
@@ -201,4 +222,5 @@ every rank evaluates about 172,000 spherical-harmonic modes on its 1.6 million p
 - The increment is computed every 6 hours from 6-hourly drivers; between analyses the
   run is free.
 - `--correction` nudging and `--replay` do not combine.
-- On-the-fly targets come from ERA5 or HRES open data only; other drivers need stores.
+- Drivers built on the fly come from ERA5 or HRES open data (from 2024-03-05 12 UTC)
+  only; other drivers need stores. The initial condition always comes from a store.

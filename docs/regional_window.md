@@ -114,7 +114,10 @@ torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \
 
 The drivers must cover the run: the last step reads the ring at `(n_steps - 1) x 10`
 minutes. Any other source works the same way: ERA5 hours from `fast_ic`, or HRES
-analyses from `hres_ic` for a hindcast.
+analyses from `hres_ic` for a hindcast. Instead of `--driver-stores`, the ring's drivers
+can be built while the run goes from ERA5 or ECMWF HRES open data (`--driver-onthefly`,
+see [replay.md](replay.md#drivers-built-on-the-fly)); only the initial condition then
+needs a store.
 
 ## Resources
 

@@ -328,9 +328,9 @@ the HRES forecast stores) and leaves the scales below about 250 km to STRATA: ev
 regional windows; a replayed 4 x 4-tile window runs 24 h in about 5 minutes on one
 node of 8 H100 GPUs. A window's increment is normalized at its edge, and
 `--replay-level-ramp` can leave the boundary layer free. Instead of driver stores, the
-targets can be built while the run goes from ERA5 or ECMWF HRES open data
-(`--replay-onthefly`). [`docs/replay.md`](docs/replay.md) has the method, the commands
-and the limitations.
+driver can be built while the run goes from ERA5 or ECMWF HRES open data
+(`--driver-onthefly`), for the replay and for a window's ring.
+[`docs/replay.md`](docs/replay.md) has the method, the commands and the limitations.
 
 ## Training
 
