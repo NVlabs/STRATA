@@ -14,7 +14,7 @@
 # limitations under the License.
 """On-the-fly replay targets (``screamcast.replay_targets``).
 
-The build runs ``fast_ic.build_ic`` on CPU on a tiny cube (face 32, ne16pg2) from a
+The build runs ``fast_ic.build_ic`` on CPU on a tiny cube (face 64, ne32pg2) from a
 synthetic source on a 9 x 16 lat-lon grid and a random conservative map. The targets
 the producer builds must be the block means ``Replay.add_target`` takes of the state a
 driver store holds (the whole-grid build, put on the faces with the store's own index
@@ -41,7 +41,7 @@ from screamcast.regional import parse_region
 from screamcast.replay import Replay, replay_plan
 from tests.test_regional import _cube_area, _cube_latlon
 
-FACE, TILE = 32, 8
+FACE, TILE = 64, 16  # 2 x 2 blocks per tile
 NCOL = 6 * FACE * FACE
 NLAT, NLON = 9, 16
 PLEV_HPA = np.array([50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000])
@@ -313,7 +313,8 @@ def test_target_appears_only_complete(tmp_path, monkeypatch):
     name does not exist until then."""
     tiles = rt.producer_tiles(REGION, TILE, FACE)
     channels = ["U_0", "T_2m"]
-    blocks = np.random.default_rng(0).normal(size=(2, len(tiles), 1, 1))
+    tb = TILE // 8
+    blocks = np.random.default_rng(0).normal(size=(2, len(tiles), tb, tb))
     valid = np.datetime64("2024-09-25T18")
     path = rt.target_path(str(tmp_path), valid)
     real_rename = os.rename
@@ -442,8 +443,10 @@ def test_producer_builds_every_target_in_each_mode(inputs, tmp_path, monkeypatch
     assert "does not hold" in (tmp_path / rt.FAILED).read_text()
 
 
-def test_gated_producer_waits_for_the_analysis(inputs, tmp_path, monkeypatch):
-    """Without the analysis marker the second target is not built; the first is."""
+@pytest.mark.parametrize("mode,built", [("gated", [6]), ("serial", [])])
+def test_producer_waits_for_its_marker(inputs, tmp_path, monkeypatch, mode, built):
+    """Gated: without the analysis marker the second target is not built, the first is.
+    Serial: without a request no target is built."""
     _, spec_path = inputs
     monkeypatch.setattr(rt, "make_source", lambda s: _FakeSource())
     monkeypatch.setattr(rt.time, "sleep", lambda s: None)
@@ -452,7 +455,7 @@ def test_gated_producer_waits_for_the_analysis(inputs, tmp_path, monkeypatch):
 
     def exists(p):
         # the marker loop polls os.path.exists; give up after many polls
-        if os.path.basename(p).startswith("analysis_"):
+        if os.path.basename(p).startswith(("analysis_", "request_")):
             calls["n"] += 1
             if calls["n"] > 200:
                 raise TimeoutError("still waiting")
@@ -460,17 +463,40 @@ def test_gated_producer_waits_for_the_analysis(inputs, tmp_path, monkeypatch):
 
     monkeypatch.setattr(rt.os.path, "exists", exists)
     with pytest.raises(TimeoutError):
-        rt.produce(_produce_args(spec_path, tmp_path, "gated", REGION))
+        rt.produce(_produce_args(spec_path, tmp_path, mode, REGION))
     t0 = np.datetime64("2024-09-25T12")
-    first = rt.target_path(str(tmp_path), t0 + np.timedelta64(6, "h"))
-    deadline = time.time() + 60  # its write may still be on the writer thread
-    while not os.path.isdir(first) and time.time() < deadline:
-        pass
-    assert os.path.isdir(first)
-    assert not os.path.isdir(
-        rt.target_path(str(tmp_path), t0 + np.timedelta64(12, "h"))
-    )
+    for h in built:
+        path = rt.target_path(str(tmp_path), t0 + np.timedelta64(h, "h"))
+        deadline = time.time() + 60  # its write may still be on the writer thread
+        while not os.path.isdir(path) and time.time() < deadline:
+            pass
+    for h in (6, 12):
+        path = rt.target_path(str(tmp_path), t0 + np.timedelta64(h, "h"))
+        assert os.path.isdir(path) == (h in built)
     assert (tmp_path / rt.FAILED).exists()
+
+
+def test_reader_asks_for_a_missing_target(tmp_path):
+    """A rank that finds its target missing writes the request a serial producer (or a
+    gated one retrying out of memory) waits for."""
+    t0 = np.datetime64("2024-09-25T12")
+    reader = rt.TargetReader(
+        str(tmp_path), ["U_0"], _topology(), t0, mode="serial", timeout=0.1
+    )
+    with pytest.raises(TimeoutError):
+        reader.get(6)
+    assert (tmp_path / "request_2024092518").exists()
+
+
+def test_block_target_of_the_wrong_shape_is_refused():
+    topo = _topology()
+    rep = _replay(rt.target_channels(STEMS), topo)
+    tb = TILE // 8
+    n, tiles = len(rep.names), len(topo.local_tiles)
+    with pytest.raises(ValueError, match="block target"):
+        rep.add_block_target(6, torch.zeros(n, tiles, tb, tb + 1, dtype=torch.float64))
+    with pytest.raises(ValueError, match="block target"):
+        rep.add_block_target(6, torch.zeros(n, tiles, tb, tb))  # float32
 
 
 def test_failed_source_is_reported(inputs, tmp_path, monkeypatch):
