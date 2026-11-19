@@ -326,7 +326,10 @@ the HRES forecast stores) and leaves the scales below about 250 km to STRATA: ev
 6 hours the low-passed difference between the driver and the run is added over the
 6 hours centred on that time, re-running each window. It works for global runs and for
 regional windows; a replayed 4 x 4-tile window runs 24 h in about 5 minutes on one
-node of 8 H100 GPUs. [`docs/replay.md`](docs/replay.md) has the method, the commands
+node of 8 H100 GPUs. A window's increment is normalized at its edge, and
+`--replay-level-ramp` can leave the boundary layer free. Instead of driver stores, the
+targets can be built while the run goes from ERA5 or ECMWF HRES open data
+(`--replay-onthefly`). [`docs/replay.md`](docs/replay.md) has the method, the commands
 and the limitations.
 
 ## Training

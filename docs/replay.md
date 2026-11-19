@@ -36,10 +36,21 @@ and scales below the taper stay STRATA's own throughout.
   hours of steps.
 - With `--sht-omega-lmax N` (the omega high-pass of global runs) the omega increment
   keeps none of the degrees the high-pass removes.
-- In a regional window the analysis covers the window's blocks only: the increment is
-  the low-passed window increment and zero outside, so it is weaker within a few hundred
-  kilometres of the window edge. The window's edge is the anchored ring, from the same
-  driver stores.
+- In a regional window the analysis covers the window's blocks only and the increment
+  is zero outside. The low-pass alone would give a cell near the window edge only the
+  share of the kernel that lies inside (half on the edge, 84 % about 47 km in at the
+  default taper), so the low-passed increment is divided by the low-passed window
+  indicator, `K*(m delta) / K*(m)` (`--replay-region-edge normalized`, the default): a
+  uniform difference is added whole up to the edge, and away from the edge the
+  increment is the global one. `--replay-region-edge zero` keeps the share. The
+  window's ring is the anchored boundary, from the same driver stores.
+- `--replay-level-ramp PFULL,PZERO` (e.g. `800,900`) leaves the boundary layer to
+  STRATA: the increment of each level is weighted 1 at reference pressures up to PFULL
+  hPa, 0 from PZERO hPa down, linear between. The reference pressure is
+  `(hyam + hybm) * 1000 hPa` of the model levels. Surface channels are not weighted;
+  leave `T_2m` out of `--replay-vars` to leave the surface free too.
+- The output stores have a `history` attribute with the time and the exact command
+  of the run.
 
 Each rank analyses its own blocks and the spherical-harmonic coefficients are
 all-reduced (`lmax` 413 at the default taper), then each rank evaluates them on its own
@@ -102,6 +113,68 @@ increment and of its low-passed part (`replay +6 h U_24: increment rms ...`).
 Without `--driver-stores` and without `--ic-store`, the driver is the SCREAM run in
 `SCREAM_MAIN_ZARR_PATH` every `--driver-every-hours`: a replay toward a known truth.
 
+## Targets built on the fly
+
+The replay uses the driver only as 8 x 8-block means at its analysis hours. Instead of
+building full-resolution driver stores first (about 9 GB each), the run can build these
+targets while it goes: `--replay-onthefly SPEC.json --replay-target-dir DIR` starts a
+producer process on rank 0's GPU (`screamcast/replay_targets.py`). For each analysis
+hour it fetches the source state, runs `fast_ic.build_ic` on it 2^21 columns at a time,
+and writes the block means of the replayed variables to
+`DIR/blocks_<YYYYMMDDHH>.zarr` (about 600 MB for the globe, 6 MB for a 4 x 4-tile
+window, whose producer builds only the window's columns). Each rank reads the blocks of
+its own tiles on a background thread. The fine state never goes to disk.
+
+The spec names the source and the `fast_ic` inputs:
+
+```json
+{"source": "hres", "init": "2024-09-25T12", "cache": "/path/to/grib-cache",
+ "map": "/path/to/map_721x1440_to_ne1024pg2.nc", "phis": "/path/to/scream_phis.zarr",
+ "vert": "/path/to/vert_coord_E3SM_L128.nc"}
+```
+
+`"source": "era5"` reads ERA5 from the public ARCO store (`era5_zarr` to use another),
+which has every hour. `"hres"` reads the ECMWF HRES forecast `init` from the open-data
+bucket (`opendata_root` to use a mirror). The bucket holds the 00 and 12 UTC forecasts,
+3-hourly to +144 h and 6-hourly to +240 h; the 06 and 18 UTC runs are not there. Files
+with every field `build_ic` needs start with the 2024-03-05 12 UTC forecast: the files
+from 2024-02-29 to 2024-03-05 00 UTC lack four pressure levels and `w`. Checked on
+2026-11-19, when forecasts to 2026-11-18 were there. The analyses fall at the hours the
+source has.
+
+```bash
+torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \
+  --run-name helene_window_replay_onthefly \
+  --checkpoint $AUX_DATA_ROOT/checkpoints/strata_v1.pth \
+  --ic-store "$WORK/ics/scream_hiccup_ne1024pg2_helene_f000.zarr" \
+  --region 3,10,14,7,11 --region-boundary replicate \
+  --replay --replay-onthefly hres_helene.json --replay-target-dir "$WORK/targets/helene" \
+  ... (the other options of the window command above)
+```
+
+A window's anchored ring still needs `--driver-stores`; with on-the-fly targets alone
+use `--region-boundary replicate`, as here, or give the stores for the ring.
+
+- `--replay-producer gated` (default) builds the first target at once and each later
+  one when the run begins the analysis before it; rank 0 empties its CUDA cache first,
+  so the build does not meet STRATA's peak memory of start-up and compilation.
+  `ahead` builds every target as early as it can; `serial` builds each target when the
+  run asks for it and the run waits (for debugging). Outside `serial` the next source
+  state is fetched while the GPU builds the current one.
+- A target is written under `.partial<pid>` and renamed, so a rank never reads half a
+  store. The producer writes `FAILED` (with the traceback) or `DONE` in the directory,
+  and its log goes to `producer.log` there. A rank that waits longer than
+  `--replay-target-timeout` seconds (default 3600) for a target fails.
+- The directory must be on a file system every rank sees. Targets already there are
+  kept if they hold this run's channels and tiles, so a rerun builds nothing.
+- `python -m screamcast.replay_targets produce --spec SPEC.json --out-dir DIR
+  --run-init 2024-09-25T12 --hours 6 12 18 [--region R --tile-size 128]` builds
+  targets without a run, and `python -m screamcast.replay_targets compare A B` checks
+  that two target stores are equal bit for bit.
+
+No on-the-fly run has been timed on a GPU node yet; a `fast_ic` build takes about 80 s
+for the globe on one GPU.
+
 ## Resources
 
 Measured on NVIDIA H100 80 GB nodes (2026-11-17) with `torch.compile`, Hurricane Helene
@@ -128,3 +201,4 @@ every rank evaluates about 172,000 spherical-harmonic modes on its 1.6 million p
 - The increment is computed every 6 hours from 6-hourly drivers; between analyses the
   run is free.
 - `--correction` nudging and `--replay` do not combine.
+- On-the-fly targets come from ERA5 or HRES open data only; other drivers need stores.
