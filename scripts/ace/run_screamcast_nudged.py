@@ -103,6 +103,7 @@ from screamcast.replay import (
 from screamcast.replay import (
     Replay,
     analysis_hours,
+    level_ramp_weights,
     replay_plan,
     run_with_replay,
 )
@@ -365,6 +366,19 @@ def parse_args() -> argparse.Namespace:
         "--replay-vars",
         default=",".join(REPLAY_DEFAULT_VARS),
         help="Comma-separated input variables that receive the increment.",
+    )
+    parser.add_argument(
+        "--replay-level-ramp",
+        default=None,
+        metavar="PFULL,PZERO",
+        help=(
+            "Replay the free atmosphere only: the increment of each 3D channel is "
+            "weighted 1 at reference pressures <= PFULL hPa, 0 at >= PZERO hPa, "
+            "linear in pressure between (e.g. 800,900). The reference pressure is "
+            "(hyam + hybm) * 1000 hPa of the model levels. Surface channels are not "
+            "weighted: leave T_2m out of --replay-vars to leave the boundary layer "
+            "free."
+        ),
     )
     parser.add_argument(
         "--replay-region-edge",
@@ -937,6 +951,16 @@ def main() -> None:
             args.sht_omega_lmax = 0
     elif args.driver_stores and not args.replay:
         raise ValueError("--driver-stores needs --region or --replay")
+    level_ramp = None
+    if args.replay_level_ramp is not None:
+        if not args.replay:
+            raise ValueError("--replay-level-ramp needs --replay")
+        level_ramp = tuple(float(v) for v in args.replay_level_ramp.split(","))
+        if len(level_ramp) != 2 or not level_ramp[1] > level_ramp[0]:
+            raise ValueError(
+                f"--replay-level-ramp PFULL,PZERO needs PZERO > PFULL (hPa), got "
+                f"{args.replay_level_ramp!r}"
+            )
     if args.replay:
         if correction != "none":
             raise ValueError("--replay needs --correction none")
@@ -1168,6 +1192,7 @@ def main() -> None:
         "replay_every_hours": args.replay_every_hours if args.replay else None,
         "replay_ell_half": args.replay_ell_half if args.replay else None,
         "replay_vars": args.replay_vars if args.replay else None,
+        "replay_level_ramp": args.replay_level_ramp,
         "replay_region_edge": (
             args.replay_region_edge if args.replay and args.region else None
         ),
@@ -1407,7 +1432,18 @@ def main() -> None:
             normalize_edge=(
                 topology.is_regional and args.replay_region_edge == "normalized"
             ),
+            level_weights=(
+                None
+                if level_ramp is None
+                else level_ramp_weights(hyam, hybm, *level_ramp)
+            ),
         ).to(device)
+        if level_ramp is not None:
+            logger.info(
+                "replay level ramp %s hPa: weight by level %s",
+                args.replay_level_ramp,
+                np.round(level_ramp_weights(hyam, hybm, *level_ramp), 3).tolist(),
+            )
         logger.info(
             "REPLAY every %d h at +%s h, ell_half=%g (lmax %d), %d channels%s",
             args.replay_every_hours,

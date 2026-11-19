@@ -113,12 +113,17 @@ def analysis_hours(plan: list[ReplayStep]) -> list[int]:
     return [s.hour for s in plan if s.kind == "analysis"]
 
 
+def channel_level(name: str) -> tuple[str, int | None]:
+    """``("U", 24)`` for ``U_24``; ``(name, None)`` for a surface channel."""
+    base, sep, level = name.rpartition("_")
+    return (base, int(level)) if sep and level.isdigit() else (name, None)
+
+
 def replay_channels(in_vars: list[str], replay_vars: list[str]) -> list[int]:
     """Indices of the input channels a replay updates: ``<var>`` or ``<var>_<level>``."""
 
     def stem(name: str) -> str:
-        base, sep, level = name.rpartition("_")
-        return base if sep and level.isdigit() else name
+        return channel_level(name)[0]
 
     out = [
         ci
@@ -130,6 +135,22 @@ def replay_channels(in_vars: list[str], replay_vars: list[str]) -> list[int]:
     if missing:
         raise ValueError(f"replay variables {missing} are not model inputs")
     return out
+
+
+def level_ramp_weights(
+    hyam: np.ndarray, hybm: np.ndarray, p_full_hpa: float, p_zero_hpa: float
+) -> np.ndarray:
+    """Replay weight of each model level from its reference pressure
+    ``(hyam + hybm) * 1000 hPa`` (surface pressure 1000 hPa): 1 at or above
+    ``p_full_hpa``, 0 at or below ``p_zero_hpa`` (nearer the surface), linear in
+    pressure between. 800 and 900 hPa leave the boundary layer to the model."""
+    if not p_zero_hpa > p_full_hpa:
+        raise ValueError(
+            f"level ramp: the zero-weight pressure {p_zero_hpa} hPa must be greater "
+            f"(nearer the surface) than the full-weight pressure {p_full_hpa} hPa"
+        )
+    p_hpa = (np.asarray(hyam, np.float64) + np.asarray(hybm, np.float64)) * 1e3
+    return np.clip((p_zero_hpa - p_hpa) / (p_zero_hpa - p_full_hpa), 0.0, 1.0)
 
 
 def block_mean(x: torch.Tensor, k: int) -> torch.Tensor:
@@ -171,7 +192,9 @@ class Replay(torch.nn.Module):
     window centred on an analysis. With ``omega_lmax > 0`` (the run's omega high-pass)
     the omega increment keeps no degree the high-pass removes. ``normalize_edge``
     (regional runs only) divides the low-passed increment by the low-passed window
-    indicator, computed once at the first analysis.
+    indicator, computed once at the first analysis. ``level_weights`` (one per model
+    level, e.g. ``level_ramp_weights``) scales the increment of each 3D channel by its
+    level's weight; surface channels are not scaled.
     """
 
     def __init__(
@@ -187,6 +210,7 @@ class Replay(torch.nn.Module):
         window_steps: int,
         omega_lmax: int = 0,
         normalize_edge: bool = False,
+        level_weights: np.ndarray | None = None,
         block: int = BLOCK,
     ) -> None:
         super().__init__()
@@ -240,8 +264,15 @@ class Replay(torch.nn.Module):
         )
         gain = gaussian_gain(self.lmax, self.ell_half).repeat(len(self.channels), 1)
         for row, name in enumerate(self.names):
-            if omega_lmax > 0 and name.rpartition("_")[0] == "omega":
+            stem, level = channel_level(name)
+            if omega_lmax > 0 and stem == "omega" and level is not None:
                 gain[row, : (omega_lmax + 1) ** 2] = 0.0
+            if level_weights is not None and level is not None:
+                if level >= len(level_weights):
+                    raise ValueError(
+                        f"{name}: no level weight ({len(level_weights)} levels)"
+                    )
+                gain[row] *= float(level_weights[level])
         self.register_buffer("gain", gain, persistent=False)
         self.normalize_edge = normalize_edge
         # K*(m) on the blocks and on the fine pixels, set by the first analysis

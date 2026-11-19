@@ -39,6 +39,7 @@ from screamcast.replay import (
     ReplayStep,
     analysis_hours,
     block_cells,
+    level_ramp_weights,
     replay_channels,
     replay_plan,
     run_with_replay,
@@ -312,6 +313,34 @@ def test_normalized_window_edge_brings_a_uniform_offset_back_whole():
 def test_normalized_edge_needs_a_window():
     with pytest.raises(ValueError, match="regional"):
         _replay(_topology(), normalize_edge=True)
+
+
+def test_level_ramp_weights_at_closed_form_pressures():
+    p_hpa = np.array([100.0, 800.0, 825.0, 850.0, 900.0, 950.0])
+    hyam, hybm = 0.3e-3 * p_hpa, 0.7e-3 * p_hpa  # hyam + hybm = p / 1000 hPa
+    w = level_ramp_weights(hyam, hybm, 800.0, 900.0)
+    np.testing.assert_allclose(w, [1.0, 1.0, 0.75, 0.5, 0.0, 0.0], atol=1e-12)
+    with pytest.raises(ValueError, match="greater"):
+        level_ramp_weights(hyam, hybm, 900.0, 800.0)
+
+
+def test_level_ramp_leaves_zero_weight_levels_untouched():
+    """Level 8 has weight 0 (near the surface), level 9 one half; T_2m is a surface
+    channel and is not weighted."""
+    topo = _topology()
+    weights = np.ones(10)
+    weights[8], weights[9] = 0.0, 0.5
+    rep = _replay(topo, window_steps=1, level_weights=weights)
+    state = _state()
+    target = state + 2.0  # every channel, including omega_8 and coszr
+    rep.add_target(6, _local(topo, target))
+    forcing, _ = rep.increment(_local(topo, state), 6)
+    assert torch.count_nonzero(forcing[0, 0]) == 0  # U_8
+    assert torch.count_nonzero(forcing[0, 2]) == 0  # omega_8
+    np.testing.assert_allclose(forcing[0, 1].numpy(), 1.0, atol=0.02)  # U_9
+    np.testing.assert_allclose(forcing[0, 3].numpy(), 2.0, atol=0.02)  # T_2m
+    with pytest.raises(ValueError, match="level weight"):
+        _replay(topo, level_weights=np.ones(9))
 
 
 def test_non_finite_driver_is_refused():
