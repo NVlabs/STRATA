@@ -192,8 +192,10 @@ On the 4 x 4-tile Helene window (H100, 2026-11-19) a target took about 7 s to bu
 with stores (327 s). Its targets were bitwise equal to the block means of the stores
 built from the same forecast; the run itself is not bitwise reproducible on GPU (two
 runs from stores differ by 0.8 m/s in `U` at +24 h), and the on-the-fly run differed
-from the stores run by as much. That run took its ring from stores; a ring built on the
-fly has not been timed yet. No global on-the-fly run yet; a `fast_ic` build of the globe
+from the stores run by as much. With the anchored ring also built on the fly (5 targets
+of window and ring, 193 channels, no driver stores) the replayed run took 299 s and stayed
+within the same run-to-run noise of the stores run; a rerun reused all 5 targets. No
+global on-the-fly run yet; a `fast_ic` build of the globe
 takes about 80 s on one GPU.
 
 ## Resources
