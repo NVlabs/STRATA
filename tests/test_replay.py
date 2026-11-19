@@ -462,6 +462,69 @@ def test_runner_segments_continue_the_run_exactly():
     assert seen == written == list(range(6))  # step numbers continue across segments
 
 
+class _PositionModel:
+    """Inputs and outputs (a, b); the outputs depend on the pixel positions in
+    ``coords``, so a tile-jitter offset changes them."""
+
+    def output_coords(self, coords):
+        return dict(coords)
+
+    def __call__(self, x, coords):
+        pos = torch.as_tensor(np.asarray(coords["x"], np.float64))[:, None]
+        pos = pos + 0.1 * torch.as_tensor(np.asarray(coords["y"], np.float64))[None]
+        a, b = x[:, 0], x[:, 1]
+        out = torch.stack([0.5 * b + 0.01 * pos, a - 0.02 * pos * b], dim=1)
+        return out, self.output_coords(coords)
+
+
+@pytest.mark.parametrize("mode", ["cycle16", "random"])
+def test_replay_with_zero_increment_is_the_run_without_replay(mode):
+    """The rewinds re-run 3 hours per analysis; the jitter offsets of a re-run step must
+    be those of its first run, or a zero increment would still change the run."""
+    runner = _runner_module()
+    from screamcast.tile_jitter import JitteredModel
+
+    n = 6
+    steps_per_hour = 2
+    x0 = torch.from_numpy(_state(1)[:2, :1, :n, :n])[None]  # (1, 2, 1, n, n)
+    coords = OrderedDict(variable=np.array(["a", "b"]), x=np.arange(n), y=np.arange(n))
+    topo = _IdentityTopology()
+
+    def collect(out):
+        return lambda i, y: out.append((i, y.clone()))
+
+    direct: list = []
+    model = JitteredModel(_PositionModel(), jitter=4, mode=mode, seed=3)
+    want = runner.run_scream(
+        x0,
+        coords,
+        15 * steps_per_hour,
+        model,
+        *(lambda x: x,) * 2,
+        topo,
+        write_step=collect(direct),
+    )
+
+    replayed: list = []
+    model = JitteredModel(_PositionModel(), jitter=4, mode=mode, seed=3)
+    advance = runner.replay_stepper(
+        model, steps_per_hour, lambda x: x, lambda x: x, topo, collect(replayed)
+    )
+    plan = replay_plan(15, 6, {6, 12})
+    assert analysis_hours(plan) == [6, 12]
+    got, _ = run_with_replay(
+        (x0, coords),
+        plan,
+        advance,
+        lambda state, hour: torch.zeros_like(state[0]),
+        lambda state: (state[0].clone(), dict(state[1])),
+    )
+    torch.testing.assert_close(got, want, rtol=0, atol=0)
+    assert [i for i, _ in replayed] == [i for i, _ in direct]
+    for (_, y_got), (_, y_want) in zip(replayed, direct):
+        torch.testing.assert_close(y_got, y_want, rtol=0, atol=0)
+
+
 def test_corrector_restarts_from_the_window_start():
     """Model drifting 1 per hour, driver 2 per hour. Window of the analysis at 6 starts
     at 3 (state 3); the predictor reaches 6, the increment is 12 - 6 = 6, and the

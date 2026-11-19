@@ -56,6 +56,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
 import time
 from collections import OrderedDict
 
@@ -80,6 +81,7 @@ from screamcast.distributed_state_fetch import (
     load_full_face_scream_state,
 )
 from screamcast.earth2studio_wrappers import ScreamcastModel
+from screamcast.history import history_entry
 from screamcast.horizontal_regridding import (
     LatLonToPointGridRegridder,
     UnstructuredToLatLonRegridder,
@@ -759,6 +761,38 @@ def subset_channels(x_tensor, source_vars, target_vars):
     return x_tensor[:, keep]
 
 
+def replay_stepper(
+    model, steps_per_hour: int, pad, unpad, topology, write_step, **run_kwargs
+):
+    """``advance_hour`` of ``run_with_replay``: one hour of ``run_scream``, its steps
+    numbered from ``(hour - 1) * steps_per_hour``. A tile-jittered model is set to that
+    step first, so a window re-run after a rewind sees the jitter offsets of its first
+    run, and a replay with a zero increment is the run without replay."""
+
+    def advance_hour(state, hour, forcing, write):
+        x, c = state
+        start = (hour - 1) * steps_per_hour
+        if isinstance(model, JitteredModel):
+            model.step = start
+        return run_scream(
+            x,
+            c,
+            steps_per_hour,
+            model,
+            pad,
+            unpad,
+            topology,
+            F=forcing,
+            write_step=write_step if write else None,
+            start_step=start,
+            return_coords=True,
+            tag="" if write else " (replay predictor)",
+            **run_kwargs,
+        )
+
+    return advance_hour
+
+
 def load_scrip_lonlat(path: str) -> dict:
     """Load grid_center_lon/lat from a SCRIP .nc file into a float32 dict."""
     with xr.open_dataset(path) as ds:
@@ -1163,6 +1197,8 @@ def main() -> None:
 
     output_path = args.output or f"{default_output_dir(args)}.zarr"
     params = {
+        # one line per run: every run creates its output stores afresh (no resume)
+        "history": history_entry([sys.executable, *sys.argv]),
         "run_name": args.run_name,
         "checkpoint": checkpoint_path,
         "forecast_model": args.forecast_model,
@@ -1731,29 +1767,18 @@ def main() -> None:
         )
     else:
 
-        def advance_hour(state, hour, forcing, write):
-            x, c = state
-            start = (hour - 1) * steps_per_hour
-            if isinstance(model, JitteredModel):
-                model.step = start  # a re-run window sees the same jitter offsets
-            return run_scream(
-                x,
-                c,
-                steps_per_hour,
-                model,
-                pad,
-                unpad,
-                topology,
-                omega_filter_strength=args.omega_filter_strength,
-                omega_filter_coarsen=coarsen,
-                F=forcing,
-                write_step=write_step if write else None,
-                sht_highpass=sht_highpass,
-                before_step=before_step,
-                start_step=start,
-                return_coords=True,
-                tag="" if write else " (replay predictor)",
-            )
+        advance_hour = replay_stepper(
+            model,
+            steps_per_hour,
+            pad,
+            unpad,
+            topology,
+            write_step,
+            omega_filter_strength=args.omega_filter_strength,
+            omega_filter_coarsen=coarsen,
+            sht_highpass=sht_highpass,
+            before_step=before_step,
+        )
 
         def increment(state, hour):
             forcing, stats = replay.increment(state[0], hour)
