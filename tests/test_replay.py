@@ -130,7 +130,7 @@ def _topology(world_size=1, rank=0, region=None) -> TileTopology:
     )
 
 
-def _replay(topology, omega_lmax=0, window_steps=36) -> Replay:
+def _replay(topology, omega_lmax=0, window_steps=36, **kwargs) -> Replay:
     lat, lon = (a.numpy() for a in _cube_latlon(FACE, 0))
     return Replay(
         in_vars=IN_VARS,
@@ -142,6 +142,7 @@ def _replay(topology, omega_lmax=0, window_steps=36) -> Replay:
         ell_half=ELL_HALF,
         window_steps=window_steps,
         omega_lmax=omega_lmax,
+        **kwargs,
     )
 
 
@@ -223,13 +224,15 @@ def test_omega_increment_drops_the_degrees_the_high_pass_removes():
     assert np.abs(forcing[0, 2].numpy() - expect).max() < 0.03 * np.abs(y3).max()
 
 
-def test_two_ranks_get_the_single_rank_forcing(monkeypatch):
+@pytest.mark.parametrize("region,normalize_edge", [(None, False), ("3,2,4,1,2", True)])
+def test_two_ranks_get_the_single_rank_forcing(monkeypatch, region, normalize_edge):
     """The analysis is a sum over blocks: each rank adds its own and the all-reduce
-    completes it. The two ranks run in threads; the all-reduce sums their tensors."""
+    completes it (also for the window indicator of a normalized edge). The two ranks run
+    in threads; the all-reduce sums their tensors."""
     state = _state()
     target = state + 0.5 * _harmonic(2, 1)[None] + 1.0
-    single = _topology()
-    rep = _replay(single, window_steps=1)
+    single = _topology(region=region)
+    rep = _replay(single, window_steps=1, normalize_edge=normalize_edge)
     rep.add_target(6, _local(single, target))
     want, want_stats = rep.increment(_local(single, state), 6)
 
@@ -251,8 +254,8 @@ def test_two_ranks_get_the_single_rank_forcing(monkeypatch):
 
     def run(rank):
         who.rank = rank
-        topo = _topology(world_size=2, rank=rank)
-        r = _replay(topo, window_steps=1)
+        topo = _topology(world_size=2, rank=rank, region=region)
+        r = _replay(topo, window_steps=1, normalize_edge=normalize_edge)
         r.add_target(6, _local(topo, target))
         out[rank] = r.increment(_local(topo, state), 6)
 
@@ -268,19 +271,47 @@ def test_two_ranks_get_the_single_rank_forcing(monkeypatch):
             np.testing.assert_allclose(out[rank][1][name], want_stats[name], rtol=1e-6)
 
 
-def test_window_increment_is_zero_outside_and_bounded_by_the_offset():
-    """A regional run analyses its window's blocks only: a uniform offset becomes the
-    low-passed window indicator times the offset, between 0 and the offset."""
+def test_window_increment_with_zero_edge_is_a_share_of_the_offset():
+    """A regional run analyses its window's blocks only: without the edge normalization
+    a uniform offset becomes the low-passed window indicator times the offset, between
+    0 and the offset."""
     topo = _topology(region="3,1,2,1,2")
-    rep = _replay(topo, window_steps=1)
+    rep = _replay(topo, window_steps=1, normalize_edge=False)
     state = _state()
     target = state.copy()
     target[0] += 4.0
     rep.add_target(6, _local(topo, target))
-    forcing, _ = rep.increment(_local(topo, state), 6)
+    forcing, stats = rep.increment(_local(topo, state), 6)
     u = forcing[0, 0].numpy()
     assert u.min() > -0.2 and u.max() < 4.2
     assert u.mean() > 0.5  # the window gets a real share of the offset
+    assert u.max() < 3.0  # but not all of it
+    assert stats["U_8"][1] < 3.0
+
+
+def test_normalized_window_edge_brings_a_uniform_offset_back_whole():
+    """K*(m c) / K*(m) = c for a constant c: the whole offset everywhere in the window,
+    edge included, and the logged low-passed rms is the offset too."""
+    topo = _topology(region="3,2,4,1,2")  # across a face edge
+    rep = _replay(topo, window_steps=1, normalize_edge=True)
+    state = _state()
+    target = state.copy()
+    target[0] += 4.0
+    target[3] -= 1.5
+    rep.add_target(6, _local(topo, target))
+    forcing, stats = rep.increment(_local(topo, state), 6)
+    np.testing.assert_allclose(forcing[0, 0].numpy(), 4.0, rtol=1e-4)
+    np.testing.assert_allclose(forcing[0, 3].numpy(), -1.5, rtol=1e-4)
+    np.testing.assert_allclose(stats["U_8"], (4.0, 4.0), rtol=1e-4)
+    # a second analysis reuses the indicator
+    rep.add_target(12, _local(topo, target))
+    again, _ = rep.increment(_local(topo, state), 12)
+    torch.testing.assert_close(again, forcing, rtol=0, atol=0)
+
+
+def test_normalized_edge_needs_a_window():
+    with pytest.raises(ValueError, match="regional"):
+        _replay(_topology(), normalize_edge=True)
 
 
 def test_non_finite_driver_is_refused():

@@ -367,6 +367,17 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated input variables that receive the increment.",
     )
     parser.add_argument(
+        "--replay-region-edge",
+        choices=("normalized", "zero"),
+        default="normalized",
+        help=(
+            "--region windows: the increment exists on the window's blocks only, so "
+            "the low-pass gives cells near the window edge only part of it (half on "
+            "the edge). 'normalized' divides by the low-passed window indicator, so "
+            "the whole increment reaches the edge; 'zero' keeps the share."
+        ),
+    )
+    parser.add_argument(
         "--output-steps",
         type=int,
         default=1,
@@ -1157,6 +1168,9 @@ def main() -> None:
         "replay_every_hours": args.replay_every_hours if args.replay else None,
         "replay_ell_half": args.replay_ell_half if args.replay else None,
         "replay_vars": args.replay_vars if args.replay else None,
+        "replay_region_edge": (
+            args.replay_region_edge if args.replay and args.region else None
+        ),
         "boundary_block": args.boundary_block if args.region else None,
     }
     # Build output variable grouping and output store before rollout so we can
@@ -1390,14 +1404,18 @@ def main() -> None:
             ell_half=args.replay_ell_half,
             window_steps=args.replay_every_hours * steps_per_hour,
             omega_lmax=args.sht_omega_lmax,
+            normalize_edge=(
+                topology.is_regional and args.replay_region_edge == "normalized"
+            ),
         ).to(device)
         logger.info(
-            "REPLAY every %d h at +%s h, ell_half=%g (lmax %d), %d channels",
+            "REPLAY every %d h at +%s h, ell_half=%g (lmax %d), %d channels%s",
             args.replay_every_hours,
             sorted(analyses),
             args.replay_ell_half,
             replay.lmax,
             len(replay.channels),
+            f", window edge {args.replay_region_edge}" if topology.is_regional else "",
         )
 
         def replay_target(hours: float, full: torch.Tensor) -> None:

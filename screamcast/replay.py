@@ -28,8 +28,15 @@ model from a shock. Scales below the taper are STRATA's own throughout.
 ``replay_plan`` is the schedule, ``Replay`` computes the increments of a distributed
 run (each rank analyses its own blocks, the coefficients are all-reduced, each rank
 evaluates them on its own pixels) and ``run_with_replay`` executes the schedule with a
-caller-supplied stepper. A regional run analyses the blocks of its window only: the
-increment is the low-passed window increment, zero outside.
+caller-supplied stepper.
+
+A regional run analyses the blocks of its window only. The low-pass of the window
+increment ``m delta`` (``m`` the window indicator) gives a cell near the window edge only
+the share of the kernel that lies inside: a uniform offset comes back at 50 % on the
+edge and 84 % one kernel width (about 47 km at ``ell_half`` 160) inside. With
+``normalize_edge`` the increment is divided by the low-passed indicator,
+``K*(m delta) / K*(m)``, so a uniform offset comes back whole everywhere in the window;
+away from the edge both equal the global operator.
 """
 
 from __future__ import annotations
@@ -162,7 +169,9 @@ class Replay(torch.nn.Module):
     ``(6, n, n)`` grid. Driver states are added with ``add_target`` as this rank's
     interior tiles; ``increment`` returns the forcing added after each step of the
     window centred on an analysis. With ``omega_lmax > 0`` (the run's omega high-pass)
-    the omega increment keeps no degree the high-pass removes.
+    the omega increment keeps no degree the high-pass removes. ``normalize_edge``
+    (regional runs only) divides the low-passed increment by the low-passed window
+    indicator, computed once at the first analysis.
     """
 
     def __init__(
@@ -177,9 +186,12 @@ class Replay(torch.nn.Module):
         ell_half: float,
         window_steps: int,
         omega_lmax: int = 0,
+        normalize_edge: bool = False,
         block: int = BLOCK,
     ) -> None:
         super().__init__()
+        if normalize_edge and not topology.is_regional:
+            raise ValueError("normalize_edge needs a regional topology (a window edge)")
         if topology.tile_size % block:
             raise ValueError(
                 f"tile size {topology.tile_size} is not a multiple of {block}"
@@ -231,6 +243,10 @@ class Replay(torch.nn.Module):
             if omega_lmax > 0 and name.rpartition("_")[0] == "omega":
                 gain[row, : (omega_lmax + 1) ** 2] = 0.0
         self.register_buffer("gain", gain, persistent=False)
+        self.normalize_edge = normalize_edge
+        # K*(m) on the blocks and on the fine pixels, set by the first analysis
+        self.register_buffer("edge_block", None, persistent=False)
+        self.register_buffer("edge_fine", None, persistent=False)
 
     def _blocks(self, tiles: torch.Tensor) -> torch.Tensor:
         """``(C, tiles, ts, ts)`` -> ``(C, blocks)`` block means, float64."""
@@ -249,6 +265,26 @@ class Replay(torch.nn.Module):
             torch.distributed.all_reduce(t)
         return t
 
+    def _edge(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """The low-passed window indicator ``K*(m)`` on the blocks and the fine pixels.
+        Its coefficients depend on the grid only: computed at the first call and kept.
+        Collective."""
+        if self.edge_fine is None:
+            ones = torch.ones_like(self.area_block)[None]
+            coeffs = sh_analysis(
+                ones, self.colat_block, self.lon_block, self.area_block, self.lmax
+            )
+            coeffs = self._all_reduce(coeffs) * gaussian_gain(
+                self.lmax, self.ell_half, device=coeffs.device
+            )
+            self.edge_block = sh_synthesis(
+                coeffs, self.colat_block, self.lon_block, self.lmax
+            )[0]
+            self.edge_fine = sh_synthesis(
+                coeffs, self.colat_fine, self.lon_fine, self.lmax
+            )[0]
+        return self.edge_block, self.edge_fine
+
     @torch.no_grad()
     def increment(self, x: torch.Tensor, hour: int) -> tuple[torch.Tensor, dict]:
         """Forcing ``(1, C_in, tiles, ts, ts)`` added after each step of the window centred
@@ -260,6 +296,11 @@ class Replay(torch.nn.Module):
         )
         coeffs = self._all_reduce(coeffs) * self.gain
         low_blocks = sh_synthesis(coeffs, self.colat_block, self.lon_block, self.lmax)
+        low = sh_synthesis(coeffs, self.colat_fine, self.lon_fine, self.lmax)
+        if self.normalize_edge:
+            edge_block, edge_fine = self._edge()
+            low_blocks = low_blocks / edge_block
+            low = low / edge_fine
         w = self.area_block
         sums = torch.stack(
             [
@@ -273,7 +314,6 @@ class Replay(torch.nn.Module):
             name: (float(torch.sqrt(raw / area)), float(torch.sqrt(low / area)))
             for name, raw, low, area in zip(self.names, sums[0], sums[1], sums[2])
         }
-        low = sh_synthesis(coeffs, self.colat_fine, self.lon_fine, self.lmax)
         forcing = torch.zeros(
             1, self.n_in, *self.tile_shape, dtype=x.dtype, device=x.device
         )
