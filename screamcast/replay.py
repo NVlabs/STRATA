@@ -286,7 +286,22 @@ class Replay(torch.nn.Module):
     def add_target(self, hour: int, local_tiles: torch.Tensor) -> None:
         """Driver state at ``+hour`` as this rank's ``(1, C_in, tiles, ts, ts)`` tiles."""
         sel = local_tiles[0, self.channel_index.to(local_tiles.device)]
-        blocks = self._blocks(sel).to(self.gain.device)
+        self._set_target(hour, self._blocks(sel))
+
+    def add_block_target(self, hour: int, blocks: torch.Tensor) -> None:
+        """Driver block means at ``+hour``, ``(C, tiles, ts/8, ts/8)`` float64 for the
+        channels ``self.names`` on this rank's tiles (``replay_targets``)."""
+        ts = self.tile_shape[1] // self.block
+        want = (len(self.names), self.tile_shape[0], ts, ts)
+        if tuple(blocks.shape) != want or blocks.dtype != torch.float64:
+            raise ValueError(
+                f"block target {tuple(blocks.shape)} {blocks.dtype}, expected {want} "
+                "float64"
+            )
+        self._set_target(hour, blocks.reshape(len(self.names), -1))
+
+    def _set_target(self, hour: int, blocks: torch.Tensor) -> None:
+        blocks = blocks.to(self.gain.device)
         if not torch.isfinite(blocks).all():
             raise ValueError(f"replay driver at +{hour} h has non-finite values")
         self.targets[hour] = blocks

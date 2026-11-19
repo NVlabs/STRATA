@@ -109,6 +109,18 @@ from screamcast.replay import (
     replay_plan,
     run_with_replay,
 )
+from screamcast.replay_targets import (
+    MODES as PRODUCER_MODES,
+)
+from screamcast.replay_targets import (
+    ProducerProcess,
+    TargetReader,
+    load_spec,
+    make_source,
+    mark,
+    source_hours,
+    target_gates,
+)
 from screamcast.sht_omega_filter import DistributedSHTHighpass
 from screamcast.tile_jitter import JitteredModel
 from screamcast.vertical_interpolation import log_pressure_interpolate
@@ -368,6 +380,43 @@ def parse_args() -> argparse.Namespace:
         "--replay-vars",
         default=",".join(REPLAY_DEFAULT_VARS),
         help="Comma-separated input variables that receive the increment.",
+    )
+    parser.add_argument(
+        "--replay-onthefly",
+        default=None,
+        metavar="SPEC.json",
+        help=(
+            "Build the replay targets while the run goes instead of reading "
+            "--driver-stores: a producer process on rank 0's GPU builds the 8 x 8 "
+            "block means of each analysis hour from ERA5 (ARCO) or ECMWF HRES open "
+            "data into --replay-target-dir. SPEC names the source and the fast_ic "
+            "inputs; see screamcast/replay_targets.py and docs/replay.md."
+        ),
+    )
+    parser.add_argument(
+        "--replay-target-dir",
+        default=None,
+        help=(
+            "--replay-onthefly: directory of the targets, on a file system every "
+            "rank sees. Targets already there (an earlier run) are kept if they "
+            "cover this run."
+        ),
+    )
+    parser.add_argument(
+        "--replay-producer",
+        choices=PRODUCER_MODES,
+        default="gated",
+        help=(
+            "--replay-onthefly: 'gated' builds each target after the first once the "
+            "run begins the analysis before it; 'ahead' builds every target as early "
+            "as it can; 'serial' builds each one when the run needs it (the run waits)."
+        ),
+    )
+    parser.add_argument(
+        "--replay-target-timeout",
+        type=float,
+        default=3600.0,
+        help="--replay-onthefly: seconds a rank waits for a target before it fails.",
     )
     parser.add_argument(
         "--replay-level-ramp",
@@ -995,13 +1044,23 @@ def main() -> None:
                 f"--replay-level-ramp PFULL,PZERO needs PZERO > PFULL (hPa), got "
                 f"{args.replay_level_ramp!r}"
             )
+    if args.replay_onthefly is not None:
+        if not args.replay:
+            raise ValueError("--replay-onthefly needs --replay")
+        if args.replay_target_dir is None:
+            raise ValueError("--replay-onthefly needs --replay-target-dir")
+        load_spec(args.replay_onthefly)  # fail before start-up on a bad spec
     if args.replay:
         if correction != "none":
             raise ValueError("--replay needs --correction none")
-        if not args.driver_stores and args.ic_store is not None:
+        if (
+            not args.driver_stores
+            and args.replay_onthefly is None
+            and args.ic_store is not None
+        ):
             raise ValueError(
-                "--replay with --ic-store needs --driver-stores (the IC store holds "
-                "one frame)"
+                "--replay with --ic-store needs --driver-stores or --replay-onthefly "
+                "(the IC store holds one frame)"
             )
 
     DistributedManager.initialize()
@@ -1229,6 +1288,11 @@ def main() -> None:
         "replay_ell_half": args.replay_ell_half if args.replay else None,
         "replay_vars": args.replay_vars if args.replay else None,
         "replay_level_ramp": args.replay_level_ramp,
+        "replay_onthefly": (
+            load_spec(args.replay_onthefly) if args.replay_onthefly else None
+        ),
+        "replay_target_dir": args.replay_target_dir,
+        "replay_producer": args.replay_producer if args.replay_onthefly else None,
         "replay_region_edge": (
             args.replay_region_edge if args.replay and args.region else None
         ),
@@ -1427,7 +1491,8 @@ def main() -> None:
             plev_store = zarr.open_group(plev_output_path, mode="a")
 
     dt_hours = float(model.dt / np.timedelta64(1, "h"))
-    needs_drivers = args.replay or (
+    onthefly = args.replay_onthefly is not None
+    needs_drivers = (args.replay and not onthefly) or (
         topology.is_regional and args.region_boundary == "anchored"
     )
     drivers = (
@@ -1437,6 +1502,8 @@ def main() -> None:
     )
     replay = None
     replay_target = None
+    target_reader = None
+    producer = None
     plan = []
     if args.replay:
         steps_per_hour = round(1.0 / dt_hours)
@@ -1444,7 +1511,13 @@ def main() -> None:
             raise ValueError(
                 f"--replay needs whole hours: {n_steps} steps of {dt_hours * 60:g} min"
             )
-        driver_hours = {int(h) for h, *_ in drivers if float(h).is_integer()}
+        if onthefly:
+            replay_source = make_source(load_spec(args.replay_onthefly))
+            driver_hours = source_hours(
+                replay_source, t0, range(n_steps // steps_per_hour + 1)
+            )
+        else:
+            driver_hours = {int(h) for h, *_ in drivers if float(h).is_integer()}
         plan = replay_plan(
             n_steps // steps_per_hour, args.replay_every_hours, driver_hours
         )
@@ -1491,9 +1564,47 @@ def main() -> None:
         )
 
         def replay_target(hours: float, full: torch.Tensor) -> None:
-            if hours in analyses:
+            if hours in analyses and not onthefly:
                 replay.add_target(int(hours), topology.faces_to_local_tiles(full))
                 logger.info("replay target +%g h loaded", hours)
+
+        if onthefly:
+            gates = target_gates(plan)
+            if rank == 0:
+                visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+                gpu = str(device.index)
+                if visible:
+                    gpu = visible.split(",")[device.index]
+                producer = ProducerProcess(
+                    spec=args.replay_onthefly,
+                    out_dir=args.replay_target_dir,
+                    run_init=t0,
+                    hours=[h for h, _ in gates],
+                    gates=[g for _, g in gates],
+                    mode=args.replay_producer,
+                    stems=args.replay_vars.split(","),
+                    tile_size=topology.tile_size,
+                    face_size=topology.face_size,
+                    region=args.region,
+                    gpu=gpu,
+                )
+                logger.info(
+                    "replay targets on the fly (%s, %s) on GPU %s -> %s",
+                    replay_source.describe(t0),
+                    args.replay_producer,
+                    gpu,
+                    args.replay_target_dir,
+                )
+            torch.distributed.barrier()  # the producer has cleared old markers
+            target_reader = TargetReader(
+                args.replay_target_dir,
+                replay.names,
+                topology,
+                t0,
+                mode=args.replay_producer,
+                timeout=args.replay_target_timeout,
+            )
+            target_reader.prefetch(sorted(analyses))
 
     logger.info("opening initial condition")
     before_step = None
@@ -1544,7 +1655,7 @@ def main() -> None:
         )
     logger.info("initial condition loaded")
     in_vars = list(in_coords["variable"])
-    if replay is not None:
+    if replay is not None and not onthefly:
         for driver in drivers:
             if driver[0] in analyses and int(driver[0]) not in replay.targets:
                 replay_target(
@@ -1781,6 +1892,21 @@ def main() -> None:
         )
 
         def increment(state, hour):
+            if target_reader is not None:
+                if producer is not None and args.replay_producer == "gated":
+                    # the producer builds the next target from here on, on this GPU
+                    torch.cuda.empty_cache()
+                    mark(args.replay_target_dir, "analysis", target_reader.valid(hour))
+                blocks, info = target_reader.get(hour)
+                replay.add_block_target(hour, torch.from_numpy(blocks))
+                logger.info(
+                    "replay target +%d h: waited %.1f s here (producer %.1f s, read "
+                    "%.1f s)",
+                    hour,
+                    info["blocked_s"],
+                    info["waited_s"],
+                    info["read_s"],
+                )
             forcing, stats = replay.increment(state[0], hour)
             for name in (
                 n
@@ -1804,6 +1930,11 @@ def main() -> None:
             increment,
             copy=lambda state: (state[0].clone(), dict(state[1])),
         )
+        if target_reader is not None:
+            target_reader.close()
+        if producer is not None:
+            code = producer.close()
+            logger.info("replay target producer exited with code %s", code)
 
     if writer is not None:
         writer.close()
