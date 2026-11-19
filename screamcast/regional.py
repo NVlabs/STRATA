@@ -113,19 +113,34 @@ def faces_to_box(
     return out
 
 
+def block_means(box: torch.Tensor, n: int) -> torch.Tensor:
+    """``n x n`` block means of ``(..., H, W)``, float64 ``(..., H/n, W/n)``."""
+    H, W = box.shape[-2:]
+    if H % n or W % n:
+        raise ValueError(f"box {H} x {W} is not a multiple of the block size {n}")
+    coarse = F.avg_pool2d(box.reshape(-1, 1, H, W).double(), n)
+    return coarse.reshape(*box.shape[:-2], H // n, W // n)
+
+
+def upsample(coarse: torch.Tensor, n: int, dtype: torch.dtype) -> torch.Tensor:
+    """Block means ``(..., h, w)`` back on the ``(..., n h, n w)`` pixels, bilinearly
+    (cell-centred, edges clamped)."""
+    h, w = coarse.shape[-2:]
+    fine = F.interpolate(
+        coarse.reshape(-1, 1, h, w),
+        scale_factor=n,
+        mode="bilinear",
+        align_corners=False,
+    )
+    return fine.to(dtype).reshape(*coarse.shape[:-2], h * n, w * n)
+
+
 def smooth(box: torch.Tensor, n: int) -> torch.Tensor:
     """``n x n`` block means of ``(..., H, W)`` upsampled back bilinearly (cell-centred,
     edges clamped). ``n = 1`` returns ``box``. A constant stays constant."""
     if n == 1:
         return box
-    H, W = box.shape[-2:]
-    if H % n or W % n:
-        raise ValueError(f"box {H} x {W} is not a multiple of the block size {n}")
-    lead = box.shape[:-2]
-    flat = box.reshape(-1, 1, H, W)
-    coarse = F.avg_pool2d(flat.double(), n)
-    fine = F.interpolate(coarse, scale_factor=n, mode="bilinear", align_corners=False)
-    return fine.to(box.dtype).reshape(*lead, H, W)
+    return upsample(block_means(box, n), n, box.dtype)
 
 
 def edge_distance(topology: TileTopology, tiles: list[Tile]) -> torch.Tensor:
@@ -171,6 +186,10 @@ class AnchoredBoundary:
     ``time_h`` (set by the caller before each step) selects the linear-in-time blend of
     the two driver states around it. Ring calls need every channel at once
     (``--halo-channel-chunk 0``).
+
+    A driver may also come as its ``block x block`` means of the box, ``(C, H/block,
+    W/block)`` (``driver0_blocks``, ``add_blocks``; the on-the-fly targets of
+    ``replay_targets``): ``smooth`` is those means upsampled.
     """
 
     def __init__(
@@ -178,11 +197,14 @@ class AnchoredBoundary:
         *,
         topology: TileTopology,
         ic_box: torch.Tensor,
-        driver0: torch.Tensor,
         block: int,
         device: torch.device,
+        driver0: torch.Tensor | None = None,
+        driver0_blocks: torch.Tensor | None = None,
         channel_chunk: int = 16,
     ) -> None:
+        if (driver0 is None) == (driver0_blocks is None):
+            raise ValueError("give the initial driver as driver0 or driver0_blocks")
         origin, size = ring_box(topology)
         if tuple(ic_box.shape[-2:]) != size or ic_box.ndim != 3:
             raise ValueError(
@@ -191,14 +213,18 @@ class AnchoredBoundary:
         self.topology = topology
         self.origin = origin
         self.shape = tuple(ic_box.shape)
+        self.dtype = ic_box.dtype
         self.block = int(block)
         self.device = device
         self.channel_chunk = int(channel_chunk)
         self.hours: list[float] = []
         self.ring: dict[float, torch.Tensor] = {}
         self._ring_ic = topology.box_to_tiles(ic_box, topology.ring_tiles, origin)
-        self._base = self._smooth_ring(driver0)
-        self.add(0.0, driver0)
+        if driver0 is not None:
+            self._base = self._smooth_ring(driver0)
+        else:
+            self._base = self._ring_of_blocks(driver0_blocks)
+        self._add_ring(0.0, self._base)
         self.time_h = 0.0
 
     def _smooth_ring(self, box: torch.Tensor) -> torch.Tensor:
@@ -218,10 +244,34 @@ class AnchoredBoundary:
         ]
         return torch.cat(parts, dim=0)
 
+    def _ring_of_blocks(self, coarse: torch.Tensor) -> torch.Tensor:
+        """The ring tiles of ``smooth`` given the box's block means ``(C, H/b, W/b)``."""
+        want = (self.shape[0], self.shape[1] // self.block, self.shape[2] // self.block)
+        if tuple(coarse.shape) != want:
+            raise ValueError(f"driver blocks {tuple(coarse.shape)}, expected {want}")
+        parts = [
+            self.topology.box_to_tiles(
+                upsample(
+                    coarse[c : c + self.channel_chunk].double(), self.block, self.dtype
+                ),
+                self.topology.ring_tiles,
+                self.origin,
+            )
+            for c in range(0, coarse.shape[0], self.channel_chunk)
+        ]
+        return torch.cat(parts, dim=0)
+
     def add(self, h: float, box: torch.Tensor) -> None:
         """Add the driver state ``h`` hours after the initial time."""
+        self._add_ring(h, self._smooth_ring(box))
+
+    def add_blocks(self, h: float, coarse: torch.Tensor) -> None:
+        """Add the driver ``h`` hours after the initial time, as its block means."""
+        self._add_ring(h, self._ring_of_blocks(coarse))
+
+    def _add_ring(self, h: float, smoothed: torch.Tensor) -> None:
         h = float(h)
-        ring = self._ring_ic + (self._smooth_ring(box) - self._base)
+        ring = self._ring_ic + (smoothed - self._base)
         if not torch.isfinite(ring).all():
             raise ValueError(f"boundary ring at +{h} h is not finite")
         self.ring[h] = ring.to(self.device)

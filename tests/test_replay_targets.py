@@ -37,8 +37,14 @@ import zarr
 from screamcast import replay_targets as rt
 from screamcast.distributed_halo import TileTopology
 from screamcast.initial_conditions.fast_ic import Era5, build_ic, load_map, load_vert
-from screamcast.regional import parse_region
-from screamcast.replay import Replay, replay_plan
+from screamcast.regional import (
+    AnchoredBoundary,
+    block_means,
+    faces_to_box,
+    parse_region,
+    ring_box,
+)
+from screamcast.replay import Replay, ReplayStep, replay_plan
 from tests.test_regional import _cube_area, _cube_latlon
 
 FACE, TILE = 64, 16  # 2 x 2 blocks per tile
@@ -47,6 +53,7 @@ NLAT, NLON = 9, 16
 PLEV_HPA = np.array([50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000])
 STEMS = ["U", "qv", "T_2m"]
 REGION = "3,1,3,1,3"  # 2 x 2 tiles of face 3
+EDGE_REGION = "3,3,5,1,2"  # 2 tiles, across the edge to the north polar face (turned)
 
 
 # ------------------------------------------------------------------ fixtures
@@ -229,6 +236,63 @@ def test_producer_blocks_are_the_driver_store_blocks(inputs, tmp_path, region):
     assert np.isfinite(stored).sum() == len(names) * n_blocks  # NaN off the crop
 
 
+@pytest.mark.parametrize("region", [REGION, EDGE_REGION])
+def test_ring_blocks_are_the_driver_store_blocks(inputs, tmp_path, region):
+    """The producer's window-and-ring targets, read back as the ring box, against the
+    block means the ring takes of a driver store's state (``faces_to_box``), on one
+    face and across a turned face edge."""
+    spec, _ = inputs
+    state = _era5(3)
+    topo = _topology(region)
+    names, faces = _store_faces(spec, state)
+    want = block_means(faces_to_box(faces[0], topo, *ring_box(topo)), 8)
+
+    tiles = rt.producer_tiles(region, TILE, FACE, ring=True)
+    assert len(tiles) == len(topo.global_tiles) + len(topo.ring_tiles)
+    path = str(tmp_path / "ring.zarr")
+    rt.write_target(
+        path,
+        _builder(spec, tiles)(state),
+        channels=names,
+        tiles=tiles,
+        tile_size=TILE,
+        face_size=FACE,
+        valid=np.datetime64("2024-09-25T18"),
+        history="test",
+        source="synthetic",
+    )
+    got = torch.from_numpy(rt.read_box_blocks(path, names[::-1], topo))
+    torch.testing.assert_close(got, want.flip(0), rtol=1e-13, atol=0)
+
+
+def test_ring_from_block_means_is_the_ring_from_boxes():
+    """``AnchoredBoundary`` given block means equals the one given full driver boxes,
+    and a uniform driver change c moves the ring by c."""
+    topo = _topology(EDGE_REGION)
+    _, (h, w) = ring_box(topo)
+    rng = np.random.default_rng(0)
+    ic, d0, d6 = (
+        torch.from_numpy(rng.normal(size=(3, h, w))).float() for _ in range(3)
+    )
+    d12 = d0 + torch.tensor([2.0, 0.0, -1.0])[:, None, None]
+    kw = dict(topology=topo, ic_box=ic, block=8, device=torch.device("cpu"))
+    boxes = AnchoredBoundary(driver0=d0, **kw)
+    blocks = AnchoredBoundary(driver0_blocks=block_means(d0, 8), **kw)
+    for hour, d in ((6, d6), (12, d12)):
+        boxes.add(hour, d)
+        blocks.add_blocks(hour, block_means(d, 8))
+    for hour in (0, 6, 12):
+        torch.testing.assert_close(blocks.ring[hour], boxes.ring[hour], rtol=0, atol=0)
+    ring_ic = topo.box_to_tiles(ic, topo.ring_tiles, ring_box(topo)[0])
+    shift = (blocks.ring[12] - ring_ic).reshape(3, -1)
+    torch.testing.assert_close(shift[:, 0], torch.tensor([2.0, 0.0, -1.0]))
+    assert float((shift - shift[:, :1]).abs().max()) < 1e-5
+    with pytest.raises(ValueError, match="driver blocks"):
+        blocks.add_blocks(18, block_means(d0, 8)[:, :-1])
+    with pytest.raises(ValueError, match="driver0 or driver0_blocks"):
+        AnchoredBoundary(**kw)
+
+
 def test_column_groups_give_the_same_bits(inputs, tmp_path):
     """Each column's build is independent of the others: one tile per group equals the
     whole grid in one group, bit for bit (``compare``)."""
@@ -286,7 +350,40 @@ def test_hres_hours_follow_the_open_data_steps():
     late = t0 + np.timedelta64(138, "h")
     assert rt.source_hours(src, late, range(25)) == {0, 3, 6, 12, 18, 24}
     plan = replay_plan(24, 6, rt.source_hours(src, late, range(25)))
-    assert rt.target_gates(plan) == [(6, None), (12, 6), (18, 12)]
+    assert rt.target_schedule(plan) == [(6, None), (12, 6), (18, 12)]
+    assert rt.ring_hours(src, late, 6, 23.83) == [0, 6, 12, 18, 24]
+    with pytest.raises(ValueError, match=r"\[9, 15, 21\]"):  # leads 147, 153, 159
+        rt.ring_hours(src, late, 3, 23.83)
+
+
+def test_schedule_reads_ring_drivers_before_the_steps_reach_them():
+    """Ring states bracket every step: the window ending at hour k needs the ring hours
+    up to the first at or after k. The ring hour 12 is first read by the corrector of
+    the analysis at 6 (hours 7-9), so a gated producer builds it after that analysis."""
+    plan = replay_plan(24, 6, {6, 12, 18})
+    assert rt.target_schedule(plan, [0, 6, 12, 18, 24]) == [
+        (0, None),
+        (6, None),
+        (12, 6),
+        (18, 12),
+        (24, 18),
+    ]
+    # a window without replay: no analyses, nothing to gate on
+    windows = [ReplayStep("window", h) for h in range(1, 25)]
+    assert rt.target_schedule(windows, [0, 6, 12, 18, 24]) == [
+        (h, None) for h in (0, 6, 12, 18, 24)
+    ]
+    # 3-hourly analyses on 6-hourly ring drivers
+    plan = replay_plan(12, 2, {2, 4, 6, 8, 10})
+    assert rt.target_schedule(plan, [0, 6, 12]) == [
+        (0, None),
+        (6, None),
+        (2, None),
+        (4, 2),
+        (12, 6),  # first read by the corrector of the analysis at 6 (hour 7)
+        (8, 6),
+        (10, 8),
+    ]
 
 
 def test_era5_has_every_hour():
@@ -395,6 +492,7 @@ def _produce_args(spec_path, out_dir, mode, region=None):
         mode=mode,
         vars=",".join(STEMS),
         region=region,
+        ring=False,
         tile_size=TILE,
         face_size=FACE,
         group_columns=1 << 21,
@@ -419,7 +517,13 @@ def test_producer_builds_every_target_in_each_mode(inputs, tmp_path, monkeypatch
 
     topo = _topology(REGION)
     reader = rt.TargetReader(
-        str(tmp_path), rt.target_channels(STEMS), topo, t0, mode=mode, timeout=5
+        str(tmp_path),
+        t0,
+        lambda path: rt.read_blocks(
+            path, rt.target_channels(STEMS), topo.local_tiles, TILE
+        ),
+        mode=mode,
+        timeout=5,
     )
     reader.prefetch([6, 12])
     tiles = rt.producer_tiles(REGION, TILE, FACE)
@@ -481,7 +585,7 @@ def test_reader_asks_for_a_missing_target(tmp_path):
     gated one retrying out of memory) waits for."""
     t0 = np.datetime64("2024-09-25T12")
     reader = rt.TargetReader(
-        str(tmp_path), ["U_0"], _topology(), t0, mode="serial", timeout=0.1
+        str(tmp_path), t0, lambda path: None, mode="serial", timeout=0.1
     )
     with pytest.raises(TimeoutError):
         reader.get(6)
@@ -524,6 +628,7 @@ def test_producer_process_failure_reaches_the_readers(tmp_path):
         tile_size=TILE,
         face_size=FACE,
         region=None,
+        ring=False,
         gpu=None,
     )
     assert not (tmp_path / "request_2024092518").exists()

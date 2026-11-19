@@ -133,7 +133,10 @@ def replay_channels(in_vars: list[str], replay_vars: list[str]) -> list[int]:
     found = {in_vars[ci] for ci in out} | {stem(in_vars[ci]) for ci in out}
     missing = sorted(set(replay_vars) - found)
     if missing:
-        raise ValueError(f"replay variables {missing} are not model inputs")
+        stems = sorted({channel_level(name)[0] for name in in_vars})
+        raise ValueError(
+            f"replay variables {missing} are not model inputs (the inputs are {stems})"
+        )
     return out
 
 

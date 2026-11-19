@@ -12,10 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Replay targets built while the run goes ("on the fly") instead of driver stores.
+"""Driver targets built while the run goes ("on the fly") instead of driver stores.
 
-A replay needs the driver only as 8 x 8-pixel block means at its analysis hours. A
-producer process builds them from the source while STRATA runs:
+The replay needs the driver only as 8 x 8-pixel block means at its analysis hours, and
+the anchored ring of a regional window only as the 8 x 8 block means of the window and
+its ring at the driver hours (its ``smooth`` with ``--boundary-block 8``). A producer
+process builds them from the source while STRATA runs:
 
     source state (ERA5 from ARCO, or ECMWF HRES open data)
       -> fast_ic.build_ic on one GPU, column group by column group
@@ -23,22 +25,25 @@ producer process builds them from the source while STRATA runs:
       -> <out-dir>/blocks_<YYYYMMDDHH>.zarr
 
 The fine state (9 GB for the globe) never goes to disk. A regional run's producer
-builds only the columns of the window's tiles. Each rank of the run reads the blocks of
-its own tiles (``TargetReader``, in a background thread so the analysis does not wait on
-the read) and hands them to ``Replay.add_block_target``. The block means are those
-``Replay.add_target`` takes of a driver store built by ``fast_ic`` or ``hres_forecast``
-from the same source state.
+builds only the columns of the window's tiles, and of its ring tiles when the ring is
+anchored. Each rank of the run reads, on a background thread (``TargetReader``), the
+blocks of its own tiles for ``Replay.add_block_target`` and the blocks of the window and
+ring box for ``AnchoredBoundary.add_blocks``. The block means are those
+``Replay.add_target`` and the ring take of a driver store built by ``fast_ic`` or
+``hres_forecast`` from the same source state.
 
 A target appears atomically: it is written to ``<name>.partial<pid>`` and renamed. The
 producer writes ``FAILED`` (with the traceback) if it fails and ``DONE`` after its last
 target; a reader waiting for a target stops on either, or after its timeout.
 
-Modes (``--replay-producer``):
+Modes (``--driver-producer``):
 
-- ``gated`` (default): the first target is built at once (during the run's start-up);
-  the GPU stage of each later one starts when the run begins the analysis before it.
-  The rank hosting the producer empties its CUDA cache first, so the build does not
-  meet the model's peak memory of start-up and compilation.
+- ``gated`` (default): the targets needed before the first analysis are built at once
+  (during the run's start-up); the GPU stage of each later one starts when the run
+  begins the last analysis before it needs that target. The rank hosting the producer
+  empties its CUDA cache first, so the build does not meet the model's peak memory of
+  start-up and compilation. A run without analyses (a window driven by the ring alone)
+  is not gated.
 - ``ahead``: every target as early as possible.
 - ``serial``: each target only when the run asks for it (``request_<stamp>``), and the
   run waits: the slowest mode, for debugging.
@@ -49,7 +54,8 @@ current one, and the zarr write runs on its own thread.
 Standalone (a dry run, or targets for later runs)::
 
     python -m screamcast.replay_targets produce --spec SPEC.json --out-dir DIR \\
-        --run-init 2024-09-25T12 --hours 6 12 18 [--region 3,10,14,7,11 --tile-size 128]
+        --run-init 2024-09-25T12 --hours 6 12 18 \\
+        [--region 3,10,14,7,11 --tile-size 128 [--ring]]
 
     python -m screamcast.replay_targets compare A B
 
@@ -81,7 +87,7 @@ import torch
 import zarr
 
 from screamcast.cubesphere_transforms import reorder_cubesphere_to_2d_tensor
-from screamcast.distributed_halo import TileTopology
+from screamcast.distributed_halo import TileTopology, plane_parts
 from screamcast.history import history_entry
 from screamcast.initial_conditions.fast_ic import (
     ARCO_ERA5,
@@ -92,7 +98,7 @@ from screamcast.initial_conditions.fast_ic import (
     load_vert,
 )
 from screamcast.initial_conditions.layout import NLEV_SUBSET, VARS_3D
-from screamcast.regional import parse_region
+from screamcast.regional import parse_region, ring_box
 from screamcast.replay import BLOCK, ReplayStep, block_mean
 
 FAILED = "FAILED"
@@ -233,12 +239,48 @@ def source_hours(
     return {h for h in hours if source.has(t0 + np.timedelta64(h, "h"))}
 
 
-def target_gates(plan: list[ReplayStep]) -> list[tuple[int, int | None]]:
-    """``(analysis hour, gate)`` in the order the run reads the targets. ``gate`` is the
-    analysis before it (None for the first): a ``gated`` producer builds the target
-    once the run has begun that analysis."""
-    hours = [s.hour for s in plan if s.kind == "analysis"]
-    return list(zip(hours, [None, *hours[:-1]]))
+def ring_hours(source, run_init: np.datetime64, every: int, end_h: float) -> list[int]:
+    """Driver hours of an anchored ring: every ``every`` hours from 0 to the first at or
+    after ``end_h`` (the time of the run's last step). The source must have them all."""
+    if every <= 0:
+        raise ValueError(f"ring driver interval must be positive, got {every}")
+    hours = list(range(0, int(np.ceil(end_h / every)) * every + 1, every))
+    missing = sorted(set(hours) - source_hours(source, run_init, hours))
+    if missing:
+        raise ValueError(
+            f"the source has no state at ring driver hours {missing} (every {every} h)"
+        )
+    return hours
+
+
+def target_schedule(
+    plan: list[ReplayStep], ring: list[int] = ()
+) -> list[tuple[int, int | None]]:
+    """``(hour, gate)`` of every target in the order the run first reads it: the
+    analysis hours of ``plan``, and the ``ring`` driver hours a window's steps
+    interpolate between (the steps of the window ending at hour ``k`` need the ring
+    hours up to the first at or after ``k``). ``gate`` is the last analysis the run
+    begins before it reads the target (None: before the first analysis), the one a
+    ``gated`` producer waits for."""
+    ring = sorted(ring)
+    gates: dict[int, int | None] = {}
+    last = None
+
+    def need_ring(upto: int) -> None:
+        for h in ring:
+            gates.setdefault(h, last)
+            if h >= upto:
+                break
+
+    if ring:
+        need_ring(0)
+    for step in plan:
+        if step.kind == "window" and ring:
+            need_ring(step.hour)
+        elif step.kind == "analysis":
+            gates.setdefault(step.hour, last)
+            last = step.hour
+    return list(gates.items())
 
 
 # ------------------------------------------------------------------ build
@@ -417,6 +459,32 @@ def read_blocks(path: str, channels: list[str], tiles, tile_size: int) -> np.nda
     )
 
 
+def read_box_blocks(
+    path: str, channels: list[str], topology: TileTopology
+) -> np.ndarray:
+    """Block means ``(channels, H/8, W/8)`` of a regional run's window and ring box
+    (``regional.ring_box``), in the plane's orientation, from a target store."""
+    group = zarr.open_group(path, mode="r")
+    have = list(group.attrs["variables"])
+    missing = [c for c in channels if c not in have]
+    if missing:
+        raise ValueError(f"{path} lacks {missing}")
+    idx = [have.index(c) for c in channels]
+    array = group["blocks"]
+    (r0, c0), (h, w) = ring_box(topology)
+    box = (r0 // BLOCK, (r0 + h) // BLOCK, c0 // BLOCK, (c0 + w) // BLOCK)
+    out = np.full((len(channels), h // BLOCK, w // BLOCK), np.nan)
+    nb = topology.face_size // BLOCK
+    for face, (fr0, fr1, fc0, fc1), (pr0, pr1, pc0, pc1), k in plane_parts(
+        topology.region_plane, box, nb
+    ):
+        part = np.asarray(array[:, face, fr0:fr1, fc0:fc1])[idx]
+        out[:, pr0 - box[0] : pr1 - box[0], pc0 - box[2] : pc1 - box[2]] = np.rot90(
+            part, k, axes=(-2, -1)
+        )
+    return out
+
+
 def _block_set(tiles, tile_size: int) -> set[tuple[int, int, int]]:
     tb = tile_size // BLOCK
     return {
@@ -499,12 +567,28 @@ def wait_for_target(
 # ------------------------------------------------------------------ producer
 
 
-def producer_tiles(region: str | None, tile_size: int, face_size: int) -> list:
-    """The tiles a producer builds: the window's, or every tile of the cube."""
+def producer_tiles(
+    region: str | None, tile_size: int, face_size: int, ring: bool = False
+) -> list:
+    """The tiles a producer builds: the window's (and its ring's, for an anchored
+    ring), or every tile of the cube."""
     n = face_size // tile_size
-    if region:
-        return list(parse_region(region, n))
-    return [(f, i, j) for f in range(6) for i in range(n) for j in range(n)]
+    if not region:
+        if ring:
+            raise ValueError("a ring needs a --region window")
+        return [(f, i, j) for f in range(6) for i in range(n) for j in range(n)]
+    window = parse_region(region, n)
+    if not ring:
+        return list(window)
+    topology = TileTopology(
+        world_size=1,
+        rank=0,
+        face_size=face_size,
+        tile_size=tile_size,
+        halo_width=0,
+        active_tiles=window,
+    )
+    return [*window, *topology.ring_tiles]
 
 
 def produce(args: argparse.Namespace) -> None:
@@ -533,7 +617,7 @@ def produce(args: argparse.Namespace) -> None:
         missing = [str(v) for v in valids if not source.has(v)]
         if missing:
             raise ValueError(f"{spec['source']} has no state at {missing}")
-        tiles = producer_tiles(args.region, args.tile_size, args.face_size)
+        tiles = producer_tiles(args.region, args.tile_size, args.face_size, args.ring)
         channels = target_channels(args.vars.split(","))
         todo = []
         for v in valids:
@@ -697,6 +781,7 @@ class ProducerProcess:
         tile_size: int,
         face_size: int,
         region: str | None,
+        ring: bool,
         gpu: str | None,
     ) -> None:
         if mode not in MODES:
@@ -728,6 +813,8 @@ class ProducerProcess:
         ]
         if region:
             cmd += ["--region", region]
+        if ring:
+            cmd.append("--ring")
         env = dict(os.environ)
         # a standalone process: none of the rank's launcher or torch.distributed identity
         for key in (
@@ -796,16 +883,16 @@ class ProducerProcess:
 
 
 class TargetReader:
-    """One rank's reader of the targets: the blocks of its own tiles, read on a
-    background thread (``prefetch``) so the analysis does not wait on the file system.
-    With a ``serial`` producer nothing is prefetched: ``get`` asks for each target."""
+    """A rank's reader of the targets, ``read(path)`` of each (its own tiles' blocks for
+    the replay, the window and ring box for the ring), on a background thread
+    (``prefetch``) so the run does not wait on the file system. With a ``serial``
+    producer nothing is prefetched: ``get`` asks for each target."""
 
     def __init__(
         self,
         out_dir: str,
-        channels: list[str],
-        topology: TileTopology,
         run_init: np.datetime64,
+        read: Callable[[str], np.ndarray],
         *,
         mode: str,
         timeout: float,
@@ -813,10 +900,8 @@ class TargetReader:
         if mode not in MODES:
             raise ValueError(f"producer mode must be one of {MODES}, got {mode!r}")
         self.out_dir = out_dir
-        self.channels = list(channels)
-        self.tiles = list(topology.local_tiles)
-        self.tile_size = topology.tile_size
         self.run_init = np.datetime64(run_init, "s")
+        self.read = read
         self.mode = mode
         self.timeout = timeout
         self.pool = ThreadPoolExecutor(1)
@@ -828,12 +913,7 @@ class TargetReader:
     def _load(self, hour: int) -> tuple[np.ndarray, dict]:
         waited = wait_for_target(self.out_dir, self.valid(hour), self.timeout)
         t = time.perf_counter()
-        blocks = read_blocks(
-            target_path(self.out_dir, self.valid(hour)),
-            self.channels,
-            self.tiles,
-            self.tile_size,
-        )
+        blocks = self.read(target_path(self.out_dir, self.valid(hour)))
         return blocks, {"waited_s": waited, "read_s": time.perf_counter() - t}
 
     def prefetch(self, hours: list[int]) -> None:
@@ -844,8 +924,8 @@ class TargetReader:
                 self.futures[hour] = self.pool.submit(self._load, hour)
 
     def get(self, hour: int) -> tuple[np.ndarray, dict]:
-        """``(channels, local tiles, tb, tb)`` block means of the target at ``+hour``
-        and timings, with ``blocked_s`` the seconds the caller waited here."""
+        """``read`` of the target at ``+hour`` and timings, with ``blocked_s`` the
+        seconds the caller waited here."""
         start = time.perf_counter()
         if not os.path.isdir(target_path(self.out_dir, self.valid(hour))):
             mark(self.out_dir, "request", self.valid(hour))
@@ -885,6 +965,11 @@ def main() -> None:
         help="replayed variables (all levels of the 3D ones)",
     )
     q.add_argument("--region", default=None, help="build only this --region window")
+    q.add_argument(
+        "--ring",
+        action="store_true",
+        help="also the window's ring tiles (anchored ring)",
+    )
     q.add_argument("--tile-size", type=int, default=128)
     q.add_argument("--face-size", type=int, default=2048)
     q.add_argument("--group-columns", type=int, default=1 << 21)
