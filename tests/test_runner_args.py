@@ -22,6 +22,7 @@ from unittest import mock
 import pytest
 
 WINDOW = "3,8,12,7,11"
+BOX = "0,20,-90,-70"
 
 
 @pytest.fixture(scope="module")
@@ -47,9 +48,15 @@ def runner():
         (["--region", WINDOW], False),
         (["--region", WINDOW, "--regional-averages"], True),
         (["--no-regional-averages"], False),
+        (["--region-latlon", BOX], False),
     ],
-    ids=["global", "window", "window-explicit-on", "global-explicit-off"],
+    ids=["global", "window", "window-explicit-on", "global-explicit-off", "box"],
 )
 def test_regional_averages_default(runner, argv, expected):
     """On for global runs, off for a --region window unless asked for."""
     assert runner.parse_args(argv).regional_averages is expected
+
+
+def test_region_and_region_latlon_exclude_each_other(runner):
+    with pytest.raises(SystemExit):
+        runner.parse_args(["--region", WINDOW, "--region-latlon", BOX])

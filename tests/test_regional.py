@@ -35,13 +35,17 @@ from screamcast.distributed_halo import (
     NormalizedHaloAdjoint,
     TileTopology,
     faces_to_plane,
+    from_plane,
     plane_blocks,
+    to_plane,
 )
 from screamcast.regional import (
     AnchoredBoundary,
     ReplicateRing,
+    box_mask,
     edge_distance,
     faces_to_box,
+    find_box_region,
     find_region,
     nearest_pixel,
     parse_region,
@@ -656,6 +660,116 @@ def test_find_region_refuses_a_window_too_large_for_a_plane(grid):
     lat, lon = _faces_deg(grid)
     with pytest.raises(ValueError, match="fewer tiles"):
         find_region(lat, lon, float(lat[4, 96, 96]), float(lon[4, 96, 96]), 5, TILE)
+
+
+# ------------------------------------------------------- window from a lat/lon box
+
+# 12 tiles per face side, so a box leaves room to choose among windows
+BIG = 2 * FACE
+BOXES = {
+    "face": (-10.0, 10.0, -10.0, 10.0),  # the centre of face 0
+    "east_edge": (-10.0, 10.0, 35.0, 55.0),  # across lon 45: faces 0 and 1
+    "north_edge": (38.0, 52.0, -8.0, 8.0),  # across the north edge of face 0
+    "dateline": (-10.0, 10.0, 170.0, -170.0),  # the centre of face 2
+}
+
+
+@pytest.fixture(scope="module")
+def big_grid():
+    lat, lon = _cube_latlon(BIG, 0)
+    return lat.numpy().astype(np.float64), lon.numpy().astype(np.float64)
+
+
+def _window_holds(lat, lon, box, tiles, world_size, margin):
+    """The run's own check (TileTopology), and every box cell ``margin`` tiles inside."""
+    try:
+        topo = TileTopology(
+            world_size=world_size,
+            rank=0,
+            face_size=BIG,
+            tile_size=TILE,
+            halo_width=HALO,
+            active_tiles=tiles,
+        )
+    except ValueError:
+        return False
+    _, r0, r1, c0, c1 = topo.region_pixel_box()
+    m = margin * TILE
+    for f, p, q in zip(*np.nonzero(box_mask(lat, lon, box))):
+        try:
+            P, Q = to_plane(topo.region_plane, int(f), int(p), int(q), BIG)
+        except ValueError:
+            return False  # a box cell off the window's plane
+        if not (r0 + m <= P < r1 - m and c0 + m <= Q < c1 - m):
+            return False
+    return True
+
+
+@pytest.mark.parametrize("world_size", [4, 6])
+@pytest.mark.parametrize("name", sorted(BOXES))
+def test_the_box_window_holds_the_box_and_is_locally_minimal(
+    big_grid, name, world_size
+):
+    lat, lon = big_grid
+    box = BOXES[name]
+    spec, margin = find_box_region(lat, lon, box, TILE, world_size, margin_tiles=1)
+    assert margin >= 1
+    tiles = parse_region(spec, BIG // TILE)
+    assert len(tiles) % world_size == 0
+    assert _window_holds(lat, lon, box, tiles, world_size, 1)
+    # without any one edge row or column of tiles the window no longer does
+    topo = TileTopology(
+        world_size=world_size,
+        rank=0,
+        face_size=BIG,
+        tile_size=TILE,
+        halo_width=HALO,
+        active_tiles=tiles,
+    )
+    _, i0, i1, j0, j1 = topo.region_box
+    for a0, a1, b0, b1 in (
+        (i0 + 1, i1, j0, j1),
+        (i0, i1 - 1, j0, j1),
+        (i0, i1, j0 + 1, j1),
+        (i0, i1, j0, j1 - 1),
+    ):
+        smaller = tuple(
+            from_plane(topo.region_plane, i, j, BIG // TILE)
+            for i in range(a0, a1)
+            for j in range(b0, b1)
+        )
+        assert not _window_holds(lat, lon, box, smaller, world_size, 1)
+
+
+def test_a_box_across_a_face_edge_gets_the_joined_plane(big_grid):
+    lat, lon = big_grid
+    for name, plane in (
+        ("east_edge", plane_blocks(0, east=True)),
+        ("north_edge", plane_blocks(0, north=True)),
+    ):
+        spec, _ = find_box_region(lat, lon, BOXES[name], TILE, 4)
+        assert region_plane_of(spec, BIG // TILE) == plane
+
+
+def test_a_dateline_box_is_the_arc_east_of_lon0(big_grid):
+    lat, lon = big_grid
+    mask = box_mask(lat, lon, BOXES["dateline"])
+    assert mask.any()
+    assert np.all(np.abs(lon[mask]) >= 170) and np.all(np.abs(lat[mask]) <= 10)
+    assert set(np.nonzero(mask)[0].tolist()) == {2}
+
+
+@pytest.mark.parametrize(
+    "box",
+    [
+        (-52.0, -38.0, -8.0, 8.0),  # across the south edge of face 0
+        (-38.0, 38.0, -38.0, 38.0),  # most of face 0: no room for margin and ring
+    ],
+)
+def test_a_box_no_plane_can_hold_is_refused(big_grid, box):
+    lat, lon = big_grid
+    with pytest.raises(ValueError, match="not supported"):
+        find_box_region(lat, lon, box, TILE, 4)
 
 
 def test_parse_region_rejects_malformed_specs():

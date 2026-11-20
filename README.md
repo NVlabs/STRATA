@@ -222,7 +222,7 @@ diagnostic output and does not feed back into the forecast.
 The forecast is written to the Zarr store `$OUTPUT`, and area-weighted
 regional means (global, land, ocean, tropics, extratropics) of every output
 channel to `${OUTPUT}_regional_averages.nc` (`--no-zarr-output` writes only
-the latter). Arrays in the store are `(time, step, face, x, y)` for 2-D fields
+the latter; off by default for a regional window). Arrays in the store are `(time, step, face, x, y)` for 2-D fields
 and `(time, step, level, face, x, y)` for 3-D fields, on the six
 2048 × 2048 cube faces:
 
@@ -314,8 +314,12 @@ globe; on one node of 8 H100 GPUs an 8 x 8-tile window (about 5,000 km across) r
 window's edge
 is the initial state plus the large-scale change of a driver, for example an ECMWF HRES
 forecast built with `screamcast.initial_conditions.hres_forecast`, and STRATA runs
-freely inside. `python -m screamcast.regional --lat .. --lon .. --tiles 8 --latlon
-$AUX_DATA_ROOT/latlon_ne1024pg2.nc` prints a window around a point.
+freely inside. `--region-latlon LAT0,LAT1,LON0,LON1` instead picks the smallest window
+that holds a lat/lon box with a tile to spare (`--region-margin-tiles`); `python -m
+screamcast.regional --latlon-box .. --world-size 8 --latlon
+$AUX_DATA_ROOT/latlon_ne1024pg2.nc` prints the same window, and `--lat .. --lon ..
+--tiles 8` one around a point. With `--region` the regional means are off unless
+`--regional-averages` is given.
 [`docs/regional_window.md`](docs/regional_window.md) has the commands and the
 limitations.
 

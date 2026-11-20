@@ -44,6 +44,33 @@ python -m screamcast.regional --lat 12 --lon 0 --tiles 8 \
 It tries the point's own face first, then the planes that join it to a neighbour, and
 moves the window as little as needed to keep its ring on the plane.
 
+### A window from a lat/lon box
+
+`--region-latlon LAT0,LAT1,LON0,LON1` lets the runner choose the window. The box runs
+east from `LON0` to `LON1`, so `170,-170` crosses the dateline. The window holds every
+grid cell of the box with at least `--region-margin-tiles` whole tiles (default 1)
+between them and the driven ring, keeps its ring on one plane, and has a multiple of
+the world size of tiles; among those it has the fewest tiles, then the largest margin,
+then the most centred box. The run logs the chosen `--region`, and the output records
+both (`region`, `region_latlon`), so `--region` reproduces it. To see the window first:
+
+```bash
+python -m screamcast.regional --latlon-box 8,18,-91,-79 --world-size 8 \
+  --latlon "$AUX_DATA_ROOT/latlon_ne1024pg2.nc"
+```
+
+```text
+3,8,13,4,12
+# 5 x 8 tiles (40), 1-tile margin, world size 8; corners:
+#   lat    0.02  lon  247.52
+#   lat    0.02  lon  292.48
+#   lat   26.26  lon  247.52
+#   lat   26.26  lon  292.48
+```
+
+A box that needs a ring across an equatorial face's south edge or a cube corner, or is
+too large for one plane, is refused with the reason.
+
 ## The boundary
 
 `--region-boundary anchored` (the default) fills the ring with the initial state plus

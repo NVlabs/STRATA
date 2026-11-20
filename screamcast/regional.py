@@ -32,7 +32,8 @@ one-tile ``ring`` around the region, whose values come from a ring source:
   information enters; useful as a baseline.
 
 ``python -m screamcast.regional --lat .. --lon .. --tiles N`` prints a ``--region``
-for a window of ``N x N`` tiles around a point.
+for a window of ``N x N`` tiles around a point, ``--latlon-box LAT0,LAT1,LON0,LON1
+--world-size N`` the smallest window that holds a lat/lon box (``find_box_region``).
 """
 
 from __future__ import annotations
@@ -351,6 +352,127 @@ def find_region(
     return best[1]
 
 
+# Every region plane, simplest first: single faces, then east and north joins.
+ALL_PLANES = (
+    [(f, False, False) for f in range(6)]
+    + [(f, False, True) for f in range(4)]
+    + [(f, True, False) for f in range(4)]
+)
+
+
+def box_mask(
+    lat_faces: np.ndarray, lon_faces: np.ndarray, box: tuple[float, float, float, float]
+) -> np.ndarray:
+    """Grid cells inside ``box = (lat0, lat1, lon0, lon1)`` (degrees): ``lat0 <= lat <=
+    lat1`` and the longitude on the arc running east from ``lon0`` to ``lon1``, so
+    ``lon0 > lon1`` (e.g. ``170, -170``) crosses the dateline."""
+    lat0, lat1, lon0, lon1 = box
+    if not lat0 < lat1:
+        raise ValueError(f"latitude range {lat0}..{lat1} is empty")
+    width = (lon1 - lon0) % 360
+    if width == 0 and lon1 != lon0:
+        width = 360
+    in_lon = (lon_faces - lon0) % 360 <= width
+    return (lat_faces >= lat0) & (lat_faces <= lat1) & in_lon
+
+
+def find_box_region(
+    lat_faces: np.ndarray,
+    lon_faces: np.ndarray,
+    box: tuple[float, float, float, float],
+    tile_size: int,
+    world_size: int,
+    margin_tiles: int = 1,
+) -> tuple[str, int]:
+    """The smallest ``--region`` that holds every grid cell of ``box`` (``box_mask``)
+    with at least ``margin_tiles`` whole tiles between the box's tiles and the window
+    edge, keeps its ring on one region plane and has a multiple of ``world_size``
+    tiles. Returns ``(spec, margin)``, ``margin`` the smallest such gap in tiles.
+
+    Every plane that holds all the box's faces is searched for rectangles; ties in
+    tile count go to the larger margin, then to the more centred window.
+    """
+    n = lat_faces.shape[-1]
+    if n % tile_size:
+        raise ValueError(
+            f"face size {n} is not a multiple of the tile size {tile_size}"
+        )
+    if margin_tiles < 0:
+        raise ValueError("margin_tiles must be >= 0")
+    tpd = n // tile_size
+    mask = box_mask(lat_faces, lon_faces, box)
+    if not mask.any():
+        raise ValueError(f"the box {box} holds no grid cell")
+    hit = mask.reshape(6, tpd, tile_size, tpd, tile_size).any(axis=(2, 4))
+    target = list(zip(*(v.tolist() for v in np.nonzero(hit))))
+    faces = {f for f, _, _ in target}
+    m = margin_tiles
+    best, why = None, []
+    for base, north, east in ALL_PLANES:
+        blocks = plane_blocks(base, north=north, east=east)
+        if not faces <= {f for f, _, _, _ in blocks}:
+            continue
+        pos = np.array([to_plane(blocks, f, i, j, tpd) for f, i, j in target])
+        a0, b0 = pos.min(axis=0)
+        a1, b1 = pos.max(axis=0) + 1
+        rows, cols = plane_shape(blocks, tpd)
+        if a0 - m < 1 or b0 - m < 1 or a1 + m > rows - 1 or b1 + m > cols - 1:
+            why.append("margin and ring off the plane")
+            continue
+        # every window [i0, i1) x [j0, j1) holding the box's tiles plus the margin
+        i0, i1 = np.meshgrid(np.arange(1, a0 - m + 1), np.arange(a1 + m, rows))
+        j0, j1 = np.meshgrid(np.arange(1, b0 - m + 1), np.arange(b1 + m, cols))
+        i0, i1, j0, j1 = (v.ravel() for v in (i0, i1, j0, j1))
+        area = (i1 - i0)[:, None] * (j1 - j0)[None, :]
+        margin = np.minimum(
+            np.minimum(a0 - i0, i1 - a1)[:, None], np.minimum(b0 - j0, j1 - b1)[None, :]
+        )
+        off = np.abs((a0 - i0) - (i1 - a1))[:, None] + np.abs((b0 - j0) - (j1 - b1))
+        ok = area % world_size == 0
+        if not ok.any():
+            why.append(f"no window with a multiple of {world_size} tiles")
+            continue
+        r, c = np.nonzero(ok)
+        order = np.lexsort((off[r, c], -margin[r, c], area[r, c]))
+        for k in order:
+            key = (
+                int(area[r[k], c[k]]),
+                -int(margin[r[k], c[k]]),
+                int(off[r[k], c[k]]),
+            )
+            if best is not None and key >= best[0]:
+                break
+            tiles = tuple(
+                from_plane(blocks, i, j, tpd)
+                for i in range(i0[r[k]], i1[r[k]])
+                for j in range(j0[c[k]], j1[c[k]])
+            )
+            try:
+                topo = TileTopology(
+                    world_size=world_size,
+                    rank=0,
+                    face_size=n,
+                    tile_size=tile_size,
+                    halo_width=0,
+                    active_tiles=tiles,
+                )
+            except ValueError as e:
+                why.append(str(e))
+                continue
+            best = (key, ",".join(str(v) for v in topo.region_box))
+            break
+    if best is None:
+        detail = "; ".join(sorted(set(why))) or (
+            f"no region plane holds faces {sorted(faces)}"
+        )
+        raise ValueError(
+            f"no window holds the box {box} with a {m}-tile margin ({detail}). A ring "
+            "across an equatorial face's south edge or a cube corner, or a box too "
+            "large for one plane, is not supported; try a smaller box or margin."
+        )
+    return best[1], -best[0][1]
+
+
 def load_latlon_faces(path: str) -> tuple[np.ndarray, np.ndarray]:
     """``latlon_ne1024pg2.nc`` (flat ``ncol``, degrees) as ``(6, 2048, 2048)`` faces."""
     import netCDF4
@@ -384,13 +506,34 @@ def _corners(lat_faces, lon_faces, spec: str, tile_size: int) -> list[tuple]:
     return out
 
 
+def parse_latlon_box(text: str) -> tuple[float, float, float, float]:
+    """``"LAT0,LAT1,LON0,LON1"`` (degrees) -> a box for ``box_mask``."""
+    parts = text.split(",")
+    if len(parts) != 4:
+        raise ValueError(f"need LAT0,LAT1,LON0,LON1, got {text!r}")
+    lat0, lat1, lon0, lon1 = (float(v) for v in parts)
+    return lat0, lat1, lon0, lon1
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Print a --region for a window of N x N tiles around a point."
+        description=(
+            "Print a --region: N x N tiles around a point (--lat/--lon), or the "
+            "smallest window that holds a lat/lon box (--latlon-box)."
+        )
     )
-    parser.add_argument("--lat", type=float, required=True)
-    parser.add_argument("--lon", type=float, required=True)
+    parser.add_argument("--lat", type=float)
+    parser.add_argument("--lon", type=float)
     parser.add_argument("--tiles", type=int, default=8, help="Window side in tiles.")
+    parser.add_argument(
+        "--latlon-box",
+        help=(
+            "LAT0,LAT1,LON0,LON1 in degrees; the box runs east from LON0 to LON1, so "
+            "LON0 > LON1 crosses the dateline."
+        ),
+    )
+    parser.add_argument("--world-size", type=int, default=8)
+    parser.add_argument("--margin-tiles", type=int, default=1)
     parser.add_argument("--tile-size", type=int, default=128)
     parser.add_argument(
         "--latlon",
@@ -398,13 +541,33 @@ def main(argv: list[str] | None = None) -> None:
         help="latlon_ne1024pg2.nc (generated by data_prep/scrip_generation).",
     )
     args = parser.parse_args(argv)
+    if (args.latlon_box is None) == (args.lat is None or args.lon is None):
+        parser.error("give --lat and --lon, or --latlon-box")
     lat_faces, lon_faces = load_latlon_faces(args.latlon)
-    spec = find_region(
-        lat_faces, lon_faces, args.lat, args.lon, args.tiles, args.tile_size
-    )
-    print(spec)
-    km = args.tiles * args.tile_size * 4.9  # ne1024pg2: about 4.9 km per cell
-    print(f"# {args.tiles} x {args.tiles} tiles, about {km:.0f} km across; corners:")
+    if args.latlon_box is not None:
+        spec, margin = find_box_region(
+            lat_faces,
+            lon_faces,
+            parse_latlon_box(args.latlon_box),
+            args.tile_size,
+            args.world_size,
+            args.margin_tiles,
+        )
+        _, i0, i1, j0, j1 = (int(v) for v in spec.split(","))
+        print(spec)
+        print(
+            f"# {i1 - i0} x {j1 - j0} tiles ({(i1 - i0) * (j1 - j0)}), "
+            f"{margin}-tile margin, world size {args.world_size}; corners:"
+        )
+    else:
+        spec = find_region(
+            lat_faces, lon_faces, args.lat, args.lon, args.tiles, args.tile_size
+        )
+        print(spec)
+        km = args.tiles * args.tile_size * 4.9  # ne1024pg2: about 4.9 km per cell
+        print(
+            f"# {args.tiles} x {args.tiles} tiles, about {km:.0f} km across; corners:"
+        )
     for la, lo in _corners(lat_faces, lon_faces, spec, args.tile_size):
         print(f"#   lat {la:7.2f}  lon {lo:7.2f}")
 
