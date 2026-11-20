@@ -22,6 +22,19 @@ from screamcast.distributed_halo import (
 )
 
 
+def _grid(np: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """Random lon/lat of the padded faces, the same on every rank.
+
+    Every rank must build the halo plan from the same grid: with unseeded
+    draws each rank had its own grid, an assertion could fail on some ranks
+    only, and those ranks then skipped the collectives the others waited in.
+    """
+    generator = torch.Generator().manual_seed(0)
+    lon = torch.rand([6, np, np], generator=generator) * 360
+    lat = torch.rand([6, np, np], generator=generator) * 180 - 90
+    return lon, lat
+
+
 def test_distributed_halo_exchange_main_path(distributed_cuda_context):
     rank, world_size, device = distributed_cuda_context
     topology = TileTopology(
@@ -36,9 +49,11 @@ def test_distributed_halo_exchange_main_path(distributed_cuda_context):
     b = 1
     c = 1
     np = topology.face_size + 2 * topology.halo_width
-    lon = torch.randn([6, np, np])
-    lat = torch.randn([6, np, np]) * 180 - 90
-    local_tiles = torch.randn([b, c, numtiles, topology.tile_size, topology.tile_size])
+    lon, lat = _grid(np)
+    local_tiles = torch.randn(
+        [b, c, numtiles, topology.tile_size, topology.tile_size],
+        generator=torch.Generator().manual_seed(1000 + rank),
+    )
 
     halo_exchange = DistributedTileKNNHaloPadding_AllGather.from_padded_face_grid(
         topology=topology,
@@ -76,9 +91,11 @@ def test_halo_transpose(distributed_cuda_context):
     b = 1
     c = 1
     np = topology.face_size + 2 * topology.halo_width
-    lon = torch.randn([6, np, np])
-    lat = torch.randn([6, np, np]) * 180 - 90
-    local_tiles = torch.randn([b, c, numtiles, topology.tile_size, topology.tile_size])
+    lon, lat = _grid(np)
+    local_tiles = torch.randn(
+        [b, c, numtiles, topology.tile_size, topology.tile_size],
+        generator=torch.Generator().manual_seed(1000 + rank),
+    )
 
     halo_exchange = DistributedTileKNNHaloPadding_AllGather.from_padded_face_grid(
         topology=topology,
