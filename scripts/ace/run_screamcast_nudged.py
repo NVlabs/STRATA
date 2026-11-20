@@ -274,7 +274,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Regional window: predict only this rectangle of tiles, "
             "'face,i0,i1,j0,j1' in tile units (half-open) on the plane of `face`; "
             "i1 or j1 beyond the face's tiles joins the north polar face or the "
-            "next equatorial face to the east. `python -m screamcast.regional "
+            "next equatorial face to the east; a window flush with an equatorial "
+            "face's north, east or west edge takes its ring from that neighbour. "
+            "`python -m screamcast.regional "
             "--lat .. --lon .. --tiles N` prints one for a point. Needs "
             "--correction none (see docs/regional_window.md)."
         ),

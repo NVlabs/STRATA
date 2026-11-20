@@ -52,17 +52,26 @@ from screamcast.distributed_halo import (
     plane_blocks,
     plane_parts,
     plane_shape,
+    region_plane_for,
     to_plane,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def region_plane_of(spec: str, tiles_per_dim: int) -> list:
-    """The plane of a ``"face,i0,i1,j0,j1"`` region: ``i1`` beyond the face's tiles joins
-    the north polar face, ``j1`` beyond them the next equatorial face to the east."""
+def spec_frame(spec: str, tiles_per_dim: int) -> list:
+    """The plane a ``"face,i0,i1,j0,j1"`` spec is written on: ``i1`` beyond the face's
+    tiles reaches into the north polar face, ``j1`` beyond them into the next equatorial
+    face to the east."""
     face, _, i1, _, j1 = (int(v) for v in spec.split(","))
     return plane_blocks(face, north=i1 > tiles_per_dim, east=j1 > tiles_per_dim)
+
+
+def region_plane_of(spec: str, tiles_per_dim: int) -> list:
+    """The plane a ``TileTopology`` of this region runs on (``region_plane_for``): the
+    spec's frame, or for a window flush with an equatorial face's north, east or west
+    edge the plane that joins the neighbour holding its ring."""
+    return region_plane_for(list(parse_region(spec, tiles_per_dim)), tiles_per_dim)
 
 
 def parse_region(spec: str, tiles_per_dim: int) -> tuple[Tile, ...]:
@@ -76,7 +85,7 @@ def parse_region(spec: str, tiles_per_dim: int) -> tuple[Tile, ...]:
     _, i0, i1, j0, j1 = (int(v) for v in parts)
     if not (i0 < i1 and j0 < j1):
         raise ValueError(f"--region {spec!r} is empty")
-    blocks = region_plane_of(spec, tiles_per_dim)
+    blocks = spec_frame(spec, tiles_per_dim)
     return tuple(
         from_plane(blocks, i, j, tiles_per_dim)
         for i in range(i0, i1)
@@ -362,7 +371,7 @@ def load_latlon_faces(path: str) -> tuple[np.ndarray, np.ndarray]:
 def _corners(lat_faces, lon_faces, spec: str, tile_size: int) -> list[tuple]:
     n = lat_faces.shape[-1]
     face, i0, i1, j0, j1 = (int(v) for v in spec.split(","))
-    blocks = region_plane_of(spec, n // tile_size)
+    blocks = spec_frame(spec, n // tile_size)
     out = []
     for P, Q in (
         (i0 * tile_size, j0 * tile_size),

@@ -81,6 +81,41 @@ def plane_blocks(
     return blocks
 
 
+def region_plane_for(tiles: list[Tile], tiles_per_dim: int) -> list[PlaneBlock]:
+    """The plane (``plane_blocks``) of a region made of ``tiles``.
+
+    Tiles on two faces: the equatorial face joined to that neighbour. Tiles on one
+    face: that face, unless the region is flush with an equatorial face's north, east or
+    west edge, where its one-tile ring lies on the neighbour; the plane then joins that
+    neighbour (the west neighbour as the base of an east join). No plane holds the ring
+    of a region flush with a south edge, with two edges (a cube corner) or with a polar
+    face's edge; ``TileTopology.region_box`` refuses those.
+    """
+    faces = sorted({f for f, _, _ in tiles})
+    if len(faces) == 1:
+        face, last = faces[0], tiles_per_dim - 1
+        if face < 4:
+            if any(i == last for _, i, _ in tiles):
+                return plane_blocks(face, north=True)
+            if any(j == last for _, _, j in tiles):
+                return plane_blocks(face, east=True)
+            if any(j == 0 for _, _, j in tiles):
+                return plane_blocks((face - 1) % 4, east=True)
+        return plane_blocks(face)
+    if len(faces) == 2:
+        a, b = faces
+        if b == NORTH_POLAR_FACE and a < 4:
+            return plane_blocks(a, north=True)
+        if b < 4 and (a + 1) % 4 == b:
+            return plane_blocks(a, east=True)
+        if b < 4 and (b + 1) % 4 == a:
+            return plane_blocks(b, east=True)
+    raise ValueError(
+        f"active tiles span faces {faces}: need one face, or an equatorial face "
+        "and its east neighbour or the north polar face"
+    )
+
+
 def plane_shape(blocks: list[PlaneBlock], n: int) -> tuple[int, int]:
     """Rows and columns of the plane, ``n`` per face side."""
     return (
@@ -171,7 +206,7 @@ class TileTopology:
     order; ``global_tiles``/``total_tiles``/``local_tiles`` then refer to the
     active set. The region must be a full rectangle of tiles on a region plane
     (one face, or an equatorial face joined to its east or north neighbour,
-    see ``plane_blocks``) whose one-tile ``ring_tiles`` stays on that plane;
+    see ``region_plane_for``) whose one-tile ``ring_tiles`` stays on that plane;
     the ring is not predicted, it only supplies the halo sources at the region
     boundary. ``None`` is the full cube.
     """
@@ -242,21 +277,7 @@ class TileTopology:
         """The plane (``plane_blocks``) the active tiles lie on."""
         if self.active_tiles is None:
             raise ValueError("region_plane is only defined for a regional topology")
-        faces = sorted({f for f, _, _ in self.active_tiles})
-        if len(faces) == 1:
-            return plane_blocks(faces[0])
-        if len(faces) == 2:
-            a, b = faces
-            if b == NORTH_POLAR_FACE and a < 4:
-                return plane_blocks(a, north=True)
-            if b < 4 and (a + 1) % 4 == b:
-                return plane_blocks(a, east=True)
-            if b < 4 and (b + 1) % 4 == a:
-                return plane_blocks(b, east=True)
-        raise ValueError(
-            f"active tiles span faces {faces}: need one face, or an equatorial face "
-            "and its east neighbour or the north polar face"
-        )
+        return region_plane_for(list(self.active_tiles), self.tiles_per_dim)
 
     def tile_plane_position(self, tile: Tile) -> tuple[int, int, int]:
         """``(row, col, k)`` of ``tile`` on the region plane in tile units; its data
@@ -294,7 +315,9 @@ class TileTopology:
         if i0 < 1 or j0 < 1 or i1 > rows - 1 or j1 > cols - 1:
             raise ValueError(
                 f"region tiles {i0}:{i1} x {j0}:{j1} must keep one ring tile on the "
-                f"plane of face {blocks[0][0]} ({rows} x {cols} tiles)"
+                f"plane of face {blocks[0][0]} ({rows} x {cols} tiles); a ring across "
+                "an equatorial face's south edge, a polar face's edge or a cube "
+                "corner is not supported"
             )
         return blocks[0][0], i0, i1, j0, j1
 

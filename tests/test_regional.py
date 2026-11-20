@@ -35,6 +35,7 @@ from screamcast.distributed_halo import (
     NormalizedHaloAdjoint,
     TileTopology,
     faces_to_plane,
+    plane_blocks,
 )
 from screamcast.regional import (
     AnchoredBoundary,
@@ -44,6 +45,7 @@ from screamcast.regional import (
     find_region,
     nearest_pixel,
     parse_region,
+    region_plane_of,
     ring_box,
     smooth,
 )
@@ -53,7 +55,14 @@ FACE, TILE, HALO, PAD = 192, 32, 4, 8
 REGION = "3,1,5,1,5"  # face 3, tiles 1:5 x 1:5 (128 px), ring tiles 0 and 5
 # 4 x 4 tiles across a face edge (6 tiles per face side): faces 3 and 0 (cols 4-5 of
 # face 3, 0-1 of face 0), and faces 3 and 5 (rows 4-5 of face 3, two rows of face 5)
-REGIONS = {"face": REGION, "east": "3,1,5,4,8", "north": "3,4,8,1,5"}
+# 4 x 4 tiles inside face 3, flush with its north, east and west edges: their ring
+# reaches into faces 5, 0 and 2
+FLUSH = {
+    "flush_north": "3,2,6,1,5",
+    "flush_east": "3,1,5,2,6",
+    "flush_west": "3,1,5,0,4",
+}
+REGIONS = {"face": REGION, "east": "3,1,5,4,8", "north": "3,4,8,1,5", **FLUSH}
 
 
 @pytest.fixture(params=sorted(REGIONS))
@@ -212,7 +221,9 @@ def test_plane_regions_topology_and_ring():
     assert {(0, i, 2) for i in range(5)} <= set(east.ring_tiles)
     assert {f for f, _, _ in north.ring_tiles} == {3, 5}
     with pytest.raises(ValueError, match="ring tile"):
-        _topology("3,1,5,8,12")  # its ring would leave the plane of faces 3 and 0
+        _topology("3,1,5,5,12")  # its ring would leave the plane of faces 3 and 0
+    # inside face 0 and flush with its east edge: runs on the plane of faces 0 and 1
+    assert _topology("3,1,5,8,12").region_plane == plane_blocks(0, east=True)
     with pytest.raises(ValueError, match="span faces"):
         TileTopology(
             world_size=1,
@@ -244,6 +255,50 @@ def test_the_region_box_is_the_plane_of_the_joined_faces(region):
         (r1 - r0, c1 - c0),
     )
     assert torch.equal(box, faces_to_plane(field, topo.region_plane)[:, r0:r1, c0:c1])
+
+
+@pytest.mark.parametrize(
+    "name, plane, neighbour",
+    [
+        ("flush_north", plane_blocks(3, north=True), 5),
+        ("flush_east", plane_blocks(3, east=True), 0),
+        ("flush_west", plane_blocks(2, east=True), 2),
+    ],
+)
+def test_a_window_flush_with_a_face_edge_takes_its_ring_from_the_neighbour(
+    name, plane, neighbour
+):
+    spec = REGIONS[name]
+    topo = _topology(spec)
+    assert {f for f, _, _ in topo.global_tiles} == {3}
+    assert topo.region_plane == plane
+    assert region_plane_of(spec, FACE // TILE) == plane
+    # the ring row or column beyond the flush edge, corners included, is the neighbour's
+    assert len(topo.ring_tiles) == 6 * 6 - 16
+    assert sum(f == neighbour for f, _, _ in topo.ring_tiles) == 6
+    assert {f for f, _, _ in topo.ring_tiles} == {3, neighbour}
+
+
+def test_a_flush_window_is_the_same_written_on_the_neighbours_plane():
+    """``3,1,5,0,4`` written on the plane of face 2 joined east to face 3."""
+    tiles = parse_region("2,1,5,6,10", FACE // TILE)
+    assert tiles == parse_region(REGIONS["flush_west"], FACE // TILE)
+    assert region_plane_of("2,1,5,6,10", FACE // TILE) == plane_blocks(2, east=True)
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "3,0,4,1,5",  # flush with the south edge of an equatorial face
+        "3,2,6,2,6",  # flush with its north and east edges: a cube corner
+        "3,1,5,0,6",  # as wide as the face
+        "5,2,6,1,5",  # flush with an edge of the north polar face
+        "4,1,5,2,6",  # and of the south polar face
+    ],
+)
+def test_no_plane_holds_the_ring_of_these_windows(spec):
+    with pytest.raises(ValueError, match="not supported"):
+        _topology(spec)
 
 
 @pytest.mark.parametrize("side", ["east", "north"])

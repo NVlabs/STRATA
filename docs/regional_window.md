@@ -21,7 +21,11 @@ about 8 minutes, and a 4 x 4-tile window (about 2,500 km) in about 4 minutes (se
   the face's tiles), or to the north polar face 5 (`i1` beyond the face's tiles).
 
 The ring must stay on the same plane, so `i0, j0 >= 1` and the window ends at least one
-tile before the plane's far edge. `screamcast.regional` finds a window around a point:
+tile before the plane's far edge. A window inside one equatorial face that is flush with
+its north, east or west edge (for example `0,12,16,10,14` with 16 tiles per face side)
+runs on the plane that joins the neighbour holding its ring: the north polar face, the
+east neighbour, or the west neighbour (as the base of an east join). It can be written
+in either frame, `0,2,6,0,4` or `3,2,6,16,20`. `screamcast.regional` finds a window around a point:
 
 ```bash
 python -m screamcast.regional --lat 12 --lon 0 --tiles 8 \
@@ -158,4 +162,6 @@ drivers.
   at its edge on a few cases, not for forecast skill.
 - At the window edge the large scale is the driver's, smoothed; inside it is STRATA's
   own. Expect a narrow seam where the two meet.
-- A window cannot cross the south edge of an equatorial face, or join three faces.
+- A window cannot cross the south edge of an equatorial face, or join three faces. Its
+  ring cannot either: a window flush with an equatorial face's south edge, with a polar
+  face's edge, or with two edges of a face (a cube corner) is refused.
