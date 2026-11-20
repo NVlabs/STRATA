@@ -68,8 +68,11 @@ outside information enters, so the edge drifts; use it as a baseline.
 The ring needs every input channel in one halo call, so `--region` sets
 `--halo-channel-chunk 0`. The omega spherical-harmonic high-pass (`--sht-omega-lmax`) is
 a global operator and is switched off. `--pressure-levels` output is not supported yet.
-The output store keeps the global layout; cells outside the window are NaN. The
-regional-averages file averages over the window.
+The output store keeps the global layout; cells outside the window are NaN. Regional
+averages are off by default with `--region`: a window often misses a whole region (a
+window equatorward of `--tropics-lat-deg`, default 23.5, has no extratropics), and the averager refuses an
+empty region at start-up. `--regional-averages` turns them on for a window that covers
+every region; they are then averages over the window.
 
 ## Drive a window with an ECMWF HRES forecast
 

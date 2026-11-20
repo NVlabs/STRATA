@@ -450,8 +450,9 @@ class RegionalAverager:
         for (name, _), total in zip(weights.items(), totals_cpu):
             if not np.isfinite(total) or total <= 0.0:
                 raise ValueError(
-                    f"Region {name!r} has non-positive total weight {total}. "
-                    "Check area/landfrac inputs."
+                    f"Region {name!r} has non-positive total weight {total}: "
+                    "no points of it in this domain (a regional window may not "
+                    "cover it), or bad area/landfrac inputs."
                 )
             normalizers[name] = float(total)
 

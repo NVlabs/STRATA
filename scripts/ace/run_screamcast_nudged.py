@@ -142,7 +142,7 @@ def channel_chunked(channel_chunk: int):
     return decorate
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--log-level",
@@ -465,11 +465,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--regional-averages",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
         help=(
             "Compute area-weighted regional averages (global, land, ocean, "
             "tropics, extratropics) every step and write them to a netCDF "
-            "file alongside the zarr output."
+            "file alongside the zarr output. Default: on for global runs, off "
+            "with --region (a window can miss a whole region, e.g. the "
+            "extratropics, and then the averages fail at start-up)."
         ),
     )
     parser.add_argument(
@@ -497,7 +499,10 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional output path. Defaults to a parameterized `.pt` filename.",
     )
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.regional_averages is None:
+        args.regional_averages = args.region is None
+    return args
 
 
 def get_checkpoint_path(run: str) -> str:
@@ -1437,6 +1442,11 @@ def main() -> None:
 
     regional_averager: RegionalAverager | None = None
     regional_output_path = ""
+    if args.region is not None and not args.regional_averages:
+        logger.info(
+            "regional averages off for the --region window "
+            "(pass --regional-averages to compute them)"
+        )
     if args.regional_averages:
         regional_output_path = (
             args.regional_averages_output or f"{output_path}_regional_averages.nc"
