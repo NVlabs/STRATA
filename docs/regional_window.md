@@ -21,7 +21,11 @@ about 8 minutes, and a 4 x 4-tile window (about 2,500 km) in about 4 minutes (se
   the face's tiles), or to the north polar face 5 (`i1` beyond the face's tiles).
 
 The ring must stay on the same plane, so `i0, j0 >= 1` and the window ends at least one
-tile before the plane's far edge. `screamcast.regional` finds a window around a point:
+tile before the plane's far edge. A window inside one equatorial face that is flush with
+its north, east or west edge (for example `0,12,16,10,14` with 16 tiles per face side)
+runs on the plane that joins the neighbour holding its ring: the north polar face, the
+east neighbour, or the west neighbour (as the base of an east join). It can be written
+in either frame, `0,2,6,0,4` or `3,2,6,16,20`. `screamcast.regional` finds a window around a point:
 
 ```bash
 python -m screamcast.regional --lat 12 --lon 0 --tiles 8 \
@@ -39,6 +43,33 @@ python -m screamcast.regional --lat 12 --lon 0 --tiles 8 \
 
 It tries the point's own face first, then the planes that join it to a neighbour, and
 moves the window as little as needed to keep its ring on the plane.
+
+### A window from a lat/lon box
+
+`--region-latlon LAT0,LAT1,LON0,LON1` lets the runner choose the window. The box runs
+east from `LON0` to `LON1`, so `170,-170` crosses the dateline. The window holds every
+grid cell of the box with at least `--region-margin-tiles` whole tiles (default 1)
+between them and the driven ring, keeps its ring on one plane, and has a multiple of
+the world size of tiles; among those it has the fewest tiles, then the largest margin,
+then the most centred box. The run logs the chosen `--region`, and the output records
+both (`region`, `region_latlon`), so `--region` reproduces it. To see the window first:
+
+```bash
+python -m screamcast.regional --latlon-box 8,18,-91,-79 --world-size 8 \
+  --latlon "$AUX_DATA_ROOT/latlon_ne1024pg2.nc"
+```
+
+```text
+3,8,13,4,12
+# 5 x 8 tiles (40), 1-tile margin, world size 8; corners:
+#   lat    0.02  lon  247.52
+#   lat    0.02  lon  292.48
+#   lat   26.26  lon  247.52
+#   lat   26.26  lon  292.48
+```
+
+A box that needs a ring across an equatorial face's south edge or a cube corner, or is
+too large for one plane, is refused with the reason.
 
 ## The boundary
 
@@ -71,8 +102,11 @@ outside information enters, so the edge drifts; use it as a baseline.
 The ring needs every input channel in one halo call, so `--region` sets
 `--halo-channel-chunk 0`. The omega spherical-harmonic high-pass (`--sht-omega-lmax`) is
 a global operator and is switched off. `--pressure-levels` output is not supported yet.
-The output store keeps the global layout; cells outside the window are NaN. The
-regional-averages file averages over the window.
+The output store keeps the global layout; cells outside the window are NaN. Regional
+averages are off by default with `--region`: a window often misses a whole region (a
+window equatorward of `--tropics-lat-deg`, default 23.5, has no extratropics), and the averager refuses an
+empty region at start-up. `--regional-averages` turns them on for a window that covers
+every region; they are then averages over the window.
 
 ## Drive a window with an ECMWF HRES forecast
 
@@ -161,4 +195,6 @@ drivers.
   at its edge on a few cases, not for forecast skill.
 - At the window edge the large scale is the driver's, smoothed; inside it is STRATA's
   own. Expect a narrow seam where the two meet.
-- A window cannot cross the south edge of an equatorial face, or join three faces.
+- A window cannot cross the south edge of an equatorial face, or join three faces. Its
+  ring cannot either: a window flush with an equatorial face's south edge, with a polar
+  face's edge, or with two edges of a face (a cube corner) is refused.

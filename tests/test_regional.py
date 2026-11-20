@@ -35,15 +35,21 @@ from screamcast.distributed_halo import (
     NormalizedHaloAdjoint,
     TileTopology,
     faces_to_plane,
+    from_plane,
+    plane_blocks,
+    to_plane,
 )
 from screamcast.regional import (
     AnchoredBoundary,
     ReplicateRing,
+    box_mask,
     edge_distance,
     faces_to_box,
+    find_box_region,
     find_region,
     nearest_pixel,
     parse_region,
+    region_plane_of,
     ring_box,
     smooth,
 )
@@ -53,7 +59,14 @@ FACE, TILE, HALO, PAD = 192, 32, 4, 8
 REGION = "3,1,5,1,5"  # face 3, tiles 1:5 x 1:5 (128 px), ring tiles 0 and 5
 # 4 x 4 tiles across a face edge (6 tiles per face side): faces 3 and 0 (cols 4-5 of
 # face 3, 0-1 of face 0), and faces 3 and 5 (rows 4-5 of face 3, two rows of face 5)
-REGIONS = {"face": REGION, "east": "3,1,5,4,8", "north": "3,4,8,1,5"}
+# 4 x 4 tiles inside face 3, flush with its north, east and west edges: their ring
+# reaches into faces 5, 0 and 2
+FLUSH = {
+    "flush_north": "3,2,6,1,5",
+    "flush_east": "3,1,5,2,6",
+    "flush_west": "3,1,5,0,4",
+}
+REGIONS = {"face": REGION, "east": "3,1,5,4,8", "north": "3,4,8,1,5", **FLUSH}
 
 
 @pytest.fixture(params=sorted(REGIONS))
@@ -212,7 +225,9 @@ def test_plane_regions_topology_and_ring():
     assert {(0, i, 2) for i in range(5)} <= set(east.ring_tiles)
     assert {f for f, _, _ in north.ring_tiles} == {3, 5}
     with pytest.raises(ValueError, match="ring tile"):
-        _topology("3,1,5,8,12")  # its ring would leave the plane of faces 3 and 0
+        _topology("3,1,5,5,12")  # its ring would leave the plane of faces 3 and 0
+    # inside face 0 and flush with its east edge: runs on the plane of faces 0 and 1
+    assert _topology("3,1,5,8,12").region_plane == plane_blocks(0, east=True)
     with pytest.raises(ValueError, match="span faces"):
         TileTopology(
             world_size=1,
@@ -244,6 +259,50 @@ def test_the_region_box_is_the_plane_of_the_joined_faces(region):
         (r1 - r0, c1 - c0),
     )
     assert torch.equal(box, faces_to_plane(field, topo.region_plane)[:, r0:r1, c0:c1])
+
+
+@pytest.mark.parametrize(
+    "name, plane, neighbour",
+    [
+        ("flush_north", plane_blocks(3, north=True), 5),
+        ("flush_east", plane_blocks(3, east=True), 0),
+        ("flush_west", plane_blocks(2, east=True), 2),
+    ],
+)
+def test_a_window_flush_with_a_face_edge_takes_its_ring_from_the_neighbour(
+    name, plane, neighbour
+):
+    spec = REGIONS[name]
+    topo = _topology(spec)
+    assert {f for f, _, _ in topo.global_tiles} == {3}
+    assert topo.region_plane == plane
+    assert region_plane_of(spec, FACE // TILE) == plane
+    # the ring row or column beyond the flush edge, corners included, is the neighbour's
+    assert len(topo.ring_tiles) == 6 * 6 - 16
+    assert sum(f == neighbour for f, _, _ in topo.ring_tiles) == 6
+    assert {f for f, _, _ in topo.ring_tiles} == {3, neighbour}
+
+
+def test_a_flush_window_is_the_same_written_on_the_neighbours_plane():
+    """``3,1,5,0,4`` written on the plane of face 2 joined east to face 3."""
+    tiles = parse_region("2,1,5,6,10", FACE // TILE)
+    assert tiles == parse_region(REGIONS["flush_west"], FACE // TILE)
+    assert region_plane_of("2,1,5,6,10", FACE // TILE) == plane_blocks(2, east=True)
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "3,0,4,1,5",  # flush with the south edge of an equatorial face
+        "3,2,6,2,6",  # flush with its north and east edges: a cube corner
+        "3,1,5,0,6",  # as wide as the face
+        "5,2,6,1,5",  # flush with an edge of the north polar face
+        "4,1,5,2,6",  # and of the south polar face
+    ],
+)
+def test_no_plane_holds_the_ring_of_these_windows(spec):
+    with pytest.raises(ValueError, match="not supported"):
+        _topology(spec)
 
 
 @pytest.mark.parametrize("side", ["east", "north"])
@@ -601,6 +660,116 @@ def test_find_region_refuses_a_window_too_large_for_a_plane(grid):
     lat, lon = _faces_deg(grid)
     with pytest.raises(ValueError, match="fewer tiles"):
         find_region(lat, lon, float(lat[4, 96, 96]), float(lon[4, 96, 96]), 5, TILE)
+
+
+# ------------------------------------------------------- window from a lat/lon box
+
+# 12 tiles per face side, so a box leaves room to choose among windows
+BIG = 2 * FACE
+BOXES = {
+    "face": (-10.0, 10.0, -10.0, 10.0),  # the centre of face 0
+    "east_edge": (-10.0, 10.0, 35.0, 55.0),  # across lon 45: faces 0 and 1
+    "north_edge": (38.0, 52.0, -8.0, 8.0),  # across the north edge of face 0
+    "dateline": (-10.0, 10.0, 170.0, -170.0),  # the centre of face 2
+}
+
+
+@pytest.fixture(scope="module")
+def big_grid():
+    lat, lon = _cube_latlon(BIG, 0)
+    return lat.numpy().astype(np.float64), lon.numpy().astype(np.float64)
+
+
+def _window_holds(lat, lon, box, tiles, world_size, margin):
+    """The run's own check (TileTopology), and every box cell ``margin`` tiles inside."""
+    try:
+        topo = TileTopology(
+            world_size=world_size,
+            rank=0,
+            face_size=BIG,
+            tile_size=TILE,
+            halo_width=HALO,
+            active_tiles=tiles,
+        )
+    except ValueError:
+        return False
+    _, r0, r1, c0, c1 = topo.region_pixel_box()
+    m = margin * TILE
+    for f, p, q in zip(*np.nonzero(box_mask(lat, lon, box))):
+        try:
+            P, Q = to_plane(topo.region_plane, int(f), int(p), int(q), BIG)
+        except ValueError:
+            return False  # a box cell off the window's plane
+        if not (r0 + m <= P < r1 - m and c0 + m <= Q < c1 - m):
+            return False
+    return True
+
+
+@pytest.mark.parametrize("world_size", [4, 6])
+@pytest.mark.parametrize("name", sorted(BOXES))
+def test_the_box_window_holds_the_box_and_is_locally_minimal(
+    big_grid, name, world_size
+):
+    lat, lon = big_grid
+    box = BOXES[name]
+    spec, margin = find_box_region(lat, lon, box, TILE, world_size, margin_tiles=1)
+    assert margin >= 1
+    tiles = parse_region(spec, BIG // TILE)
+    assert len(tiles) % world_size == 0
+    assert _window_holds(lat, lon, box, tiles, world_size, 1)
+    # without any one edge row or column of tiles the window no longer does
+    topo = TileTopology(
+        world_size=world_size,
+        rank=0,
+        face_size=BIG,
+        tile_size=TILE,
+        halo_width=HALO,
+        active_tiles=tiles,
+    )
+    _, i0, i1, j0, j1 = topo.region_box
+    for a0, a1, b0, b1 in (
+        (i0 + 1, i1, j0, j1),
+        (i0, i1 - 1, j0, j1),
+        (i0, i1, j0 + 1, j1),
+        (i0, i1, j0, j1 - 1),
+    ):
+        smaller = tuple(
+            from_plane(topo.region_plane, i, j, BIG // TILE)
+            for i in range(a0, a1)
+            for j in range(b0, b1)
+        )
+        assert not _window_holds(lat, lon, box, smaller, world_size, 1)
+
+
+def test_a_box_across_a_face_edge_gets_the_joined_plane(big_grid):
+    lat, lon = big_grid
+    for name, plane in (
+        ("east_edge", plane_blocks(0, east=True)),
+        ("north_edge", plane_blocks(0, north=True)),
+    ):
+        spec, _ = find_box_region(lat, lon, BOXES[name], TILE, 4)
+        assert region_plane_of(spec, BIG // TILE) == plane
+
+
+def test_a_dateline_box_is_the_arc_east_of_lon0(big_grid):
+    lat, lon = big_grid
+    mask = box_mask(lat, lon, BOXES["dateline"])
+    assert mask.any()
+    assert np.all(np.abs(lon[mask]) >= 170) and np.all(np.abs(lat[mask]) <= 10)
+    assert set(np.nonzero(mask)[0].tolist()) == {2}
+
+
+@pytest.mark.parametrize(
+    "box",
+    [
+        (-52.0, -38.0, -8.0, 8.0),  # across the south edge of face 0
+        (-38.0, 38.0, -38.0, 38.0),  # most of face 0: no room for margin and ring
+    ],
+)
+def test_a_box_no_plane_can_hold_is_refused(big_grid, box):
+    lat, lon = big_grid
+    with pytest.raises(ValueError, match="not supported"):
+        find_box_region(lat, lon, box, TILE, 4)
 
 
 def test_parse_region_rejects_malformed_specs():

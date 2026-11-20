@@ -91,6 +91,8 @@ from screamcast.regional import (
     AnchoredBoundary,
     ReplicateRing,
     faces_to_box,
+    find_box_region,
+    parse_latlon_box,
     parse_region,
     ring_box,
 )
@@ -174,7 +176,7 @@ def channel_chunked(channel_chunk: int):
     return decorate
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--log-level",
@@ -299,16 +301,40 @@ def parse_args() -> argparse.Namespace:
             "instead of SCREAM_MAIN_ZARR_PATH. Needs --correction none."
         ),
     )
-    parser.add_argument(
+    region = parser.add_mutually_exclusive_group()
+    region.add_argument(
         "--region",
         default=None,
         help=(
             "Regional window: predict only this rectangle of tiles, "
             "'face,i0,i1,j0,j1' in tile units (half-open) on the plane of `face`; "
             "i1 or j1 beyond the face's tiles joins the north polar face or the "
-            "next equatorial face to the east. `python -m screamcast.regional "
+            "next equatorial face to the east; a window flush with an equatorial "
+            "face's north, east or west edge takes its ring from that neighbour. "
+            "`python -m screamcast.regional "
             "--lat .. --lon .. --tiles N` prints one for a point. Needs "
             "--correction none (see docs/regional_window.md)."
+        ),
+    )
+    region.add_argument(
+        "--region-latlon",
+        default=None,
+        help=(
+            "Regional window from a lat/lon box 'LAT0,LAT1,LON0,LON1' (degrees; the "
+            "box runs east from LON0 to LON1, so LON0 > LON1 crosses the dateline): "
+            "the smallest --region that holds every grid cell of the box with "
+            "--region-margin-tiles tiles to spare, keeps its ring on one plane and "
+            "has a multiple of the world size of tiles. `python -m "
+            "screamcast.regional --latlon-box ..` prints the same window."
+        ),
+    )
+    parser.add_argument(
+        "--region-margin-tiles",
+        type=int,
+        default=1,
+        help=(
+            "With --region-latlon: whole tiles of window kept between the box and "
+            "the window edge (the driven ring). Default 1."
         ),
     )
     parser.add_argument(
@@ -604,11 +630,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--regional-averages",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
         help=(
             "Compute area-weighted regional averages (global, land, ocean, "
             "tropics, extratropics) every step and write them to a netCDF "
-            "file alongside the zarr output."
+            "file alongside the zarr output. Default: on for global runs, off "
+            "with --region (a window can miss a whole region, e.g. the "
+            "extratropics, and then the averages fail at start-up)."
         ),
     )
     parser.add_argument(
@@ -636,7 +664,10 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional output path. Defaults to a parameterized `.pt` filename.",
     )
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.regional_averages is None:
+        args.regional_averages = args.region is None and args.region_latlon is None
+    return args
 
 
 def get_checkpoint_path(run: str) -> str:
@@ -1019,7 +1050,9 @@ def main() -> None:
                 f"initial_time {t0}."
             )
 
-    if args.region is not None:
+    # --region-latlon becomes a --region once the world size is known
+    regional = args.region is not None or args.region_latlon is not None
+    if regional:
         if correction != "none":
             raise ValueError("--region needs --correction none")
         if args.pressure_levels is not None:
@@ -1073,7 +1106,7 @@ def main() -> None:
                 f"{args.replay_level_ramp!r}"
             )
     if args.driver_onthefly is not None:
-        anchored_ring = args.region is not None and args.region_boundary == "anchored"
+        anchored_ring = regional and args.region_boundary == "anchored"
         if not (args.replay or anchored_ring):
             raise ValueError(
                 "--driver-onthefly drives --replay or an anchored --region ring"
@@ -1106,6 +1139,30 @@ def main() -> None:
     if rank != 0:
         logger.setLevel(logging.CRITICAL + 1)
 
+    npg = 2
+    grid_tgt = load_scrip_lonlat(args.grid_tgt)
+    ne_padded = 1536
+    pad_width_data = 512
+    lon = unstructured_to_6faces(torch.from_numpy(grid_tgt["lon"]), ne_padded, npg)
+    lat = unstructured_to_6faces(torch.from_numpy(grid_tgt["lat"]), ne_padded, npg)
+    if args.region_latlon is not None:
+        interior = slice(pad_width_data, pad_width_data + 1024 * npg)
+        args.region, margin = find_box_region(
+            lat[:, interior, interior].numpy(),
+            lon[:, interior, interior].numpy(),
+            parse_latlon_box(args.region_latlon),
+            tile_size,
+            world_size,
+            args.region_margin_tiles,
+        )
+        logger.info(
+            "--region-latlon %s: --region %s (margin %d tiles, %d ranks)",
+            args.region_latlon,
+            args.region,
+            margin,
+            world_size,
+        )
+
     model = load_forecast_model(
         checkpoint_path,
         tile_size,
@@ -1113,9 +1170,6 @@ def main() -> None:
         args.forecast_model,
         inference_batch_size=args.inference_batch_size,
     )
-
-    npg = 2
-    grid_tgt = load_scrip_lonlat(args.grid_tgt)
 
     logger.info("building halo exchange plan")
 
@@ -1142,12 +1196,6 @@ def main() -> None:
     my_tiles = topology.local_tiles
     tile_size = topology.tile_size
 
-    lon = grid_tgt["lon"]
-    lat = grid_tgt["lat"]
-    ne_padded = 1536
-    pad_width_data = 512
-    lon = unstructured_to_6faces(torch.from_numpy(lon), ne_padded, npg)
-    lat = unstructured_to_6faces(torch.from_numpy(lat), ne_padded, npg)
     halo_exchange = DistributedTileKNNHaloPadding_AllGather.from_padded_face_grid(
         topology=topology,
         lon=lon,
@@ -1314,6 +1362,10 @@ def main() -> None:
         "tile_jitter": args.tile_jitter,
         "tile_jitter_mode": args.tile_jitter_mode if args.tile_jitter > 0 else None,
         "region": args.region,
+        "region_latlon": args.region_latlon,
+        "region_margin_tiles": (
+            args.region_margin_tiles if args.region_latlon is not None else None
+        ),
         "region_boundary": args.region_boundary if args.region else None,
         "driver_stores": list(args.driver_stores or []),
         "replay": args.replay,
@@ -1885,6 +1937,11 @@ def main() -> None:
 
     regional_averager: RegionalAverager | None = None
     regional_output_path = ""
+    if args.region is not None and not args.regional_averages:
+        logger.info(
+            "regional averages off for the --region window "
+            "(pass --regional-averages to compute them)"
+        )
     if args.regional_averages:
         regional_output_path = (
             args.regional_averages_output or f"{output_path}_regional_averages.nc"
