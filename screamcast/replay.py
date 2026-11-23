@@ -269,7 +269,8 @@ class Replay(torch.nn.Module):
         for row, name in enumerate(self.names):
             stem, level = channel_level(name)
             if omega_lmax > 0 and stem == "omega" and level is not None:
-                gain[row, : (omega_lmax + 1) ** 2] = 0.0
+                # the high-pass removes degrees below omega_lmax (sht_omega_filter)
+                gain[row, : omega_lmax**2] = 0.0
             if level_weights is not None and level is not None:
                 if level >= len(level_weights):
                     raise ValueError(

@@ -579,7 +579,8 @@ def main(argv: list[str] | None = None) -> None:
         "--latlon-box",
         help=(
             "LAT0,LAT1,LON0,LON1 in degrees; the box runs east from LON0 to LON1, so "
-            "LON0 > LON1 crosses the dateline."
+            "LON0 > LON1 crosses the dateline. A negative LAT0 needs the '=' form: "
+            "--latlon-box=-40,-20,140,160."
         ),
     )
     parser.add_argument("--world-size", type=int, default=8)

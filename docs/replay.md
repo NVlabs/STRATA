@@ -39,8 +39,8 @@ and scales below the taper stay STRATA's own throughout.
   windows that are re-run are not written.
 - Each analysis re-runs 3 hours, so a 24 h run replayed at +6, +12 and +18 h costs 33
   hours of steps.
-- With `--sht-omega-lmax N` (the omega high-pass of global runs) the omega increment
-  keeps none of the degrees the high-pass removes.
+- With `--sht-omega-lmax N` (the omega high-pass of global runs, which removes degrees
+  below N) the omega increment has no degree below N either.
 - In a regional window the analysis covers the window's blocks only and the increment
   is zero outside. The low-pass alone would give a cell near the window edge only the
   share of the kernel that lies inside (half on the edge, 84 % about 47 km in at the
@@ -58,7 +58,7 @@ and scales below the taper stay STRATA's own throughout.
   of the run.
 
 Each rank analyses its own blocks and the spherical-harmonic coefficients are
-all-reduced (`lmax` 413 at the default taper), then each rank evaluates them on its own
+all-reduced (`lmax` 414 at the default taper), then each rank evaluates them on its own
 pixels.
 
 ## Run

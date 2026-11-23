@@ -14,10 +14,12 @@
 # limitations under the License.
 """ECMWF HRES forecasts from the open-data bucket, in fast_ic's ERA5 layout.
 
-ECMWF open data (``ecmwf-forecasts`` on AWS) holds every HRES ``oper`` forecast since
-2024-02 as one GRIB2 file per step, on a 0.25 deg 721x1440 grid north-to-south and
+ECMWF open data (``ecmwf-forecasts`` on AWS) holds the HRES ``oper`` forecasts (00 and
+12 UTC) as one GRIB2 file per step, on a 0.25 deg 721x1440 grid north-to-south and
 from -180 deg longitude, with t, q, u, v, w and gh on the 13 pressure levels 50-1000 hPa
-and sp, 2t, msl, 10u/10v, 100u/100v and tcwv at the surface. The files are fetched over
+and sp, 2t, msl, 10u/10v, 100u/100v and tcwv at the surface. The first forecast with all
+of these is 2024-03-05 12 UTC (``FIRST_INIT``): the files from 2024-02-29 lack four
+pressure levels and w. The files are fetched over
 HTTP into a cache (earth2studio's ``IFS`` source needs ``ecmwf-opendata`` and refuses
 times before 2024-03) and read with pygrib.
 
@@ -40,6 +42,7 @@ from screamcast.initial_conditions.fast_ic import Era5, log
 from screamcast.initial_conditions.hres_ic import surface_geopotential
 
 OPENDATA_ROOT = "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com"
+FIRST_INIT = np.datetime64("2024-03-05T12", "h")  # checked 2026-11-19
 G0 = 9.80665  # WMO standard gravity, ECMWF's gh = z / G0
 PLEV_HPA = np.array([50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000])
 NLAT, NLON = 721, 1440
@@ -62,6 +65,20 @@ UNITS = {
     "tcwv": "kg m**-2",
 }
 HRES_ATM = {"T_mid": "t", "qv": "q", "U": "u", "V": "v", "omega": "w"}
+
+
+def check_init(init: np.datetime64) -> None:
+    """Raise ``ValueError`` unless open data holds every field of forecast ``init``."""
+    init = np.datetime64(init, "h")
+    hour = int(np.datetime_as_string(init, unit="h")[11:13])
+    if hour not in (0, 12):
+        raise ValueError(
+            f"HRES init {init}: open data holds the 00 and 12 UTC forecasts (oper) only"
+        )
+    if init < FIRST_INIT:
+        raise ValueError(
+            f"HRES init {init}: the open-data files are complete from {FIRST_INIT} on"
+        )
 
 
 def opendata_name(init: np.datetime64, lead: int) -> str:

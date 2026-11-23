@@ -212,17 +212,19 @@ def test_single_harmonic_comes_back_scaled_by_its_gain(ell, m):
 
 
 def test_omega_increment_drops_the_degrees_the_high_pass_removes():
+    """``--sht-omega-lmax 2`` high-passes omega to degrees >= 2 (``ell < lmax`` removed):
+    the increment drops degrees 0 and 1 and keeps degrees 2 and 3, tapered."""
     topo = _topology()
-    rep = _replay(topo, omega_lmax=1, window_steps=1)
+    rep = _replay(topo, omega_lmax=2, window_steps=1)
     state = _state()
     target = state.copy()
-    target[2] += 3.0 + _harmonic(1, 1) + _harmonic(3, 0)  # omega_8
+    target[2] += 3.0 + _harmonic(1, 1) + _harmonic(2, 1) + _harmonic(3, 0)  # omega_8
     rep.add_target(6, _local(topo, target))
     forcing, _ = rep.increment(_local(topo, state), 6)
-    gain3 = float(gaussian_gain(gaussian_lmax(ELL_HALF), ELL_HALF)[9])
-    y3 = _harmonic(3, 0)
-    expect = _local(topo, (gain3 * y3)[None])[0, 0].numpy()
-    assert np.abs(forcing[0, 2].numpy() - expect).max() < 0.03 * np.abs(y3).max()
+    gain = gaussian_gain(gaussian_lmax(ELL_HALF), ELL_HALF)
+    y = float(gain[4]) * _harmonic(2, 1) + float(gain[9]) * _harmonic(3, 0)
+    expect = _local(topo, y[None])[0, 0].numpy()
+    assert np.abs(forcing[0, 2].numpy() - expect).max() < 0.03 * np.abs(y).max()
 
 
 @pytest.mark.parametrize("region,normalize_edge", [(None, False), ("3,2,4,1,2", True)])

@@ -312,7 +312,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "next equatorial face to the east; a window flush with an equatorial "
             "face's north, east or west edge takes its ring from that neighbour. "
             "`python -m screamcast.regional "
-            "--lat .. --lon .. --tiles N` prints one for a point. Needs "
+            "--lat .. --lon .. --tiles N --latlon latlon_ne1024pg2.nc` prints one "
+            "for a point. Needs "
             "--correction none (see docs/regional_window.md)."
         ),
     )
@@ -325,7 +326,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "the smallest --region that holds every grid cell of the box with "
             "--region-margin-tiles tiles to spare, keeps its ring on one plane and "
             "has a multiple of the world size of tiles. `python -m "
-            "screamcast.regional --latlon-box ..` prints the same window."
+            "screamcast.regional --latlon-box ..` prints the same window. A box "
+            "south of the equator needs the '=' form: --region-latlon=-40,-20,140,160."
         ),
     )
     parser.add_argument(

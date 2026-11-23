@@ -526,6 +526,24 @@ def test_anchored_ring_adds_the_driver_change_unsmoothed(region):
     torch.testing.assert_close(boundary.ring_at(6.0), expect, rtol=0, atol=1e-5)
 
 
+def test_anchored_ring_blends_the_bracketing_drivers(region):
+    """With drivers at 0, 6 and 12 h (added out of order), the ring at t is the IC plus
+    the change to the linear blend of the two drivers around t."""
+    ic = _box(region, seed=1)
+    d = {h: _box(region, seed=2 + k) for k, h in enumerate((0.0, 12.0, 6.0))}
+    topo, boundary = _anchored(region, ic, d, block=1)
+    origin, _ = ring_box(topo)
+    for t, (a, b, w) in {
+        3.0: (0.0, 6.0, 0.5),
+        9.0: (6.0, 12.0, 0.5),
+        10.5: (6.0, 12.0, 0.75),
+        12.0: (6.0, 12.0, 1.0),
+    }.items():
+        blend = (1 - w) * d[a] + w * d[b]
+        expect = topo.box_to_tiles(ic + (blend - d[0.0]), topo.ring_tiles, origin)
+        torch.testing.assert_close(boundary.ring_at(t), expect, rtol=0, atol=1e-5)
+
+
 def test_anchored_ring_is_linear_in_time():
     ic = _box(REGION, seed=1)
     drivers = {0.0: _box(REGION, seed=2), 6.0: _box(REGION, seed=3)}

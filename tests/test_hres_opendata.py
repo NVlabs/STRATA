@@ -131,3 +131,32 @@ def test_surface_geopotential_at_a_pressure_level_is_that_level_height():
     np.testing.assert_allclose(state.sfc["phis"], gh[k850] * od.G0, rtol=1e-6)
     np.testing.assert_array_equal(state.plev_pa, od.PLEV_HPA * 100.0)
     assert set(state.atm) == {"T_mid", "qv", "U", "V", "omega"}
+
+
+@pytest.mark.parametrize(
+    "init", ["2024-09-25T06", "2024-03-05T00", "2024-02-29T12", "2023-06-01T00"]
+)
+def test_check_init_refuses_what_open_data_lacks(init):
+    with pytest.raises(ValueError, match="HRES init"):
+        od.check_init(np.datetime64(init))
+
+
+def test_check_init_accepts_complete_cycles():
+    for init in ("2024-03-05T12", "2025-08-15T00"):
+        od.check_init(np.datetime64(init))
+
+
+def test_hres_forecast_refuses_an_early_init_before_downloading(monkeypatch, tmp_path):
+    from screamcast.initial_conditions import hres_forecast
+
+    def no_download(*args, **kwargs):
+        raise AssertionError("downloaded")
+
+    monkeypatch.setattr(hres_forecast, "fetch_opendata", no_download)
+    argv = ["hres_forecast", "--init", "2024-02-29T12", "--leads", "0"]
+    argv += ["--tag-prefix", "x", "--out-dir", str(tmp_path), "--cache", str(tmp_path)]
+    for flag in ("--map", "--phis", "--latlon", "--scream-ref", "--vert"):
+        argv += [flag, str(tmp_path / "missing")]
+    monkeypatch.setattr("sys.argv", argv)
+    with pytest.raises(SystemExit, match="complete from 2024-03-05"):
+        hres_forecast.main()

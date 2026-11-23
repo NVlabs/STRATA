@@ -19,7 +19,7 @@ Each lead of the HRES forecast started at ``--init`` goes through the same steps
 ``<out-dir>/scream_hiccup_ne1024pg2_<tag-prefix>_f<LLL>.zarr``, whose ``initial_time``
 is the valid time ``init + lead``. Lead 0 is the HRES analysis, so its store is also an
 initial condition (``--ic-store``). The stores of all leads are the drivers of an
-anchored regional window (``--boundary-stores``, see ``docs/regional_window.md``)::
+anchored regional window (``--driver-stores``, see ``docs/regional_window.md``)::
 
     python -m screamcast.initial_conditions.hres_forecast \\
         --init 2025-08-15T12 --leads 0 6 12 18 24 --tag-prefix erin \\
@@ -50,6 +50,7 @@ from screamcast.initial_conditions.fast_ic import (
 )
 from screamcast.initial_conditions.hres_opendata import (
     OPENDATA_ROOT,
+    check_init,
     fetch_opendata,
     hres_state,
     opendata_name,
@@ -100,6 +101,10 @@ def main() -> None:
         *sys.argv[1:],
     ]
     init = np.datetime64(args.init, "h")
+    try:
+        check_init(init)  # before any download
+    except ValueError as e:
+        raise SystemExit(str(e)) from None
     device = torch.device(args.device)
     start = time.perf_counter()
 

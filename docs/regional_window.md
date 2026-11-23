@@ -52,7 +52,9 @@ grid cell of the box with at least `--region-margin-tiles` whole tiles (default 
 between them and the driven ring, keeps its ring on one plane, and has a multiple of
 the world size of tiles; among those it has the fewest tiles, then the largest margin,
 then the most centred box. The run logs the chosen `--region`, and the output records
-both (`region`, `region_latlon`), so `--region` reproduces it. To see the window first:
+both (`region`, `region_latlon`), so `--region` reproduces it. A box that starts south
+of the equator must be written with `=` (`--region-latlon=-40,-20,140,160`), or the
+command-line parser takes it for an option. To see the window first:
 
 ```bash
 python -m screamcast.regional --latlon-box 8,18,-91,-79 --world-size 8 \
@@ -111,7 +113,7 @@ every region; they are then averages over the window.
 ## Drive a window with an ECMWF HRES forecast
 
 `screamcast.initial_conditions.hres_forecast` builds one store per lead of an HRES
-forecast from ECMWF open data (2024-02 onward), with the same steps as `fast_ic` and
+forecast from ECMWF open data (00 and 12 UTC forecasts from 2024-03-05 12 UTC on), with the same steps as `fast_ic` and
 `hres_ic` (see [initial_conditions.md](initial_conditions.md) for the map, statics and
 L128 file). The lead-0 store is the HRES analysis and serves as the initial condition:
 

@@ -114,10 +114,8 @@ SPEC_KEYS = {
     "hres": ("init", "cache"),
 }
 # ECMWF open data, HRES "oper" (00 and 12 UTC runs): every 3 h to +144 h, then every
-# 6 h to +240 h. The first cycle with every field build_ic needs is 2024-03-05 12 UTC
-# (from 2024-02-29 the files lack four pressure levels and w). Checked 2026-11-19.
+# 6 h to +240 h. The first complete cycle is hres_opendata.FIRST_INIT.
 HRES_LEADS = frozenset((*range(0, 145, 3), *range(150, 241, 6)))
-HRES_FIRST_INIT = np.datetime64("2024-03-05T12", "h")
 CHUNK_BLOCKS = 16  # store chunk side in blocks: one 128-pixel tile
 
 
@@ -184,22 +182,15 @@ class HresSource:
     """One ECMWF HRES forecast from the open-data bucket (``hres_opendata``)."""
 
     def __init__(self, spec: dict) -> None:
-        from screamcast.initial_conditions.hres_opendata import OPENDATA_ROOT
+        from screamcast.initial_conditions.hres_opendata import (
+            OPENDATA_ROOT,
+            check_init,
+        )
 
         self.init = np.datetime64(spec["init"], "h")
         self.cache = spec["cache"]
         self.root = spec.get("opendata_root", OPENDATA_ROOT)
-        hour = int(np.datetime_as_string(self.init, unit="h")[11:13])
-        if hour not in (0, 12):
-            raise ValueError(
-                f"HRES init {self.init}: open data holds the 00 and 12 UTC forecasts "
-                "(oper) only"
-            )
-        if self.init < HRES_FIRST_INIT:
-            raise ValueError(
-                f"HRES init {self.init}: the open-data files are complete from "
-                f"{HRES_FIRST_INIT} on"
-            )
+        check_init(self.init)
 
     def lead(self, valid: np.datetime64) -> int:
         return int((np.datetime64(valid, "h") - self.init) / np.timedelta64(1, "h"))
