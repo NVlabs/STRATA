@@ -32,9 +32,16 @@ ring box for ``AnchoredBoundary.add_blocks``. The block means are those
 ``Replay.add_target`` and the ring take of a driver store built by ``fast_ic`` or
 ``hres_forecast`` from the same source state.
 
-A target appears atomically: it is written to ``<name>.partial<pid>`` and renamed. The
-producer writes ``FAILED`` (with the traceback) if it fails and ``DONE`` after its last
-target; a reader waiting for a target stops on either, or after its timeout.
+A target appears atomically: it is written to ``<name>.partial<pid>`` and renamed. It
+records its ``origin`` (``target_origin``: the source state and the ``fast_ic``
+inputs); a target already in the directory is used only if it was built from this
+run's origin and holds its channels and tiles (``check_target``, in the producer and in
+every reader). The run's own files are in a run directory (``--run-dir``, by default
+the target directory; a run of ``run_screamcast_nudged.py`` uses
+``<target dir>/runs/<run>``): the producer writes ``FAILED`` (with the traceback) if it
+fails and ``DONE`` after its last target, its log, and the run's markers. A reader
+waiting for a target stops on either, or after its timeout. Runs that share the target
+directory do not see each other's run files.
 
 Modes (``--driver-producer``):
 
@@ -222,6 +229,20 @@ def make_source(spec: dict) -> Era5Source | HresSource:
     return Era5Source(spec) if spec["source"] == "era5" else HresSource(spec)
 
 
+def target_origin(spec: dict) -> dict[str, str]:
+    """What the targets of ``spec`` are built from: the source state (the ERA5 store, or
+    the HRES forecast's init) and the ``fast_ic`` map, phis and vert (absolute paths).
+    A target built from another origin is never used."""
+    origin = {"source": spec["source"]}
+    if spec["source"] == "era5":
+        origin["era5_zarr"] = spec.get("era5_zarr", ARCO_ERA5)
+    else:
+        origin["init"] = str(np.datetime64(spec["init"], "h"))
+    for key in ("map", "phis", "vert"):
+        origin[key] = os.path.abspath(spec[key])
+    return origin
+
+
 def source_hours(
     source: Era5Source | HresSource, run_init: np.datetime64, hours
 ) -> set[int]:
@@ -404,10 +425,13 @@ def write_target(
     valid: np.datetime64,
     history: str,
     source: str,
+    origin: dict[str, str],
 ) -> None:
     """Store ``(channels, tiles, tb, tb)`` block means at ``path`` as one
     ``(channels, 6, face/8, face/8)`` array, NaN off ``tiles``. Written beside ``path``
-    and renamed into place, so ``path`` only ever exists complete."""
+    and renamed into place, so ``path`` only ever exists complete. If another producer
+    (another run sharing the directory) renamed its store there first, that one stays:
+    the readers check it like any target they did not build."""
     tmp = f"{path}.partial{os.getpid()}"
     if os.path.exists(tmp):
         shutil.rmtree(tmp)
@@ -432,10 +456,16 @@ def write_target(
             "tile_size": int(tile_size),
             "block": BLOCK,
             "source": source,
+            "origin": dict(origin),
             "history": history,
         }
     )
-    os.rename(tmp, path)
+    try:
+        os.rename(tmp, path)
+    except OSError:
+        if not os.path.isdir(path):
+            raise
+        shutil.rmtree(tmp)
 
 
 def read_blocks(path: str, channels: list[str], tiles, tile_size: int) -> np.ndarray:
@@ -493,15 +523,33 @@ def _block_set(tiles, tile_size: int) -> set[tuple[int, int, int]]:
     }
 
 
-def covers(path: str, channels: list[str], tiles, tile_size: int) -> bool:
-    """Whether the target store at ``path`` holds ``channels`` on every block of
-    ``tiles`` (an earlier producer's store kept for a rerun)."""
+def check_target(
+    path: str,
+    *,
+    channels: list[str],
+    tiles,
+    tile_size: int,
+    origin: dict[str, str],
+) -> None:
+    """Raise unless the target store at ``path`` was built from ``origin`` and holds
+    ``channels`` on every block of ``tiles`` (the producer's tiles, the same on every
+    rank, so every rank reaches the same verdict)."""
     attrs = zarr.open_group(path, mode="r").attrs
-    if not set(channels) <= set(attrs["variables"]):
-        return False
-    return _block_set(tiles, tile_size) <= _block_set(
+    why = None
+    built_from = attrs.get("origin")
+    if built_from != origin:
+        why = f"built from {built_from}, this run's targets from {origin}"
+    elif not set(channels) <= set(attrs["variables"]):
+        why = f"lacks channels {sorted(set(channels) - set(attrs['variables']))}"
+    elif not _block_set(tiles, tile_size) <= _block_set(
         [tuple(t) for t in attrs["tiles"]], int(attrs["tile_size"])
-    )
+    ):
+        why = "does not cover this run's tiles"
+    if why is not None:
+        raise ValueError(
+            f"{path} cannot serve this run ({why}): remove it or use another "
+            "target directory"
+        )
 
 
 def compare_stores(a: str, b: str) -> list[str]:
@@ -522,14 +570,14 @@ def compare_stores(a: str, b: str) -> list[str]:
 # ------------------------------------------------------------------ markers
 
 
-def marker_path(out_dir: str, kind: str, valid: np.datetime64) -> str:
-    return os.path.join(out_dir, f"{kind}_{hour_stamp(valid)}")
+def marker_path(run_dir: str, kind: str, valid: np.datetime64) -> str:
+    return os.path.join(run_dir, f"{kind}_{hour_stamp(valid)}")
 
 
-def mark(out_dir: str, kind: str, valid: np.datetime64) -> None:
+def mark(run_dir: str, kind: str, valid: np.datetime64) -> None:
     """Tell the producer that the run begins the analysis at (``analysis``) or waits for
     the target of (``request``) ``valid``."""
-    open(marker_path(out_dir, kind, valid), "w").close()
+    open(marker_path(run_dir, kind, valid), "w").close()
 
 
 def wait_for_markers(
@@ -548,18 +596,21 @@ def wait_for_target(
     timeout: float | None,
     poll: float = 0.5,
     stop: threading.Event | None = None,
+    run_dir: str | None = None,
 ) -> float:
     """Block until the target of ``valid`` exists; the seconds waited. Raises at once
-    if the producer wrote ``FAILED`` or finished (``DONE``) without it, or if ``stop``
-    is set; after ``timeout`` seconds unless it is None."""
+    if the producer wrote ``FAILED`` or finished (``DONE``) without it in ``run_dir``
+    (default ``out_dir``), or if ``stop`` is set; after ``timeout`` seconds unless it is
+    None."""
     path = target_path(out_dir, valid)
+    run_dir = out_dir if run_dir is None else run_dir
     start = time.perf_counter()
     while not os.path.isdir(path):
-        failed = os.path.join(out_dir, FAILED)
+        failed = os.path.join(run_dir, FAILED)
         if os.path.exists(failed):
             with open(failed) as f:
                 raise RuntimeError(f"replay target producer failed:\n{f.read()}")
-        if os.path.exists(os.path.join(out_dir, DONE)):
+        if os.path.exists(os.path.join(run_dir, DONE)):
             raise RuntimeError(f"replay target producer finished without {path}")
         if timeout is not None and time.perf_counter() - start > timeout:
             raise TimeoutError(f"no replay target {path} after {timeout:.0f} s")
@@ -599,10 +650,12 @@ def producer_tiles(
 
 def produce(args: argparse.Namespace) -> None:
     out_dir = args.out_dir
+    run_dir = args.run_dir or out_dir
     os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(run_dir, exist_ok=True)
     for name in (FAILED, DONE):
-        if os.path.exists(os.path.join(out_dir, name)):
-            os.remove(os.path.join(out_dir, name))
+        if os.path.exists(os.path.join(run_dir, name)):
+            os.remove(os.path.join(run_dir, name))
     history = history_entry(
         [sys.executable, "-m", "screamcast.replay_targets", *sys.argv[1:]]
     )
@@ -611,6 +664,7 @@ def produce(args: argparse.Namespace) -> None:
     try:
         spec = load_spec(args.spec)
         source = make_source(spec)
+        origin = target_origin(spec)
         run_init = np.datetime64(args.run_init, "s")
         valids = [run_init + np.timedelta64(h, "h") for h in args.hours]
         gates = (
@@ -630,13 +684,15 @@ def produce(args: argparse.Namespace) -> None:
             path = target_path(out_dir, v)
             if not os.path.isdir(path):
                 todo.append(v)
-            elif covers(path, channels, tiles, args.tile_size):
-                log(f"{hour_stamp(v)} exists, kept")
             else:
-                raise ValueError(
-                    f"{path} does not hold the channels and tiles this run needs: "
-                    "remove it or use another directory"
+                check_target(
+                    path,
+                    channels=channels,
+                    tiles=tiles,
+                    tile_size=args.tile_size,
+                    origin=origin,
                 )
+                log(f"{hour_stamp(v)} exists, kept")
         device = torch.device(args.device)
         on_cuda = device.type == "cuda"
         phis = np.asarray(zarr.open_array(spec["phis"], mode="r")[:], np.float32)
@@ -678,11 +734,11 @@ def produce(args: argparse.Namespace) -> None:
                 wait_for_markers(
                     [
                         marker_path(
-                            out_dir,
+                            run_dir,
                             "analysis",
                             run_init + np.timedelta64(gates[k], "h"),
                         ),
-                        marker_path(out_dir, "request", valids[k]),
+                        marker_path(run_dir, "request", valids[k]),
                     ],
                     check,
                 )
@@ -702,8 +758,8 @@ def produce(args: argparse.Namespace) -> None:
                     else:
                         wait_for_markers(
                             [
-                                marker_path(out_dir, "analysis", valids[k]),
-                                marker_path(out_dir, "request", valids[k]),
+                                marker_path(run_dir, "analysis", valids[k]),
+                                marker_path(run_dir, "request", valids[k]),
                             ],
                             check,
                         )
@@ -721,6 +777,7 @@ def produce(args: argparse.Namespace) -> None:
                 valid=valid,
                 history=history,
                 source=source.describe(valid),
+                origin=origin,
             )
             log(
                 f"{hour_stamp(valid)} written at {time.perf_counter() - start:.1f} s "
@@ -733,7 +790,7 @@ def produce(args: argparse.Namespace) -> None:
             check()
             t = time.perf_counter()
             if not prefetch:
-                wait_for_markers([marker_path(out_dir, "request", valid)], check)
+                wait_for_markers([marker_path(run_dir, "request", valid)], check)
                 state = source(valid)
             else:
                 state = nxt.result()
@@ -761,24 +818,27 @@ def produce(args: argparse.Namespace) -> None:
             future.result()
         fetcher.shutdown()
         writer.shutdown()
-        open(os.path.join(out_dir, DONE), "w").close()
+        open(os.path.join(run_dir, DONE), "w").close()
         log(f"done: {len(todo)} target(s) in {time.perf_counter() - start:.1f} s")
     except BaseException:
-        with open(os.path.join(out_dir, FAILED), "w") as f:
+        with open(os.path.join(run_dir, FAILED), "w") as f:
             f.write(traceback.format_exc())
         raise
 
 
 class ProducerProcess:
-    """The producer as a child process of one rank, on that rank's GPU. A monitor thread
+    """The producer as a child process of one rank, on that rank's GPU, in the run's
+    working directory (relative paths mean what they mean to the run). A monitor thread
     writes ``FAILED`` if the child dies without doing so, so ranks waiting for a target
-    stop instead of timing out."""
+    stop instead of timing out. ``FAILED``, ``DONE``, the markers and ``producer.log``
+    are in ``run_dir``."""
 
     def __init__(
         self,
         *,
         spec: str,
         out_dir: str,
+        run_dir: str,
         run_init: np.datetime64,
         hours: list[int],
         gates: list[int | None],
@@ -792,9 +852,10 @@ class ProducerProcess:
     ) -> None:
         if mode not in MODES:
             raise ValueError(f"producer mode must be one of {MODES}, got {mode!r}")
-        self.out_dir = out_dir
+        self.run_dir = run_dir
         cmd = [
             sys.executable,
+            "-P",  # import screamcast from PYTHONPATH below, not from the run's cwd
             "-m",
             "screamcast.replay_targets",
             "produce",
@@ -802,6 +863,8 @@ class ProducerProcess:
             spec,
             "--out-dir",
             out_dir,
+            "--run-dir",
+            run_dir,
             "--run-init",
             str(np.datetime64(run_init, "s")),
             "--mode",
@@ -845,17 +908,21 @@ class ProducerProcess:
         if gpu is not None:
             env["CUDA_VISIBLE_DEVICES"] = gpu
         env["PYTHONUNBUFFERED"] = "1"
+        root = str(Path(__file__).resolve().parents[1])
+        env["PYTHONPATH"] = os.pathsep.join(
+            [root, *filter(None, [env.get("PYTHONPATH")])]
+        )
         os.makedirs(out_dir, exist_ok=True)
-        # an earlier run's verdict and markers must not reach this one; its targets stay
-        for name in os.listdir(out_dir):
+        os.makedirs(run_dir, exist_ok=True)
+        # an earlier verdict and markers in this run directory must not reach this run
+        for name in os.listdir(run_dir):
             if name in (FAILED, DONE) or name.startswith(("analysis_", "request_")):
-                os.remove(os.path.join(out_dir, name))
-        self.log = open(os.path.join(out_dir, PRODUCER_LOG), "a")
+                os.remove(os.path.join(run_dir, name))
+        self.log = open(os.path.join(run_dir, PRODUCER_LOG), "a")
         self.log.write(f"# gpu {gpu}: {' '.join(cmd)}\n")
         self.log.flush()
         self.proc = subprocess.Popen(
             cmd,  # noqa: S603 (our own interpreter and module, arguments from the run)
-            cwd=Path(__file__).resolve().parents[1],
             env=env,
             stdout=self.log,
             stderr=subprocess.STDOUT,
@@ -865,7 +932,7 @@ class ProducerProcess:
 
     def _monitor(self) -> None:
         code = self.proc.wait()
-        failed = os.path.join(self.out_dir, FAILED)
+        failed = os.path.join(self.run_dir, FAILED)
         if code != 0 and not os.path.exists(failed):
             with open(failed, "w") as f:
                 f.write(f"producer exited with code {code} (see {PRODUCER_LOG})\n")
@@ -896,20 +963,27 @@ class TargetReader:
 
     ``timeout`` counts from the ``get`` call: a prefetched target may take as long as
     the run takes to need it. The background thread is a daemon and stops waiting at
-    ``close``, so a run that fails does not wait for targets on its way out."""
+    ``close``, so a run that fails does not wait for targets on its way out. Each
+    target passes ``check`` (``check_target``) before it is read, also one the producer
+    kept from an earlier run. ``FAILED``, ``DONE`` and the requests are in
+    ``run_dir``."""
 
     def __init__(
         self,
         out_dir: str,
+        run_dir: str,
         run_init: np.datetime64,
         read: Callable[[str], np.ndarray],
         *,
+        check: Callable[[str], None],
         mode: str,
         timeout: float,
     ) -> None:
         if mode not in MODES:
             raise ValueError(f"producer mode must be one of {MODES}, got {mode!r}")
         self.out_dir = out_dir
+        self.run_dir = run_dir
+        self.check = check
         self.run_init = np.datetime64(run_init, "s")
         self.read = read
         self.mode = mode
@@ -924,10 +998,16 @@ class TargetReader:
 
     def _load(self, hour: int, timeout: float | None) -> tuple[np.ndarray, dict]:
         waited = wait_for_target(
-            self.out_dir, self.valid(hour), timeout, stop=self.stop
+            self.out_dir,
+            self.valid(hour),
+            timeout,
+            stop=self.stop,
+            run_dir=self.run_dir,
         )
         t = time.perf_counter()
-        blocks = self.read(target_path(self.out_dir, self.valid(hour)))
+        path = target_path(self.out_dir, self.valid(hour))
+        self.check(path)
+        blocks = self.read(path)
         return blocks, {"waited_s": waited, "read_s": time.perf_counter() - t}
 
     def _work(self) -> None:
@@ -956,7 +1036,7 @@ class TargetReader:
         seconds the caller waited here (at most ``timeout``)."""
         start = time.perf_counter()
         if not os.path.isdir(target_path(self.out_dir, self.valid(hour))):
-            mark(self.out_dir, "request", self.valid(hour))
+            mark(self.run_dir, "request", self.valid(hour))
         future = self.futures.pop(hour, None)
         if future is None:
             blocks, info = self._load(hour, self.timeout)
@@ -988,7 +1068,12 @@ def main() -> None:
     c.add_argument("b")
     q = sub.add_parser("produce", help="build the targets of a run")
     q.add_argument("--spec", required=True, help="source spec (JSON)")
-    q.add_argument("--out-dir", required=True)
+    q.add_argument("--out-dir", required=True, help="the target directory")
+    q.add_argument(
+        "--run-dir",
+        default=None,
+        help="FAILED, DONE and the run's markers (default: --out-dir)",
+    )
     q.add_argument("--run-init", required=True, help="run start, YYYY-MM-DDTHH (UTC)")
     q.add_argument("--hours", required=True, nargs="+", type=int, help="run hours")
     q.add_argument(

@@ -54,6 +54,7 @@ PLEV_HPA = np.array([50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 
 STEMS = ["U", "qv", "T_2m"]
 REGION = "3,1,3,1,3"  # 2 x 2 tiles of face 3
 EDGE_REGION = "3,3,5,1,2"  # 2 tiles, across the edge to the north polar face (turned)
+ORIGIN = {"source": "synthetic"}
 
 
 # ------------------------------------------------------------------ fixtures
@@ -226,6 +227,7 @@ def test_producer_blocks_are_the_driver_store_blocks(inputs, tmp_path, region):
         valid=np.datetime64("2024-09-25T18"),
         history="test",
         source="synthetic",
+        origin=ORIGIN,
     )
     got = _replay(names, topo)
     local = rt.read_blocks(path, got.names, topo.local_tiles, TILE)
@@ -260,6 +262,7 @@ def test_ring_blocks_are_the_driver_store_blocks(inputs, tmp_path, region):
         valid=np.datetime64("2024-09-25T18"),
         history="test",
         source="synthetic",
+        origin=ORIGIN,
     )
     got = torch.from_numpy(rt.read_box_blocks(path, names[::-1], topo))
     torch.testing.assert_close(got, want.flip(0), rtol=1e-13, atol=0)
@@ -313,6 +316,7 @@ def test_column_groups_give_the_same_bits(inputs, tmp_path):
             valid=np.datetime64("2024-09-25T18"),
             history="test",
             source="synthetic",
+            origin=ORIGIN,
         )
     assert rt.compare_stores(*paths) == []
 
@@ -437,14 +441,22 @@ def test_target_appears_only_complete(tmp_path, monkeypatch):
         valid=valid,
         history="h",
         source="s",
+        origin=ORIGIN,
     )
     assert len(seen) == 1 and sorted(os.listdir(tmp_path)) == [os.path.basename(path)]
     np.testing.assert_array_equal(
         rt.read_blocks(path, channels[::-1], tiles, TILE), blocks[::-1]
     )
-    assert rt.covers(path, ["T_2m"], tiles[:1], TILE)
-    assert not rt.covers(path, ["U_1"], tiles, TILE)
-    assert not rt.covers(path, channels, [(3, 0, 0)], TILE)
+    kw = dict(tile_size=TILE, origin=ORIGIN)
+    rt.check_target(path, channels=["T_2m"], tiles=tiles[:1], **kw)
+    with pytest.raises(ValueError, match="lacks channels"):
+        rt.check_target(path, channels=["U_1"], tiles=tiles, **kw)
+    with pytest.raises(ValueError, match="does not cover"):
+        rt.check_target(path, channels=channels, tiles=[(3, 0, 0)], **kw)
+    with pytest.raises(ValueError, match="built from"):
+        rt.check_target(
+            path, channels=channels, tiles=tiles, tile_size=TILE, origin={"source": "x"}
+        )
 
 
 def test_wait_for_target_stops_on_failed_done_and_timeout(tmp_path):
@@ -466,7 +478,13 @@ def test_a_prefetched_targets_timeout_counts_from_get(tmp_path):
     after start-up than the timeout: the timeout counts from the run's ``get``."""
     t0 = np.datetime64("2024-09-25T12")
     reader = rt.TargetReader(
-        str(tmp_path), t0, lambda path: path, mode="gated", timeout=0.5
+        str(tmp_path),
+        str(tmp_path),
+        t0,
+        lambda path: path,
+        check=_ok,
+        mode="gated",
+        timeout=0.5,
     )
     reader.prefetch([6, 12])
     time.sleep(1.0)  # the run integrates to +6 h; nothing is built yet
@@ -490,8 +508,10 @@ def test_a_closed_reader_stops_waiting(tmp_path):
     before = set(threading.enumerate())
     reader = rt.TargetReader(
         str(tmp_path),
+        str(tmp_path),
         np.datetime64("2024-09-25T12"),
         lambda path: path,
+        check=_ok,
         mode="gated",
         timeout=60,
     )
@@ -517,6 +537,21 @@ def test_producer_stems_are_whole_variables():
 # ------------------------------------------------------------------ producer
 
 
+def _ok(path):
+    pass
+
+
+def _check(spec, region=REGION):
+    """The check a run with ``spec`` gives its readers (as the runner builds it)."""
+    return lambda path: rt.check_target(
+        path,
+        channels=rt.target_channels(STEMS),
+        tiles=rt.producer_tiles(region, TILE, FACE),
+        tile_size=TILE,
+        origin=rt.target_origin(spec),
+    )
+
+
 class _FakeSource:
     def __init__(self, fail=False):
         self.calls = []
@@ -539,6 +574,7 @@ def _produce_args(spec_path, out_dir, mode, region=None):
     return argparse.Namespace(
         spec=spec_path,
         out_dir=str(out_dir),
+        run_dir=None,
         run_init="2024-09-25T12",
         hours=[6, 12],
         gates=None,
@@ -571,10 +607,12 @@ def test_producer_builds_every_target_in_each_mode(inputs, tmp_path, monkeypatch
     topo = _topology(REGION)
     reader = rt.TargetReader(
         str(tmp_path),
+        str(tmp_path),
         t0,
         lambda path: rt.read_blocks(
             path, rt.target_channels(STEMS), topo.local_tiles, TILE
         ),
+        check=_check(spec),
         mode=mode,
         timeout=5,
     )
@@ -595,9 +633,9 @@ def test_producer_builds_every_target_in_each_mode(inputs, tmp_path, monkeypatch
     rt.produce(_produce_args(spec_path, tmp_path, "ahead", REGION))
     assert rerun.calls == []
     # a global run cannot use a window's targets
-    with pytest.raises(ValueError, match="does not hold"):
+    with pytest.raises(ValueError, match="does not cover"):
         rt.produce(_produce_args(spec_path, tmp_path, "ahead", None))
-    assert "does not hold" in (tmp_path / rt.FAILED).read_text()
+    assert "does not cover" in (tmp_path / rt.FAILED).read_text()
 
 
 @pytest.mark.parametrize("mode,built", [("gated", [6]), ("serial", [])])
@@ -638,7 +676,13 @@ def test_reader_asks_for_a_missing_target(tmp_path):
     gated one retrying out of memory) waits for."""
     t0 = np.datetime64("2024-09-25T12")
     reader = rt.TargetReader(
-        str(tmp_path), t0, lambda path: None, mode="serial", timeout=0.1
+        str(tmp_path),
+        str(tmp_path),
+        t0,
+        lambda path: None,
+        check=_ok,
+        mode="serial",
+        timeout=0.1,
     )
     with pytest.raises(TimeoutError):
         reader.get(6)
@@ -673,6 +717,7 @@ def test_producer_process_failure_reaches_the_readers(tmp_path):
     proc = rt.ProducerProcess(
         spec=str(tmp_path / "missing.json"),
         out_dir=str(tmp_path),
+        run_dir=str(tmp_path),
         run_init=np.datetime64("2024-09-25T12"),
         hours=[6],
         gates=[None],
@@ -691,3 +736,117 @@ def test_producer_process_failure_reaches_the_readers(tmp_path):
         time.sleep(0.1)
     with pytest.raises(RuntimeError, match="missing.json"):
         rt.wait_for_target(str(tmp_path), np.datetime64("2024-09-25T18"), timeout=5)
+
+
+def test_a_target_from_another_source_is_never_used(inputs, tmp_path, monkeypatch):
+    """Targets are named by valid time only. One built from another source state (here
+    another ERA5 store; e.g. another HRES forecast) with the right channels and tiles
+    stops the producer, and every reader refuses it even before the producer looks."""
+    spec, spec_path = inputs
+    monkeypatch.setattr(rt, "make_source", lambda s: _FakeSource())
+    rt.produce(_produce_args(spec_path, tmp_path, "ahead", REGION))
+    other = {**spec, "era5_zarr": "gs://another/era5.zarr"}
+    other_path = tmp_path / "other.json"
+    other_path.write_text(json.dumps(other))
+    rerun = _FakeSource()
+    monkeypatch.setattr(rt, "make_source", lambda s: rerun)
+    with pytest.raises(ValueError, match="built from"):
+        rt.produce(_produce_args(str(other_path), tmp_path, "ahead", REGION))
+    assert rerun.calls == [] and "built from" in (tmp_path / rt.FAILED).read_text()
+
+    (tmp_path / rt.FAILED).unlink()
+    reader = rt.TargetReader(
+        str(tmp_path),
+        str(tmp_path / "runs" / "b"),
+        np.datetime64("2024-09-25T12"),
+        lambda path: path,
+        check=_check(other),
+        mode="ahead",
+        timeout=5,
+    )
+    reader.prefetch([6])
+    with pytest.raises(ValueError, match="built from"):
+        reader.get(6)
+    with pytest.raises(ValueError, match="built from"):
+        reader.get(12)  # not prefetched: read on the caller's thread
+    reader.close()
+    # the run that built them reads them
+    reader = rt.TargetReader(
+        str(tmp_path),
+        str(tmp_path / "runs" / "a"),
+        np.datetime64("2024-09-25T12"),
+        lambda path: path,
+        check=_check(spec),
+        mode="ahead",
+        timeout=5,
+    )
+    assert reader.get(6)[0] == rt.target_path(str(tmp_path), reader.valid(6))
+
+
+def test_target_origin_names_the_forecast_and_the_inputs(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    hres = {"source": "hres", "init": "2024-09-25T12", "cache": "c", "map": "m.nc"}
+    hres |= {"phis": "p.zarr", "vert": "v.nc"}
+    origin = rt.target_origin(hres)
+    assert origin["init"] == "2024-09-25T12" and "cache" not in origin
+    assert origin["map"] == str(tmp_path / "m.nc")  # relative to the run's cwd
+    assert rt.target_origin({**hres, "init": "2024-09-26T00"}) != origin
+    assert rt.target_origin({**hres, "cache": "elsewhere"}) == origin
+    assert rt.target_origin({**hres, "vert": "v2.nc"}) != origin
+
+
+def test_a_lost_rename_race_keeps_the_first_target(tmp_path):
+    """Two runs sharing the directory may build the same target; the second rename
+    finds the first store there and keeps it."""
+    tiles = rt.producer_tiles(REGION, TILE, FACE)
+    tb = TILE // 8
+    path = rt.target_path(str(tmp_path), np.datetime64("2024-09-25T18"))
+    kw = dict(
+        channels=["T_2m"],
+        tiles=tiles,
+        tile_size=TILE,
+        face_size=FACE,
+        valid=np.datetime64("2024-09-25T18"),
+        history="h",
+        source="s",
+        origin=ORIGIN,
+    )
+    first = np.ones((1, len(tiles), tb, tb))
+    rt.write_target(path, first, **kw)
+    rt.write_target(path, 2.0 * first, **kw)
+    np.testing.assert_array_equal(rt.read_blocks(path, ["T_2m"], tiles, TILE), first)
+    assert sorted(os.listdir(tmp_path)) == [os.path.basename(path)]
+
+
+def test_producer_runs_in_the_runs_directory(tmp_path, monkeypatch):
+    """Relative paths (the spec, the target and run directories) mean what they mean to
+    the run, and a run leaves the markers of another run in the same target directory
+    alone."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "bad.json").write_text(json.dumps({"source": "era5"}))
+    other = tmp_path / "targets" / "runs" / "other"
+    other.mkdir(parents=True)
+    (other / "analysis_2024092518").touch()
+    proc = rt.ProducerProcess(
+        spec="bad.json",
+        out_dir="targets",
+        run_dir=os.path.join("targets", "runs", "this"),
+        run_init=np.datetime64("2024-09-25T12"),
+        hours=[6],
+        gates=[None],
+        mode="gated",
+        stems=STEMS,
+        tile_size=TILE,
+        face_size=FACE,
+        region=None,
+        ring=False,
+        gpu=None,
+    )
+    assert proc.close(timeout=300) != 0
+    failed = tmp_path / "targets" / "runs" / "this" / rt.FAILED
+    deadline = time.time() + 30
+    while not failed.exists() and time.time() < deadline:
+        time.sleep(0.1)
+    assert "the era5 spec lacks" in failed.read_text()  # the child read bad.json
+    assert (other / "analysis_2024092518").exists()
+    assert not (tmp_path / "targets" / rt.FAILED).exists()

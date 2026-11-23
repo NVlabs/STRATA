@@ -177,11 +177,18 @@ torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \
   for it and the run waits (for debugging). Outside `serial` the next source state is
   fetched while the GPU builds the current one.
 - A target is written under `.partial<pid>` and renamed, so a rank never reads half a
-  store. The producer writes `FAILED` (with the traceback) or `DONE` in the directory,
-  and its log goes to `producer.log` there. A rank that waits longer than
-  `--driver-target-timeout` seconds (default 3600) for a target fails.
-- The directory must be on a file system every rank sees. Targets already there are
-  kept if they hold this run's channels and tiles, so a rerun builds nothing.
+  store. Each run has its own directory `DIR/runs/<run-name>-<time>-<pid>`: there the
+  producer writes `FAILED` (with the traceback) or `DONE` and its `producer.log`, and
+  the run its markers, so runs that share `DIR` do not disturb each other. A rank that
+  waits longer than `--driver-target-timeout` seconds (default 3600) for a target fails.
+- The directory must be on a file system every rank sees. Each target records its
+  origin: the source (the ERA5 store, or the HRES forecast's init) and the absolute
+  paths of `map`, `phis` and `vert`. A target already there is used only if it has this
+  run's origin and holds its channels and tiles, so a rerun builds nothing; any other
+  target with the name of one the run needs (say, from another HRES forecast) stops the
+  run, in the producer and in every rank, before it is used.
+- Relative paths, in the options and in the spec, are taken from the run's working
+  directory, also by the producer.
 - `python -m screamcast.replay_targets produce --spec SPEC.json --out-dir DIR
   --run-init 2024-09-25T12 --hours 6 12 18 [--region R --tile-size 128 [--ring]]`
   builds targets without a run, and `python -m screamcast.replay_targets compare A B`

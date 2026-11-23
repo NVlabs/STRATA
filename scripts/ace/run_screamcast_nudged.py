@@ -54,6 +54,7 @@ occasionally drops to 80%, probably related to I/O events
 from __future__ import annotations
 
 import argparse
+import functools
 import logging
 import os
 import sys
@@ -121,14 +122,18 @@ from screamcast.replay_targets import (
 from screamcast.replay_targets import (
     ProducerProcess,
     TargetReader,
+    check_target,
     load_spec,
     make_source,
     mark,
     producer_stems,
+    producer_tiles,
     read_blocks,
     read_box_blocks,
     ring_hours,
     source_hours,
+    target_channels,
+    target_origin,
     target_schedule,
 )
 from screamcast.sht_omega_filter import DistributedSHTHighpass
@@ -385,8 +390,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "--driver-onthefly: directory of the targets, on a file system every "
-            "rank sees. Targets already there (an earlier run) are kept if they "
-            "cover this run."
+            "rank sees. Targets already there (an earlier run) are used if they were "
+            "built from the same source and fast_ic inputs and cover this run; any "
+            "other target there stops the run. The producer's log, FAILED/DONE and "
+            "the run's markers go to DIR/runs/<run-name>-<time>-<pid>."
         ),
     )
     parser.add_argument(
@@ -1581,7 +1588,8 @@ def main() -> None:
     onthefly = args.driver_onthefly is not None
     anchored = topology.is_regional and args.region_boundary == "anchored"
     needs_drivers = not onthefly and (args.replay or anchored)
-    driver_source = make_source(load_spec(args.driver_onthefly)) if onthefly else None
+    driver_spec = load_spec(args.driver_onthefly) if onthefly else None
+    driver_source = make_source(driver_spec) if onthefly else None
     drivers = (
         resolve_drivers(args=args, t0=t0, ds=ds, n_steps=n_steps, dt_hours=dt_hours)
         if needs_drivers
@@ -1670,6 +1678,19 @@ def main() -> None:
             # the ring drives every input channel
             list(in_coords["variable"]) if anchored else [],
         )
+        # this run's FAILED, DONE, markers and log; the targets are shared with other runs
+        name = [f"{args.run_name}-{time.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"]
+        torch.distributed.broadcast_object_list(name, src=0, device=device)
+        run_dir = os.path.join(args.driver_target_dir, "runs", name[0])
+        check = functools.partial(
+            check_target,
+            channels=target_channels(stems),
+            tiles=producer_tiles(
+                args.region, topology.tile_size, topology.face_size, anchored
+            ),
+            tile_size=topology.tile_size,
+            origin=target_origin(driver_spec),
+        )
         if rank == 0:
             visible = os.environ.get("CUDA_VISIBLE_DEVICES")
             gpu = str(device.index)
@@ -1678,6 +1699,7 @@ def main() -> None:
             producer = ProducerProcess(
                 spec=args.driver_onthefly,
                 out_dir=args.driver_target_dir,
+                run_dir=run_dir,
                 run_init=t0,
                 hours=[h for h, _ in schedule],
                 gates=[g for _, g in schedule],
@@ -1697,14 +1719,16 @@ def main() -> None:
                 args.driver_target_dir,
                 [h for h, _ in schedule],
             )
-        torch.distributed.barrier()  # the producer has cleared old markers
+        torch.distributed.barrier()  # the producer has made the run directory
         if replay is not None:
             target_reader = TargetReader(
                 args.driver_target_dir,
+                run_dir,
                 t0,
                 lambda path: read_blocks(
                     path, replay.names, topology.local_tiles, topology.tile_size
                 ),
+                check=check,
                 mode=args.driver_producer,
                 timeout=args.driver_target_timeout,
             )
@@ -1713,8 +1737,10 @@ def main() -> None:
             ring_names = list(in_coords["variable"])
             ring_reader = TargetReader(
                 args.driver_target_dir,
+                run_dir,
                 t0,
                 lambda path: read_box_blocks(path, ring_names, topology),
+                check=check,
                 mode=args.driver_producer,
                 timeout=args.driver_target_timeout,
             )
@@ -2040,7 +2066,7 @@ def main() -> None:
                 if producer is not None and args.driver_producer == "gated":
                     # the producer builds the next target from here on, on this GPU
                     torch.cuda.empty_cache()
-                    mark(args.driver_target_dir, "analysis", target_reader.valid(hour))
+                    mark(run_dir, "analysis", target_reader.valid(hour))
                 blocks, info = target_reader.get(hour)
                 replay.add_block_target(hour, torch.from_numpy(blocks))
                 logger.info(
