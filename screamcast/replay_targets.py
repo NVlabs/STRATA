@@ -71,6 +71,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import shutil
 import signal
 import subprocess
@@ -99,7 +100,7 @@ from screamcast.initial_conditions.fast_ic import (
 )
 from screamcast.initial_conditions.layout import NLEV_SUBSET, VARS_3D
 from screamcast.regional import parse_region, ring_box
-from screamcast.replay import BLOCK, ReplayStep, block_mean
+from screamcast.replay import BLOCK, ReplayStep, block_mean, channel_level
 
 FAILED = "FAILED"
 DONE = "DONE"
@@ -298,6 +299,12 @@ def target_channels(stems: list[str]) -> list[str]:
         else:
             raise ValueError(f"{stem} is not a variable build_ic produces")
     return out
+
+
+def producer_stems(replay_vars: list[str], ring_vars: list[str]) -> list[str]:
+    """The variables a producer builds, whole: those of the replayed channels
+    (``--replay-vars``, bare or per level like ``U_24``) and of the ring's channels."""
+    return sorted({channel_level(name)[0] for name in [*replay_vars, *ring_vars]})
 
 
 def tile_columns(tiles, tile_size: int, face_size: int) -> np.ndarray:
@@ -545,10 +552,15 @@ def wait_for_markers(
 
 
 def wait_for_target(
-    out_dir: str, valid: np.datetime64, timeout: float, poll: float = 0.5
+    out_dir: str,
+    valid: np.datetime64,
+    timeout: float | None,
+    poll: float = 0.5,
+    stop: threading.Event | None = None,
 ) -> float:
     """Block until the target of ``valid`` exists; the seconds waited. Raises at once
-    if the producer wrote ``FAILED`` or finished (``DONE``) without it."""
+    if the producer wrote ``FAILED`` or finished (``DONE``) without it, or if ``stop``
+    is set; after ``timeout`` seconds unless it is None."""
     path = target_path(out_dir, valid)
     start = time.perf_counter()
     while not os.path.isdir(path):
@@ -558,9 +570,12 @@ def wait_for_target(
                 raise RuntimeError(f"replay target producer failed:\n{f.read()}")
         if os.path.exists(os.path.join(out_dir, DONE)):
             raise RuntimeError(f"replay target producer finished without {path}")
-        if time.perf_counter() - start > timeout:
+        if timeout is not None and time.perf_counter() - start > timeout:
             raise TimeoutError(f"no replay target {path} after {timeout:.0f} s")
-        time.sleep(poll)
+        if stop is not None and stop.wait(poll):
+            raise RuntimeError(f"stopped waiting for replay target {path}")
+        if stop is None:
+            time.sleep(poll)
     return time.perf_counter() - start
 
 
@@ -886,7 +901,11 @@ class TargetReader:
     """A rank's reader of the targets, ``read(path)`` of each (its own tiles' blocks for
     the replay, the window and ring box for the ring), on a background thread
     (``prefetch``) so the run does not wait on the file system. With a ``serial``
-    producer nothing is prefetched: ``get`` asks for each target."""
+    producer nothing is prefetched: ``get`` asks for each target.
+
+    ``timeout`` counts from the ``get`` call: a prefetched target may take as long as
+    the run takes to need it. The background thread is a daemon and stops waiting at
+    ``close``, so a run that fails does not wait for targets on its way out."""
 
     def __init__(
         self,
@@ -904,37 +923,67 @@ class TargetReader:
         self.read = read
         self.mode = mode
         self.timeout = timeout
-        self.pool = ThreadPoolExecutor(1)
+        self.stop = threading.Event()
+        self.queue: queue.SimpleQueue[tuple[int, Future]] = queue.SimpleQueue()
+        self.worker: threading.Thread | None = None
         self.futures: dict[int, Future] = {}
 
     def valid(self, hour: int) -> np.datetime64:
         return self.run_init + np.timedelta64(hour, "h")
 
-    def _load(self, hour: int) -> tuple[np.ndarray, dict]:
-        waited = wait_for_target(self.out_dir, self.valid(hour), self.timeout)
+    def _load(self, hour: int, timeout: float | None) -> tuple[np.ndarray, dict]:
+        waited = wait_for_target(
+            self.out_dir, self.valid(hour), timeout, stop=self.stop
+        )
         t = time.perf_counter()
         blocks = self.read(target_path(self.out_dir, self.valid(hour)))
         return blocks, {"waited_s": waited, "read_s": time.perf_counter() - t}
 
+    def _work(self) -> None:
+        while not self.stop.is_set():
+            hour, future = self.queue.get()
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                future.set_result(self._load(hour, None))
+            except BaseException as e:  # noqa: BLE001 (handed to the caller of get)
+                future.set_exception(e)
+
     def prefetch(self, hours: list[int]) -> None:
         if self.mode == "serial":
             return
+        if self.worker is None:
+            self.worker = threading.Thread(target=self._work, daemon=True)
+            self.worker.start()
         for hour in hours:
             if hour not in self.futures:
-                self.futures[hour] = self.pool.submit(self._load, hour)
+                self.futures[hour] = Future()
+                self.queue.put((hour, self.futures[hour]))
 
     def get(self, hour: int) -> tuple[np.ndarray, dict]:
         """``read`` of the target at ``+hour`` and timings, with ``blocked_s`` the
-        seconds the caller waited here."""
+        seconds the caller waited here (at most ``timeout``)."""
         start = time.perf_counter()
         if not os.path.isdir(target_path(self.out_dir, self.valid(hour))):
             mark(self.out_dir, "request", self.valid(hour))
         future = self.futures.pop(hour, None)
-        blocks, info = future.result() if future is not None else self._load(hour)
+        if future is None:
+            blocks, info = self._load(hour, self.timeout)
+        else:
+            try:
+                blocks, info = future.result(timeout=self.timeout)
+            except TimeoutError:
+                raise TimeoutError(
+                    f"no replay target "
+                    f"{target_path(self.out_dir, self.valid(hour))} after "
+                    f"{self.timeout:.0f} s"
+                ) from None
         return blocks, {**info, "blocked_s": time.perf_counter() - start}
 
     def close(self) -> None:
-        self.pool.shutdown(wait=False, cancel_futures=True)
+        self.stop.set()
+        for future in self.futures.values():
+            future.cancel()
 
 
 # ------------------------------------------------------------------ CLI

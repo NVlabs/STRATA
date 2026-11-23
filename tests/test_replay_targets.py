@@ -461,6 +461,59 @@ def test_wait_for_target_stops_on_failed_done_and_timeout(tmp_path):
     assert rt.wait_for_target(str(tmp_path), valid, timeout=10) < 1.0
 
 
+def test_a_prefetched_targets_timeout_counts_from_get(tmp_path):
+    """A gated target is built only after the previous analysis, which can be longer
+    after start-up than the timeout: the timeout counts from the run's ``get``."""
+    t0 = np.datetime64("2024-09-25T12")
+    reader = rt.TargetReader(
+        str(tmp_path), t0, lambda path: path, mode="gated", timeout=0.5
+    )
+    reader.prefetch([6, 12])
+    time.sleep(1.0)  # the run integrates to +6 h; nothing is built yet
+    for h in (6, 12):
+        os.makedirs(rt.target_path(str(tmp_path), reader.valid(h)))
+        path, _ = reader.get(h)
+        assert path == rt.target_path(str(tmp_path), reader.valid(h))
+    reader.prefetch([18])
+    start = time.perf_counter()
+    with pytest.raises(TimeoutError):
+        reader.get(18)  # never built: the run gives up a timeout after asking
+    assert 0.4 < time.perf_counter() - start < 3.0
+    reader.close()
+
+
+def test_a_closed_reader_stops_waiting(tmp_path):
+    """A run that fails closes (or loses) its readers: no thread keeps waiting for the
+    targets still queued, so the process can exit at once."""
+    import threading
+
+    before = set(threading.enumerate())
+    reader = rt.TargetReader(
+        str(tmp_path),
+        np.datetime64("2024-09-25T12"),
+        lambda path: path,
+        mode="gated",
+        timeout=60,
+    )
+    reader.prefetch([6, 12, 18])
+    time.sleep(0.2)
+    new = [t for t in threading.enumerate() if t not in before]
+    assert new and all(t.daemon for t in new)  # never holds up interpreter exit
+    reader.close()
+    for t in new:
+        t.join(timeout=3)
+        assert not t.is_alive()
+
+
+def test_producer_stems_are_whole_variables():
+    """Per-level --replay-vars (U_24) and the ring's channels map to the variables the
+    producer builds; target_channels accepts every one of them."""
+    stems = rt.producer_stems(["U_24", "T_2m", "U_3"], ["qv_0", "qv_1", "ps"])
+    assert stems == ["T_2m", "U", "ps", "qv"]
+    assert "U_24" in rt.target_channels(["U"])
+    rt.target_channels(stems)
+
+
 # ------------------------------------------------------------------ producer
 
 

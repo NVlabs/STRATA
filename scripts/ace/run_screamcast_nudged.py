@@ -111,7 +111,6 @@ from screamcast.replay import (
     Replay,
     ReplayStep,
     analysis_hours,
-    channel_level,
     level_ramp_weights,
     replay_plan,
     run_with_replay,
@@ -125,6 +124,7 @@ from screamcast.replay_targets import (
     load_spec,
     make_source,
     mark,
+    producer_stems,
     read_blocks,
     read_box_blocks,
     ring_hours,
@@ -1663,9 +1663,11 @@ def main() -> None:
         n_hours = int(np.ceil(n_steps * dt_hours))
         steps = plan or [ReplayStep("window", h) for h in range(1, n_hours + 1)]
         schedule = target_schedule(steps, ring)
-        stems = set(args.replay_vars.split(",")) if args.replay else set()
-        if anchored:  # the ring drives every input channel
-            stems |= {channel_level(name)[0] for name in in_coords["variable"]}
+        stems = producer_stems(
+            args.replay_vars.split(",") if args.replay else [],
+            # the ring drives every input channel
+            list(in_coords["variable"]) if anchored else [],
+        )
         if rank == 0:
             visible = os.environ.get("CUDA_VISIBLE_DEVICES")
             gpu = str(device.index)
@@ -1678,7 +1680,7 @@ def main() -> None:
                 hours=[h for h, _ in schedule],
                 gates=[g for _, g in schedule],
                 mode=args.driver_producer,
-                stems=sorted(stems),
+                stems=stems,
                 tile_size=topology.tile_size,
                 face_size=topology.face_size,
                 region=args.region,
