@@ -215,4 +215,8 @@ drivers.
   replicate` needs the ring on the plane and refuses such windows.
 - Windows flush with a south edge, a polar face's edge or a cube corner are checked
   on a toy cube (the halo equals the global halo bit for bit, and a perfect driver
-  reproduces the global run) but not yet run with STRATA on the GPU.
+  reproduces the global run). With STRATA, only a 2 x 2-tile window at the corner of
+  faces 3, 0 and 4 (`3,0,2,14,16`) has run: 12 h on one GPU (2026-11-24), replayed, with
+  its initial condition and ring built on the fly from the WeatherBench2 HRES forecast
+  of 2020-08-26 00 UTC; its 11 ring tiles came from three faces and the output stayed
+  finite and plausible. Its skill was not measured.
