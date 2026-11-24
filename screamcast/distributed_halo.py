@@ -56,23 +56,41 @@ from earth2grid import KNNS2Interpolator
 Tile: TypeAlias = tuple[int, int, int]
 
 # A regional run's region is a rectangle on a "plane": one face, or an equatorial face
-# (0-3) and one neighbour joined across their shared edge, either the next equatorial
-# face to the east (rows line up one to one) or the north polar face 5 (its edge that
-# meets equatorial face f's north edge lies there after f quarter turns). Each block is
-# ``(face, block row, block col, k)``: the face's data sits in the plane as
-# ``torch.rot90(data, k)``. tests/test_regional.py checks the joins on the grid.
+# (0-3) and one neighbour joined across their shared edge: the next equatorial face to
+# the east (rows line up one to one), the north polar face 5 (its edge that meets
+# equatorial face f's north edge lies there after f quarter turns) or the south polar
+# face 4 (below face f after -f quarter turns). Each block is ``(face, block row, block
+# col, k)``: the face's data sits in the plane as ``torch.rot90(data, k)``. The first
+# block is the plane's base face; below a south join it sits at block row 1.
+# tests/test_regional.py checks the joins on the grid.
 PlaneBlock: TypeAlias = tuple[int, int, int, int]
 NORTH_POLAR_FACE = 5
+SOUTH_POLAR_FACE = 4
+# (normal, row direction, column direction) of each face of ne1024pg2: pixel (p, q) of
+# a face lies toward normal + x_p row + y_q column, x and y running from -1 to 1 along
+# the face. Rows run north on the equatorial faces. tests/test_regional.py checks them on
+# the grid.
+FACE_AXES = (
+    ((1, 0, 0), (0, 0, 1), (0, 1, 0)),
+    ((0, 1, 0), (0, 0, 1), (-1, 0, 0)),
+    ((-1, 0, 0), (0, 0, 1), (0, -1, 0)),
+    ((0, -1, 0), (0, 0, 1), (1, 0, 0)),
+    ((0, 0, -1), (1, 0, 0), (0, 1, 0)),
+    ((0, 0, 1), (-1, 0, 0), (0, 1, 0)),
+)
 
 
 def plane_blocks(
-    face: int, north: bool = False, east: bool = False
+    face: int, north: bool = False, east: bool = False, south: bool = False
 ) -> list[PlaneBlock]:
-    """The faces of the plane based on ``face``, with its north or east neighbour."""
-    if north and east:
-        raise ValueError("a region plane joins one neighbour, north or east")
-    if (north or east) and not 0 <= face < 4:
+    """The faces of the plane based on ``face``, with its north, east or south
+    neighbour."""
+    if north + east + south > 1:
+        raise ValueError("a region plane joins one neighbour, north, east or south")
+    if (north or east or south) and not 0 <= face < 4:
         raise ValueError(f"only an equatorial face (0-3) joins a neighbour, not {face}")
+    if south:
+        return [(face, 1, 0, 0), (SOUTH_POLAR_FACE, 0, 0, -face % 4)]
     blocks = [(face, 0, 0, 0)]
     if east:
         blocks.append(((face + 1) % 4, 0, 1, 0))
@@ -81,15 +99,53 @@ def plane_blocks(
     return blocks
 
 
+def base_offset(blocks: list[PlaneBlock], n: int) -> tuple[int, int]:
+    """Plane position of the base face's ``(0, 0)``, ``n`` per face side: a
+    ``--region`` spec counts from there, so a south join's rows are negative."""
+    _, br, bc, _ = blocks[0]
+    return br * n, bc * n
+
+
+def tile_corners(tile: Tile, tiles_per_dim: int) -> set[tuple[int, int, int]]:
+    """The four corners of ``tile`` as integer points of the cube ``[-T, T]^3`` (``T``
+    tiles per face side), from ``FACE_AXES``: tiles of any faces touch where they share
+    a corner. The equiangular grid puts a face's tile edges at the same angles on every
+    face, so the integer lattice labels the shared edges alike."""
+    face, ti, tj = tile
+    t = tiles_per_dim
+    normal, row, col = FACE_AXES[face]
+    return {
+        tuple(
+            t * a + (2 * r - t) * b + (2 * c - t) * d
+            for a, b, d in zip(normal, row, col)
+        )
+        for r in (ti, ti + 1)
+        for c in (tj, tj + 1)
+    }
+
+
+def touching_tiles(tiles: list[Tile], tiles_per_dim: int) -> list[Tile]:
+    """The tiles, not in ``tiles``, that share an edge or a corner with one of them, on
+    any face (sorted)."""
+    own = set(tiles)
+    corners = set().union(*(tile_corners(t, tiles_per_dim) for t in tiles))
+    return [
+        t
+        for t in itertools.product(range(6), range(tiles_per_dim), range(tiles_per_dim))
+        if t not in own and tile_corners(t, tiles_per_dim) & corners
+    ]
+
+
 def region_plane_for(tiles: list[Tile], tiles_per_dim: int) -> list[PlaneBlock]:
     """The plane (``plane_blocks``) of a region made of ``tiles``.
 
     Tiles on two faces: the equatorial face joined to that neighbour. Tiles on one
     face: that face, unless the region is flush with an equatorial face's north, east or
     west edge, where its one-tile ring lies on the neighbour; the plane then joins that
-    neighbour (the west neighbour as the base of an east join). No plane holds the ring
-    of a region flush with a south edge, with two edges (a cube corner) or with a polar
-    face's edge; ``TileTopology.region_box`` refuses those.
+    neighbour (the west neighbour as the base of an east join). The ring of a region
+    flush with a south edge, with two edges (a cube corner) or with a polar face's edge
+    is not on any plane; ``TileTopology.ring_tiles`` then takes it from every face it
+    touches.
     """
     faces = sorted({f for f, _, _ in tiles})
     if len(faces) == 1:
@@ -106,13 +162,15 @@ def region_plane_for(tiles: list[Tile], tiles_per_dim: int) -> list[PlaneBlock]:
         a, b = faces
         if b == NORTH_POLAR_FACE and a < 4:
             return plane_blocks(a, north=True)
+        if b == SOUTH_POLAR_FACE and a < 4:
+            return plane_blocks(a, south=True)
         if b < 4 and (a + 1) % 4 == b:
             return plane_blocks(a, east=True)
         if b < 4 and (b + 1) % 4 == a:
             return plane_blocks(b, east=True)
     raise ValueError(
         f"active tiles span faces {faces}: need one face, or an equatorial face "
-        "and its east neighbour or the north polar face"
+        "and its east neighbour or a polar face"
     )
 
 
@@ -198,6 +256,18 @@ def plane_parts(
 
 
 @dataclass(frozen=True)
+class RingPiece:
+    """A rectangle of tiles on one plane that the anchored ring is smoothed on: plane
+    pixels ``origin`` to ``origin + size`` of ``blocks``. ``tiles`` are the ring tiles
+    it supplies (in ``ring_tiles`` order)."""
+
+    blocks: tuple[PlaneBlock, ...]
+    origin: tuple[int, int]
+    size: tuple[int, int]
+    tiles: tuple[Tile, ...]
+
+
+@dataclass(frozen=True)
 class TileTopology:
     """Describe the distributed cubed-sphere tile decomposition.
 
@@ -205,10 +275,11 @@ class TileTopology:
     those tiles are predicted and distributed over the ranks, in the given
     order; ``global_tiles``/``total_tiles``/``local_tiles`` then refer to the
     active set. The region must be a full rectangle of tiles on a region plane
-    (one face, or an equatorial face joined to its east or north neighbour,
-    see ``region_plane_for``) whose one-tile ``ring_tiles`` stays on that plane;
-    the ring is not predicted, it only supplies the halo sources at the region
-    boundary. ``None`` is the full cube.
+    (one face, or an equatorial face joined to its east, north or south neighbour,
+    see ``region_plane_for``). Its ``ring_tiles`` are the tiles that touch it, on the
+    plane or, at a face edge the plane does not cross, on the faces beyond; the ring is
+    not predicted, it only supplies the halo sources at the region boundary. ``None``
+    is the full cube.
     """
 
     world_size: int
@@ -225,7 +296,7 @@ class TileTopology:
                 f"face_size={self.face_size} must be divisible by tile_size={self.tile_size}"
             )
         if self.active_tiles is not None:
-            # region_box validates the rectangle and the ring.
+            # region_box validates the rectangle.
             self.region_box  # noqa: B018
         if self.total_tiles % self.world_size != 0:
             raise ValueError(
@@ -279,19 +350,21 @@ class TileTopology:
             raise ValueError("region_plane is only defined for a regional topology")
         return region_plane_for(list(self.active_tiles), self.tiles_per_dim)
 
-    def tile_plane_position(self, tile: Tile) -> tuple[int, int, int]:
-        """``(row, col, k)`` of ``tile`` on the region plane in tile units; its data
-        lies there turned ``k`` quarter turns. The full cube: the tile's own face."""
+    def tile_plane_position(
+        self, tile: Tile, blocks: list[PlaneBlock] | None = None
+    ) -> tuple[int, int, int]:
+        """``(row, col, k)`` of ``tile`` on the plane ``blocks`` (default the region
+        plane) in tile units; its data lies there turned ``k`` quarter turns. The full
+        cube without ``blocks``: the tile's own face."""
         face, ti, tj = tile
-        if self.active_tiles is None:
-            return ti, tj, 0
-        for f, _, _, k in self.region_plane:
+        if blocks is None:
+            if self.active_tiles is None:
+                return ti, tj, 0
+            blocks = self.region_plane
+        for f, _, _, k in blocks:
             if f == face:
-                return (
-                    *to_plane(self.region_plane, face, ti, tj, self.tiles_per_dim),
-                    k,
-                )
-        raise ValueError(f"tile {tile} is not on the region plane")
+                return (*to_plane(blocks, face, ti, tj, self.tiles_per_dim), k)
+        raise ValueError(f"tile {tile} is not on the plane {blocks}")
 
     @cached_property
     def region_box(self) -> tuple[int, int, int, int, int]:
@@ -311,22 +384,33 @@ class TileTopology:
             itertools.product(range(i0, i1), range(j0, j1))
         ) or len(set(tiles)) != len(tiles):
             raise ValueError("active tiles must be a full rectangle without repeats")
-        rows, cols = plane_shape(blocks, self.tiles_per_dim)
-        if i0 < 1 or j0 < 1 or i1 > rows - 1 or j1 > cols - 1:
-            raise ValueError(
-                f"region tiles {i0}:{i1} x {j0}:{j1} must keep one ring tile on the "
-                f"plane of face {blocks[0][0]} ({rows} x {cols} tiles); a ring across "
-                "an equatorial face's south edge, a polar face's edge or a cube "
-                "corner is not supported"
-            )
         return blocks[0][0], i0, i1, j0, j1
+
+    @property
+    def region_spec(self) -> str:
+        """The region as a ``--region`` spec, ``face,i0,i1,j0,j1`` counted from the base
+        face's ``(0, 0)`` (``base_offset``)."""
+        face, i0, i1, j0, j1 = self.region_box
+        di, dj = base_offset(self.region_plane, self.tiles_per_dim)
+        return f"{face},{i0 - di},{i1 - di},{j0 - dj},{j1 - dj}"
+
+    @cached_property
+    def ring_on_plane(self) -> bool:
+        """Whether the one-tile ring around the region lies on the region plane."""
+        _, i0, i1, j0, j1 = self.region_box
+        rows, cols = plane_shape(self.region_plane, self.tiles_per_dim)
+        return i0 >= 1 and j0 >= 1 and i1 <= rows - 1 and j1 <= cols - 1
 
     @cached_property
     def ring_tiles(self) -> list[Tile]:
-        """The one-tile ring around the region (row-major on the plane), empty for the
-        full cube."""
+        """The tiles that touch the region, empty for the full cube: the one-tile ring
+        around it row-major on the plane, or, when that ring leaves the plane (a region
+        flush with a south edge, a polar face's edge or at a cube corner), every tile of
+        any face sharing an edge or corner with it (``touching_tiles``, sorted)."""
         if self.active_tiles is None:
             return []
+        if not self.ring_on_plane:
+            return touching_tiles(list(self.active_tiles), self.tiles_per_dim)
         _, i0, i1, j0, j1 = self.region_box
         return [
             from_plane(self.region_plane, i, j, self.tiles_per_dim)
@@ -334,6 +418,64 @@ class TileTopology:
             for j in range(j0 - 1, j1 + 1)
             if not (i0 <= i < i1 and j0 <= j < j1)
         ]
+
+    @cached_property
+    def ring_pieces(self) -> list[RingPiece]:
+        """The rectangles the anchored ring is smoothed on: the region and its ring on
+        the plane, or, for a ring off the plane, on each face it reaches the smallest
+        rectangle of tiles holding the region's and the ring's tiles there (it may hold
+        other tiles too, ``boundary_tiles``)."""
+        if self.active_tiles is None:
+            return []
+        ts = self.tile_size
+        if self.ring_on_plane:
+            _, i0, i1, j0, j1 = self.region_box
+            return [
+                RingPiece(
+                    blocks=tuple(self.region_plane),
+                    origin=((i0 - 1) * ts, (j0 - 1) * ts),
+                    size=((i1 - i0 + 2) * ts, (j1 - j0 + 2) * ts),
+                    tiles=tuple(self.ring_tiles),
+                )
+            ]
+        everything = [*self.active_tiles, *self.ring_tiles]
+        pieces = []
+        for face in sorted({f for f, _, _ in self.ring_tiles}):
+            rows = [i for f, i, _ in everything if f == face]
+            cols = [j for f, _, j in everything if f == face]
+            pieces.append(
+                RingPiece(
+                    blocks=((face, 0, 0, 0),),
+                    origin=(min(rows) * ts, min(cols) * ts),
+                    size=(
+                        (max(rows) - min(rows) + 1) * ts,
+                        (max(cols) - min(cols) + 1) * ts,
+                    ),
+                    tiles=tuple(t for t in self.ring_tiles if t[0] == face),
+                )
+            )
+        return pieces
+
+    @cached_property
+    def boundary_tiles(self) -> list[Tile]:
+        """``ring_tiles``, then the other tiles outside the region that a ring piece
+        holds: the tiles an anchored ring needs the driver on."""
+        if self.active_tiles is None or self.ring_on_plane:
+            return list(self.ring_tiles)
+        ts = self.tile_size
+        known = {*self.active_tiles, *self.ring_tiles}
+        extra = [
+            (piece.blocks[0][0], i, j)
+            for piece in self.ring_pieces
+            for i in range(
+                piece.origin[0] // ts, (piece.origin[0] + piece.size[0]) // ts
+            )
+            for j in range(
+                piece.origin[1] // ts, (piece.origin[1] + piece.size[1]) // ts
+            )
+            if (piece.blocks[0][0], i, j) not in known
+        ]
+        return [*self.ring_tiles, *extra]
 
     def region_pixel_box(self) -> tuple[int, int, int, int, int]:
         """``(face, r0, r1, c0, c1)``: the region in plane pixels (half-open)."""
@@ -347,13 +489,15 @@ class TileTopology:
         tiles: list[Tile],
         origin: tuple[int, int],
         size: tuple[int, int],
+        blocks: list[PlaneBlock] | None = None,
     ) -> torch.Tensor:
         """Place ``(..., len(tiles), ts, ts)`` tiles into a ``(..., *size)`` box whose
-        pixel (0, 0) is plane pixel ``origin``; the parts of tiles outside are dropped."""
+        pixel (0, 0) is pixel ``origin`` of the plane ``blocks`` (default the region
+        plane); the parts of tiles outside are dropped."""
         ts = self.tile_size
         out = x.new_zeros(*x.shape[:-3], *size)
         for n, tile in enumerate(tiles):
-            ti, tj, k = self.tile_plane_position(tile)
+            ti, tj, k = self.tile_plane_position(tile, blocks)
             r, c = ti * ts - origin[0], tj * ts - origin[1]
             rs, cs = max(r, 0), max(c, 0)
             re, ce = min(r + ts, size[0]), min(c + ts, size[1])
@@ -365,15 +509,20 @@ class TileTopology:
         return out
 
     def box_to_tiles(
-        self, box: torch.Tensor, tiles: list[Tile], origin: tuple[int, int]
+        self,
+        box: torch.Tensor,
+        tiles: list[Tile],
+        origin: tuple[int, int],
+        blocks: list[PlaneBlock] | None = None,
     ) -> torch.Tensor:
         """Cut ``(..., len(tiles), ts, ts)`` tiles out of a ``(..., H, W)`` box whose
-        pixel (0, 0) is plane pixel ``origin``; tile pixels outside the box are 0."""
+        pixel (0, 0) is pixel ``origin`` of the plane ``blocks`` (default the region
+        plane); tile pixels outside the box are 0."""
         ts = self.tile_size
         H, W = box.shape[-2:]
         out = box.new_zeros(*box.shape[:-2], len(tiles), ts, ts)
         for n, tile in enumerate(tiles):
-            ti, tj, k = self.tile_plane_position(tile)
+            ti, tj, k = self.tile_plane_position(tile, blocks)
             r, c = ti * ts - origin[0], tj * ts - origin[1]
             rs, cs = max(r, 0), max(c, 0)
             re, ce = min(r + ts, H), min(c + ts, W)

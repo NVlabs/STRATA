@@ -18,14 +18,20 @@ about 8 minutes, and a 4 x 4-tile window (about 2,500 km) in about 4 minutes (se
 
 - one face; or
 - an equatorial face (0-3) joined to the next equatorial face to the east (`j1` beyond
-  the face's tiles), or to the north polar face 5 (`i1` beyond the face's tiles).
+  the face's tiles), to the north polar face 5 (`i1` beyond the face's tiles), or to the
+  south polar face 4 (a negative `i0`: `0,-4,4,4,12` is 4 rows on face 4 and 4 on face
+  0; write it `--region=0,-4,4,4,12`).
 
-The ring must stay on the same plane, so `i0, j0 >= 1` and the window ends at least one
-tile before the plane's far edge. A window inside one equatorial face that is flush with
-its north, east or west edge (for example `0,12,16,10,14` with 16 tiles per face side)
-runs on the plane that joins the neighbour holding its ring: the north polar face, the
-east neighbour, or the west neighbour (as the base of an east join). It can be written
-in either frame, `0,2,6,0,4` or `3,2,6,16,20`. `screamcast.regional` finds a window around a point:
+The ring is every tile that touches the window, edge or corner, on any face. A window
+inside one equatorial face that is flush with its north, east or west edge (for example
+`0,12,16,10,14` with 16 tiles per face side) runs on the plane that joins the neighbour
+holding its ring: the north polar face, the east neighbour, or the west neighbour (as the
+base of an east join). It can be written in either frame, `0,2,6,0,4` or `3,2,6,16,20`.
+A window flush with a face edge its plane does not cross (an equatorial face's south
+edge, a polar face's edge, two edges at a cube corner, or a window as wide as a face)
+takes its ring from the faces beyond that edge; at a cube corner, where three faces
+meet, a corner tile has seven neighbours instead of eight. `screamcast.regional` finds a
+window around a point:
 
 ```bash
 python -m screamcast.regional --lat 12 --lon 0 --tiles 8 \
@@ -42,15 +48,15 @@ python -m screamcast.regional --lat 12 --lon 0 --tiles 8 \
 ```
 
 It tries the point's own face first, then the planes that join it to a neighbour, and
-moves the window as little as needed to keep its ring on the plane.
+moves the window as little as needed to stay on the plane.
 
 ### A window from a lat/lon box
 
 `--region-latlon LAT0,LAT1,LON0,LON1` lets the runner choose the window. The box runs
 east from `LON0` to `LON1`, so `170,-170` crosses the dateline. The window holds every
 grid cell of the box with at least `--region-margin-tiles` whole tiles (default 1)
-between them and the driven ring, keeps its ring on one plane, and has a multiple of
-the world size of tiles; among those it has the fewest tiles, then the largest margin,
+between them and the driven ring, lies on one plane, and has a multiple of the world
+size of tiles; among those it has the fewest tiles, then the largest margin,
 then the most centred box. The run logs the chosen `--region`, and the output records
 both (`region`, `region_latlon`), so `--region` reproduces it. A box that starts south
 of the equator must be written with `=` (`--region-latlon=-40,-20,140,160`), or the
@@ -70,8 +76,9 @@ python -m screamcast.regional --latlon-box 8,18,-91,-79 --world-size 8 \
 #   lat   26.26  lon  292.48
 ```
 
-A box that needs a ring across an equatorial face's south edge or a cube corner, or is
-too large for one plane, is refused with the reason.
+South of about 40 degrees the window can cross into the south polar face
+(`--latlon-box=-60,-40,-20,10` gives `0,-4,2,3,11`). A box too large for one plane is
+refused with the reason.
 
 ## The boundary
 
@@ -200,6 +207,12 @@ drivers.
   at its edge on a few cases, not for forecast skill.
 - At the window edge the large scale is the driver's, smoothed; inside it is STRATA's
   own. Expect a narrow seam where the two meet.
-- A window cannot cross the south edge of an equatorial face, or join three faces. Its
-  ring cannot either: a window flush with an equatorial face's south edge, with a polar
-  face's edge, or with two edges of a face (a cube corner) is refused.
+- A window lies on one plane: it cannot join three faces (a window across a cube
+  corner). Its ring can: next to a face edge the plane does not cross, the ring comes
+  from the faces beyond, and the anchored ring's `smooth` is taken on each face apart
+  (`TileTopology.ring_pieces`), so its block means do not blend across that edge; the
+  halo reads only the ring pixels within about the halo width (16 px) of the window. `--region-boundary
+  replicate` needs the ring on the plane and refuses such windows.
+- Windows flush with a south edge, a polar face's edge or a cube corner are checked
+  on a toy cube (the halo equals the global halo bit for bit, and a perfect driver
+  reproduces the global run) but not yet run with STRATA on the GPU.

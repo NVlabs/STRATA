@@ -23,6 +23,7 @@ two-face planes (east and north). No test restates the code's arithmetic; the
 expectations are global-run equality, constants, and closed forms.
 """
 
+import itertools
 import os
 from collections import OrderedDict
 
@@ -31,6 +32,7 @@ import pytest
 import torch
 
 from screamcast.distributed_halo import (
+    FACE_AXES,
     DistributedTileKNNHaloPadding_AllGather,
     NormalizedHaloAdjoint,
     TileTopology,
@@ -45,12 +47,12 @@ from screamcast.regional import (
     box_mask,
     edge_distance,
     faces_to_box,
+    faces_to_pieces,
     find_box_region,
     find_region,
     nearest_pixel,
     parse_region,
     region_plane_of,
-    ring_box,
     smooth,
 )
 from screamcast.zarr_writer import FaceZarrWriteStep
@@ -66,12 +68,33 @@ FLUSH = {
     "flush_east": "3,1,5,2,6",
     "flush_west": "3,1,5,0,4",
 }
-REGIONS = {"face": REGION, "east": "3,1,5,4,8", "north": "3,4,8,1,5", **FLUSH}
+# 4 x 4 tiles across face 3's south edge (two rows on the south polar face, written with
+# a negative i0)
+PLANE = {"face": REGION, "east": "3,1,5,4,8", "north": "3,4,8,1,5", **FLUSH}
+PLANE["south"] = "3,-2,2,1,5"
+# windows whose ring leaves their plane: flush with a south edge, at a cube corner, as
+# wide as a face, flush with a polar face's edge, and across the south join flush with
+# the east edge (the ring reaches faces 0, 4 and, around the corner, the others)
+OFF_PLANE = {
+    "off_south": "3,0,4,1,5",
+    "off_corner": "3,2,6,2,6",
+    "off_wide": "3,1,5,0,6",
+    "off_polar": "5,2,6,1,5",
+    "off_south_polar": "4,1,5,2,6",
+    "off_south_join": "3,-2,2,2,6",
+}
+REGIONS = {**PLANE, **OFF_PLANE}
 
 
 @pytest.fixture(params=sorted(REGIONS))
 def region(request):
     return REGIONS[request.param]
+
+
+@pytest.fixture(params=sorted(PLANE))
+def plane_region(request):
+    """A window whose ring lies on its plane."""
+    return PLANE[request.param]
 
 
 def _cube_latlon(n: int, pad: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -199,8 +222,7 @@ def test_region_topology_and_ring():
     assert topo.region_box == (3, 1, 5, 1, 5)
     assert len(topo.ring_tiles) == 6 * 6 - 16
     assert not set(topo.ring_tiles) & set(topo.global_tiles)
-    with pytest.raises(ValueError, match="ring tile"):
-        _topology("3,0,4,1,5")  # touches the face edge: no ring on this face
+    assert topo.ring_on_plane and topo.boundary_tiles == topo.ring_tiles
     with pytest.raises(ValueError, match="rectangle"):
         TileTopology(
             world_size=1,
@@ -224,8 +246,7 @@ def test_plane_regions_topology_and_ring():
     # the ring crosses the edge with the region: face 0 col 2 east, face 5 north
     assert {(0, i, 2) for i in range(5)} <= set(east.ring_tiles)
     assert {f for f, _, _ in north.ring_tiles} == {3, 5}
-    with pytest.raises(ValueError, match="ring tile"):
-        _topology("3,1,5,5,12")  # its ring would leave the plane of faces 3 and 0
+    assert not _topology("3,1,5,5,12").ring_on_plane  # flush with face 0's east edge
     # inside face 0 and flush with its east edge: runs on the plane of faces 0 and 1
     assert _topology("3,1,5,8,12").region_plane == plane_blocks(0, east=True)
     with pytest.raises(ValueError, match="span faces"):
@@ -241,7 +262,7 @@ def test_plane_regions_topology_and_ring():
 
 def test_tiles_box_round_trip(region):
     topo = _topology(region)
-    x = torch.randn(2, 16, TILE, TILE)
+    x = torch.randn(2, topo.total_tiles, TILE, TILE)
     _, r0, r1, c0, c1 = topo.region_pixel_box()
     box = topo.tiles_to_box(x, topo.global_tiles, (r0, c0), (r1 - r0, c1 - c0))
     assert torch.equal(topo.box_to_tiles(box, topo.global_tiles, (r0, c0)), x)
@@ -290,22 +311,75 @@ def test_a_flush_window_is_the_same_written_on_the_neighbours_plane():
     assert region_plane_of("2,1,5,6,10", FACE // TILE) == plane_blocks(2, east=True)
 
 
-@pytest.mark.parametrize(
-    "spec",
-    [
-        "3,0,4,1,5",  # flush with the south edge of an equatorial face
-        "3,2,6,2,6",  # flush with its north and east edges: a cube corner
-        "3,1,5,0,6",  # as wide as the face
-        "5,2,6,1,5",  # flush with an edge of the north polar face
-        "4,1,5,2,6",  # and of the south polar face
-    ],
-)
-def test_no_plane_holds_the_ring_of_these_windows(spec):
-    with pytest.raises(ValueError, match="not supported"):
-        _topology(spec)
+def _touching_by_distance(topo) -> set:
+    """Tiles of any face whose centre lies within 1.5 tile widths (on the face grid's
+    great circles) of a window tile centre: the tiles sharing an edge or a corner. From
+    the toy grid's lat/lon, not from the cube lattice ``ring_tiles`` uses."""
+    lat, lon = (torch.deg2rad(g).numpy() for g in _cube_latlon(FACE // TILE, 0))
+    xyz = np.stack([np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)])
+    step = np.arccos(np.clip((xyz[:, 3, 2, 2] * xyz[:, 3, 2, 3]).sum(), -1, 1))
+    tiles = list(itertools.product(range(6), range(FACE // TILE), range(FACE // TILE)))
+    out = set()
+    for t in tiles:
+        if t in topo.global_tiles:
+            continue
+        a = xyz[:, t[0], t[1], t[2]]
+        for w in topo.global_tiles:
+            b = xyz[:, w[0], w[1], w[2]]
+            if np.arccos(np.clip((a * b).sum(), -1, 1)) < 1.6 * step:
+                out.add(t)
+                break
+    return out
 
 
-@pytest.mark.parametrize("side", ["east", "north"])
+@pytest.mark.parametrize("name", sorted(REGIONS))
+def test_the_ring_is_every_tile_touching_the_window(name):
+    topo = _topology(REGIONS[name])
+    assert set(topo.ring_tiles) == _touching_by_distance(topo)
+    assert len(set(topo.ring_tiles)) == len(topo.ring_tiles)
+    assert topo.ring_on_plane == (name in PLANE)
+
+
+def test_a_window_at_a_cube_corner_has_seven_neighbours_at_the_corner():
+    topo = _topology("3,0,1,5,6")  # the south-east corner tile of face 3
+    assert len(topo.ring_tiles) == 7
+    assert {f for f, _, _ in topo.ring_tiles} == {3, 0, 4}
+
+
+@pytest.mark.parametrize("name", sorted(OFF_PLANE))
+def test_ring_pieces_cover_the_ring_once_on_its_faces(name):
+    topo = _topology(REGIONS[name])
+    covered = [t for piece in topo.ring_pieces for t in piece.tiles]
+    assert sorted(covered) == sorted(topo.ring_tiles)
+    ts = topo.tile_size
+    for piece in topo.ring_pieces:
+        ((face, *_),) = piece.blocks
+        rows = range(piece.origin[0] // ts, (piece.origin[0] + piece.size[0]) // ts)
+        cols = range(piece.origin[1] // ts, (piece.origin[1] + piece.size[1]) // ts)
+        inside = {(face, i, j) for i in rows for j in cols}
+        assert set(piece.tiles) <= inside
+        # what else the piece holds is the window or the extra boundary tiles
+        assert inside <= {*topo.global_tiles, *topo.boundary_tiles}
+
+
+def test_replicate_ring_refuses_a_ring_off_the_plane():
+    with pytest.raises(ValueError, match="anchored"):
+        ReplicateRing(_topology(OFF_PLANE["off_south"]))
+
+
+def test_a_south_window_is_written_with_a_negative_row():
+    tiles = parse_region(PLANE["south"], FACE // TILE)
+    assert {f for f, _, _ in tiles} == {3, 4}
+    assert [t for t in tiles if t[0] == 3] == [
+        (3, i, j) for i in range(2) for j in range(1, 5)
+    ]
+    topo = _topology(PLANE["south"])
+    assert topo.region_plane == plane_blocks(3, south=True)
+    assert topo.region_spec == PLANE["south"]
+    assert topo.ring_on_plane
+
+
+@pytest.mark.parametrize("side", ["east", "north", "south"])
 def test_the_plane_joins_faces_where_the_grid_does(grid, side):
     """Across the seam, neighbouring plane pixels are about one grid cell apart, as
     within a face (a wrong join or turn puts them a face apart): the plane's join and
@@ -314,7 +388,7 @@ def test_the_plane_joins_faces_where_the_grid_does(grid, side):
     blocks = _topology(REGIONS[side]).region_plane
     la, lo = faces_to_plane(lat, blocks), faces_to_plane(lon, blocks)
     xyz = torch.stack([la.cos() * lo.cos(), la.cos() * lo.sin(), la.sin()])
-    if side == "north":
+    if side in ("north", "south"):
         xyz = xyz.transpose(1, 2)  # the seam between plane rows FACE - 1 and FACE
     step = (xyz[:, :, 1:] - xyz[:, :, :-1]).norm(dim=0)  # (FACE, cols - 1)
     across, inside = step[:, FACE - 1], step[:, FACE - 2]
@@ -348,16 +422,33 @@ def test_the_real_grid_joins_faces_as_the_plane_does():
     }
     n = 2048
     for face in range(4):
-        for side in ("east", "north"):
+        for side in ("east", "north", "south"):
             blocks = plane_blocks(face, **{side: True})
             la = faces_to_plane(faces["lat"], blocks)
             lo = faces_to_plane(faces["lon"], blocks)
             xyz = torch.stack([la.cos() * lo.cos(), la.cos() * lo.sin(), la.sin()])
-            if side == "north":
+            if side in ("north", "south"):
                 xyz = xyz.transpose(1, 2)
             across = (xyz[:, :, n] - xyz[:, :, n - 1]).norm(dim=0)
             inside = (xyz[:, :, n - 1] - xyz[:, :, n - 2]).norm(dim=0)
             torch.testing.assert_close(across, inside, rtol=0.25, atol=0)
+    # FACE_AXES (which ring_tiles builds the cube's corners from): each face's centre
+    # lies along its normal, and its rows and columns run along its row and column axes
+    xyz = torch.stack(
+        [
+            faces["lat"].cos() * faces["lon"].cos(),
+            faces["lat"].cos() * faces["lon"].sin(),
+            faces["lat"].sin(),
+        ]
+    )
+    c = n // 2
+    for face, (normal, row, col) in enumerate(FACE_AXES):
+        centre = xyz[:, face, c, c]
+        d_row = xyz[:, face, c + 1, c] - xyz[:, face, c - 1, c]
+        d_col = xyz[:, face, c, c + 1] - xyz[:, face, c, c - 1]
+        for got, want in ((centre, normal), (d_row, row), (d_col, col)):
+            cosine = float(got @ torch.tensor(want, dtype=got.dtype) / got.norm())
+            assert cosine > 0.999, (face, want, cosine)
 
 
 # ---------------------------------------------------------------- halo + adjoint
@@ -375,8 +466,8 @@ def test_regional_halo_equals_global_halo(grid, region):
     assert torch.equal(r_pad, g_pad[:, :, index])
 
 
-def test_halo_reads_only_a_thin_band_of_the_ring(grid, region):
-    r_topo = _topology(region)
+def test_halo_reads_only_a_thin_band_of_the_ring(grid, plane_region):
+    r_topo = _topology(plane_region)
     used = _referenced_ring_pixels(_halo(r_topo, grid))
     dist = edge_distance(r_topo, r_topo.ring_tiles)
     assert used.any()
@@ -411,8 +502,8 @@ def test_regional_adjoint_matches_global_away_from_the_edge(grid, region):
 # ---------------------------------------------------------------- ring sources
 
 
-def test_replicate_ring_extends_the_edge_pixels(region):
-    topo = _topology(region)
+def test_replicate_ring_extends_the_edge_pixels(plane_region):
+    topo = _topology(plane_region)
     _, r0, r1, c0, c1 = topo.region_pixel_box()
     rows = torch.arange(r0, r1, dtype=torch.float32)
     cols = torch.arange(c0, c1, dtype=torch.float32)
@@ -486,53 +577,54 @@ def test_regional_writer_writes_only_the_region(region):
 # ---------------------------------------------------------------- anchored ring
 
 
-def _box(region, channels=2, seed=0):
-    origin, size = ring_box(_topology(region))
+def _field(channels=2, seed=0):
     g = torch.Generator().manual_seed(seed)
-    return torch.randn(channels, *size, generator=g)
+    return torch.randn(channels, 6, FACE, FACE, generator=g)
+
+
+def _ring_slices(field, topo):
+    """The ring tiles of a face-major field ``(C, 6, F, F)``, cut from the faces:
+    ``(C, n_ring, ts, ts)``."""
+    return _tiles(field, topo.ring_tiles)[0]
 
 
 def _anchored(region, ic, drivers, block):
+    """The anchored ring with the IC and the drivers given as face-major fields."""
     topo = _topology(region)
     boundary = AnchoredBoundary(
         topology=topo,
-        ic_box=ic,
-        driver0=drivers[0.0],
+        ic_boxes=faces_to_pieces(ic, topo),
+        driver0=faces_to_pieces(drivers[0.0], topo),
         block=block,
         device=torch.device("cpu"),
     )
-    for h, box in drivers.items():
+    for h, field in drivers.items():
         if h:
-            boundary.add(h, box)
+            boundary.add(h, faces_to_pieces(field, topo))
     return topo, boundary
 
 
 def test_anchored_ring_starts_at_the_initial_state(region):
-    ic = _box(region, seed=1)
-    drivers = {0.0: _box(region, seed=2), 6.0: _box(region, seed=3)}
+    ic = _field(seed=1)
+    drivers = {0.0: _field(seed=2), 6.0: _field(seed=3)}
     topo, boundary = _anchored(region, ic, drivers, block=8)
-    origin, _ = ring_box(topo)
-    assert torch.equal(
-        boundary.ring_at(0.0), topo.box_to_tiles(ic, topo.ring_tiles, origin)
-    )
+    assert torch.equal(boundary.ring_at(0.0), _ring_slices(ic, topo))
 
 
 def test_anchored_ring_adds_the_driver_change_unsmoothed(region):
-    ic = _box(region, seed=1)
-    d0, d6 = _box(region, seed=2), _box(region, seed=3)
+    ic = _field(seed=1)
+    d0, d6 = _field(seed=2), _field(seed=3)
     topo, boundary = _anchored(region, ic, {0.0: d0, 6.0: d6}, block=1)
-    origin, _ = ring_box(topo)
-    expect = topo.box_to_tiles(ic + (d6 - d0), topo.ring_tiles, origin)
+    expect = _ring_slices(ic + (d6 - d0), topo)
     torch.testing.assert_close(boundary.ring_at(6.0), expect, rtol=0, atol=1e-5)
 
 
 def test_anchored_ring_blends_the_bracketing_drivers(region):
     """With drivers at 0, 6 and 12 h (added out of order), the ring at t is the IC plus
     the change to the linear blend of the two drivers around t."""
-    ic = _box(region, seed=1)
-    d = {h: _box(region, seed=2 + k) for k, h in enumerate((0.0, 12.0, 6.0))}
+    ic = _field(seed=1)
+    d = {h: _field(seed=2 + k) for k, h in enumerate((0.0, 12.0, 6.0))}
     topo, boundary = _anchored(region, ic, d, block=1)
-    origin, _ = ring_box(topo)
     for t, (a, b, w) in {
         3.0: (0.0, 6.0, 0.5),
         9.0: (6.0, 12.0, 0.5),
@@ -540,13 +632,13 @@ def test_anchored_ring_blends_the_bracketing_drivers(region):
         12.0: (6.0, 12.0, 1.0),
     }.items():
         blend = (1 - w) * d[a] + w * d[b]
-        expect = topo.box_to_tiles(ic + (blend - d[0.0]), topo.ring_tiles, origin)
+        expect = _ring_slices(ic + (blend - d[0.0]), topo)
         torch.testing.assert_close(boundary.ring_at(t), expect, rtol=0, atol=1e-5)
 
 
 def test_anchored_ring_is_linear_in_time():
-    ic = _box(REGION, seed=1)
-    drivers = {0.0: _box(REGION, seed=2), 6.0: _box(REGION, seed=3)}
+    ic = _field(seed=1)
+    drivers = {0.0: _field(seed=2), 6.0: _field(seed=3)}
     _, boundary = _anchored(REGION, ic, drivers, block=8)
     r0, r6 = boundary.ring_at(0.0), boundary.ring_at(6.0)
     torch.testing.assert_close(
@@ -561,16 +653,16 @@ def test_anchored_ring_is_linear_in_time():
 
 
 def test_a_driver_that_does_not_change_keeps_the_initial_state(region):
-    ic = _box(region, seed=1)
-    d = _box(region, seed=2)
+    ic = _field(seed=1)
+    d = _field(seed=2)
     topo, boundary = _anchored(region, ic, {0.0: d, 6.0: d.clone()}, block=8)
     torch.testing.assert_close(boundary.ring_at(6.0), boundary.ring_at(0.0))
 
 
 def test_a_uniform_driver_change_shifts_the_ring_uniformly(region):
     """A spatially uniform change of +2.5 passes the smoothing unchanged."""
-    ic = _box(region, seed=1)
-    d0 = _box(region, seed=2)
+    ic = _field(seed=1)
+    d0 = _field(seed=2)
     topo, boundary = _anchored(region, ic, {0.0: d0, 6.0: d0 + 2.5}, block=8)
     torch.testing.assert_close(
         boundary.ring_at(6.0) - boundary.ring_at(0.0),
@@ -580,8 +672,24 @@ def test_a_uniform_driver_change_shifts_the_ring_uniformly(region):
     )
 
 
+@pytest.mark.parametrize("name", sorted(OFF_PLANE))
+def test_a_ring_off_the_plane_is_smoothed_within_each_face(name):
+    """A driver change that is a different constant on every face passes the per-face
+    smoothing exactly: each ring tile moves by its own face's constant."""
+    ic, d0 = _field(seed=1), _field(seed=2)
+    step = torch.arange(6, dtype=torch.float32)[None, :, None, None] * 1.5
+    topo, boundary = _anchored(REGIONS[name], ic, {0.0: d0, 6.0: d0 + step}, block=8)
+    faces = torch.tensor([f for f, _, _ in topo.ring_tiles], dtype=torch.float32)
+    torch.testing.assert_close(
+        boundary.ring_at(6.0) - boundary.ring_at(0.0),
+        (1.5 * faces)[None, :, None, None].expand_as(boundary.ring_at(0.0)),
+        rtol=0,
+        atol=1e-5,
+    )
+
+
 def test_the_anchored_ring_refuses_a_channel_chunk():
-    ic = _box(REGION, channels=3, seed=1)
+    ic = _field(channels=3, seed=1)
     _, boundary = _anchored(REGION, ic, {0.0: ic.clone()}, block=8)
     topo = _topology(REGION)
     gathered = torch.zeros(1, 2, topo.total_tiles, TILE, TILE)
@@ -600,10 +708,11 @@ def test_smooth_keeps_constants_and_removes_grid_scale_noise():
     assert torch.equal(smooth(checker, 1), checker)
 
 
-def test_faces_to_box_is_the_plane_crop(region):
-    topo = _topology(region)
+def test_faces_to_box_is_the_plane_crop(plane_region):
+    topo = _topology(plane_region)
     field = torch.randn(2, 6, FACE, FACE)
-    origin, size = ring_box(topo)
+    (piece,) = topo.ring_pieces
+    origin, size = piece.origin, piece.size
     plane = faces_to_plane(field, topo.region_plane)
     expect = plane[:, origin[0] : origin[0] + size[0], origin[1] : origin[1] + size[1]]
     assert torch.equal(faces_to_box(field, topo, origin, size), expect)
@@ -621,16 +730,13 @@ def test_a_perfect_boundary_reproduces_the_global_run(grid, region):
     for _ in range(3):
         state = g_topo.crop(model(g_halo(state)))
         states.append(state)
-    origin, size = ring_box(r_topo)
 
     def box(tiles):
-        return faces_to_box(
-            g_topo.gather_tiles_to_faces(tiles)[0], r_topo, origin, size
-        )
+        return faces_to_pieces(g_topo.gather_tiles_to_faces(tiles)[0], r_topo)
 
     boundary = AnchoredBoundary(
         topology=r_topo,
-        ic_box=box(states[0]),
+        ic_boxes=box(states[0]),
         driver0=box(states[0]),
         block=1,
         device=torch.device("cpu"),
@@ -661,23 +767,37 @@ def _faces_deg(grid):
         (3, 96, 186),  # next to the east edge of face 3
         (0, 96, 3),  # next to the west edge of face 0
         (3, 186, 96),  # next to the north edge of face 3
+        (3, 3, 96),  # next to the south edge of face 3
         (5, 96, 96),  # the north pole
+        (4, 96, 96),  # the south pole
     ],
 )
-def test_find_region_holds_the_point_and_keeps_its_ring(grid, face, row, col):
+def test_find_region_holds_the_point_centred(grid, face, row, col):
     lat, lon = _faces_deg(grid)
     point = (float(lat[face, row, col]), float(lon[face, row, col]))
     spec = find_region(lat, lon, *point, n_tiles=4, tile_size=TILE)
-    topo = _topology(spec)  # validates the rectangle and the ring
+    topo = _topology(spec)  # validates the rectangle
     assert topo.total_tiles == 16
     assert (face, row // TILE, col // TILE) in topo.global_tiles
     assert nearest_pixel(lat, lon, *point) == (face, row, col)
+    # the point's tile is one of the 2 x 2 centre tiles of the window
+    i, j, _ = topo.tile_plane_position((face, row // TILE, col // TILE))
+    _, i0, _, j0, _ = topo.region_box
+    assert i - i0 in (1, 2) and j - j0 in (1, 2)
+
+
+def test_find_region_holds_a_point_at_a_cube_corner(grid):
+    """No plane centres a window on a corner tile; the window moves to hold it."""
+    lat, lon = _faces_deg(grid)
+    point = (float(lat[4, 3, 3]), float(lon[4, 3, 3]))
+    topo = _topology(find_region(lat, lon, *point, n_tiles=4, tile_size=TILE))
+    assert (4, 0, 0) in topo.global_tiles and not topo.ring_on_plane
 
 
 def test_find_region_refuses_a_window_too_large_for_a_plane(grid):
     lat, lon = _faces_deg(grid)
     with pytest.raises(ValueError, match="fewer tiles"):
-        find_region(lat, lon, float(lat[4, 96, 96]), float(lon[4, 96, 96]), 5, TILE)
+        find_region(lat, lon, float(lat[4, 96, 96]), float(lon[4, 96, 96]), 7, TILE)
 
 
 # ------------------------------------------------------- window from a lat/lon box
@@ -688,6 +808,7 @@ BOXES = {
     "face": (-10.0, 10.0, -10.0, 10.0),  # the centre of face 0
     "east_edge": (-10.0, 10.0, 35.0, 55.0),  # across lon 45: faces 0 and 1
     "north_edge": (38.0, 52.0, -8.0, 8.0),  # across the north edge of face 0
+    "south_edge": (-52.0, -38.0, -8.0, 8.0),  # across the south edge of face 0
     "dateline": (-10.0, 10.0, 170.0, -170.0),  # the centre of face 2
 }
 
@@ -764,6 +885,7 @@ def test_a_box_across_a_face_edge_gets_the_joined_plane(big_grid):
     for name, plane in (
         ("east_edge", plane_blocks(0, east=True)),
         ("north_edge", plane_blocks(0, north=True)),
+        ("south_edge", plane_blocks(0, south=True)),
     ):
         spec, _ = find_box_region(lat, lon, BOXES[name], TILE, 4)
         assert region_plane_of(spec, BIG // TILE) == plane
@@ -777,16 +899,10 @@ def test_a_dateline_box_is_the_arc_east_of_lon0(big_grid):
     assert set(np.nonzero(mask)[0].tolist()) == {2}
 
 
-@pytest.mark.parametrize(
-    "box",
-    [
-        (-52.0, -38.0, -8.0, 8.0),  # across the south edge of face 0
-        (-38.0, 38.0, -38.0, 38.0),  # most of face 0: no room for margin and ring
-    ],
-)
-def test_a_box_no_plane_can_hold_is_refused(big_grid, box):
+def test_a_box_no_plane_can_hold_is_refused(big_grid):
     lat, lon = big_grid
-    with pytest.raises(ValueError, match="not supported"):
+    box = (-60.0, 60.0, -10.0, 10.0)  # from face 4 across face 0 to face 5
+    with pytest.raises(ValueError, match="too large for one plane"):
         find_box_region(lat, lon, box, TILE, 4)
 
 

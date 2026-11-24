@@ -41,9 +41,8 @@ from screamcast.initial_conditions.fast_ic import Era5, build_ic, load_map, load
 from screamcast.regional import (
     AnchoredBoundary,
     block_means,
-    faces_to_box,
+    faces_to_pieces,
     parse_region,
-    ring_box,
 )
 from screamcast.replay import Replay, ReplayStep, replay_plan
 from tests.test_regional import _cube_area, _cube_latlon
@@ -55,6 +54,9 @@ PLEV_HPA = np.array([50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 
 STEMS = ["U", "qv", "T_2m"]
 REGION = "3,1,3,1,3"  # 2 x 2 tiles of face 3
 EDGE_REGION = "3,3,5,1,2"  # 2 tiles, across the edge to the north polar face (turned)
+SOUTH_REGION = (
+    "3,0,2,1,3"  # 2 x 2 tiles flush with face 3's south edge: ring off the plane
+)
 ORIGIN = {"source": "synthetic"}
 
 
@@ -239,19 +241,20 @@ def test_producer_blocks_are_the_driver_store_blocks(inputs, tmp_path, region):
     assert np.isfinite(stored).sum() == len(names) * n_blocks  # NaN off the crop
 
 
-@pytest.mark.parametrize("region", [REGION, EDGE_REGION])
+@pytest.mark.parametrize("region", [REGION, EDGE_REGION, SOUTH_REGION])
 def test_ring_blocks_are_the_driver_store_blocks(inputs, tmp_path, region):
-    """The producer's window-and-ring targets, read back as the ring box, against the
-    block means the ring takes of a driver store's state (``faces_to_box``), on one
-    face and across a turned face edge."""
+    """The producer's window-and-ring targets, read back as the ring pieces, against
+    the block means the ring takes of a driver store's state (``faces_to_pieces``), on
+    one face, across a turned face edge, and off the plane (a window flush with a
+    south edge)."""
     spec, _ = inputs
     state = _era5(3)
     topo = _topology(region)
     names, faces = _store_faces(spec, state)
-    want = block_means(faces_to_box(faces[0], topo, *ring_box(topo)), 8)
+    want = [block_means(box, 8) for box in faces_to_pieces(faces[0], topo)]
 
     tiles = rt.producer_tiles(region, TILE, FACE, ring=True)
-    assert len(tiles) == len(topo.global_tiles) + len(topo.ring_tiles)
+    assert len(tiles) == len(topo.global_tiles) + len(topo.boundary_tiles)
     path = str(tmp_path / "ring.zarr")
     rt.write_target(
         path,
@@ -265,34 +268,47 @@ def test_ring_blocks_are_the_driver_store_blocks(inputs, tmp_path, region):
         source="synthetic",
         origin=ORIGIN,
     )
-    got = torch.from_numpy(rt.read_box_blocks(path, names[::-1], topo))
-    torch.testing.assert_close(got, want.flip(0), rtol=1e-13, atol=0)
+    got = rt.read_box_blocks(path, names[::-1], topo)
+    assert len(got) == len(want) == len(topo.ring_pieces)
+    for g, w in zip(got, want):
+        torch.testing.assert_close(torch.from_numpy(g), w.flip(0), rtol=1e-13, atol=0)
 
 
-def test_ring_from_block_means_is_the_ring_from_boxes():
+@pytest.mark.parametrize("region", [EDGE_REGION, SOUTH_REGION])
+def test_ring_from_block_means_is_the_ring_from_boxes(region):
     """``AnchoredBoundary`` given block means equals the one given full driver boxes,
     and a uniform driver change c moves the ring by c."""
-    topo = _topology(EDGE_REGION)
-    _, (h, w) = ring_box(topo)
+    topo = _topology(region)
     rng = np.random.default_rng(0)
     ic, d0, d6 = (
-        torch.from_numpy(rng.normal(size=(3, h, w))).float() for _ in range(3)
+        torch.from_numpy(rng.normal(size=(3, 6, FACE, FACE))).float() for _ in range(3)
     )
-    d12 = d0 + torch.tensor([2.0, 0.0, -1.0])[:, None, None]
-    kw = dict(topology=topo, ic_box=ic, block=8, device=torch.device("cpu"))
-    boxes = AnchoredBoundary(driver0=d0, **kw)
-    blocks = AnchoredBoundary(driver0_blocks=block_means(d0, 8), **kw)
+    d12 = d0 + torch.tensor([2.0, 0.0, -1.0])[:, None, None, None]
+
+    def means(field):
+        return [block_means(box, 8) for box in faces_to_pieces(field, topo)]
+
+    ic_boxes = faces_to_pieces(ic, topo)
+    kw = dict(topology=topo, ic_boxes=ic_boxes, block=8, device=torch.device("cpu"))
+    boxes = AnchoredBoundary(driver0=faces_to_pieces(d0, topo), **kw)
+    blocks = AnchoredBoundary(driver0_blocks=means(d0), **kw)
     for hour, d in ((6, d6), (12, d12)):
-        boxes.add(hour, d)
-        blocks.add_blocks(hour, block_means(d, 8))
+        boxes.add(hour, faces_to_pieces(d, topo))
+        blocks.add_blocks(hour, means(d))
     for hour in (0, 6, 12):
         torch.testing.assert_close(blocks.ring[hour], boxes.ring[hour], rtol=0, atol=0)
-    ring_ic = topo.box_to_tiles(ic, topo.ring_tiles, ring_box(topo)[0])
+    ring_ic = torch.stack(
+        [
+            ic[:, f, i * TILE : (i + 1) * TILE, j * TILE : (j + 1) * TILE]
+            for f, i, j in topo.ring_tiles
+        ],
+        dim=1,
+    )
     shift = (blocks.ring[12] - ring_ic).reshape(3, -1)
     torch.testing.assert_close(shift[:, 0], torch.tensor([2.0, 0.0, -1.0]))
     assert float((shift - shift[:, :1]).abs().max()) < 1e-5
     with pytest.raises(ValueError, match="driver blocks"):
-        blocks.add_blocks(18, block_means(d0, 8)[:, :-1])
+        blocks.add_blocks(18, [m[:, :-1] for m in means(d0)])
     with pytest.raises(ValueError, match="driver0 or driver0_blocks"):
         AnchoredBoundary(**kw)
 

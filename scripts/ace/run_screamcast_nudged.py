@@ -92,11 +92,10 @@ from screamcast.omega_filter import low_pass
 from screamcast.regional import (
     AnchoredBoundary,
     ReplicateRing,
-    faces_to_box,
+    faces_to_pieces,
     find_box_region,
     parse_latlon_box,
     parse_region,
-    ring_box,
 )
 from screamcast.regional_averages import (
     RegionalAverager,
@@ -332,8 +331,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Regional window: predict only this rectangle of tiles, "
             "'face,i0,i1,j0,j1' in tile units (half-open) on the plane of `face`; "
             "i1 or j1 beyond the face's tiles joins the north polar face or the "
-            "next equatorial face to the east; a window flush with an equatorial "
-            "face's north, east or west edge takes its ring from that neighbour. "
+            "next equatorial face to the east, a negative i0 the south polar face "
+            "(the '=' form: --region=3,-4,4,5,13). The ring is the tiles that touch "
+            "the window, on any face. "
             "`python -m screamcast.regional "
             "--lat .. --lon .. --tiles N --latlon latlon_ne1024pg2.nc` prints one "
             "for a point. Needs "
@@ -347,8 +347,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Regional window from a lat/lon box 'LAT0,LAT1,LON0,LON1' (degrees; the "
             "box runs east from LON0 to LON1, so LON0 > LON1 crosses the dateline): "
             "the smallest --region that holds every grid cell of the box with "
-            "--region-margin-tiles tiles to spare, keeps its ring on one plane and "
-            "has a multiple of the world size of tiles. `python -m "
+            "--region-margin-tiles tiles to spare, lies on one plane and has a "
+            "multiple of the world size of tiles. `python -m "
             "screamcast.regional --latlon-box ..` prints the same window. A box "
             "south of the equator needs the '=' form: --region-latlon=-40,-20,140,160."
         ),
@@ -992,7 +992,7 @@ def build_anchored_boundary(
     *,
     args: argparse.Namespace,
     topology: TileTopology,
-    ic_box: torch.Tensor,
+    ic_boxes: list[torch.Tensor],
     drivers: list[Driver],
     in_vars: list[str],
     dt_hours: float,
@@ -1002,7 +1002,6 @@ def build_anchored_boundary(
 ) -> AnchoredBoundary:
     """The anchored ring of a regional run. ``on_driver(hours, full_faces)`` sees every
     driver state as it is loaded (the replay takes its targets from them)."""
-    origin, size = ring_box(topology)
     hours = [d[0] for d in drivers]
     needed = (n_steps - 1) * dt_hours  # the last step pads the state at this time
     if hours[-1] < needed:
@@ -1010,11 +1009,11 @@ def build_anchored_boundary(
             f"boundary drivers end at +{hours[-1]} h; the run needs +{needed:.2f} h"
         )
 
-    def box_of(driver: Driver) -> torch.Tensor:
+    def box_of(driver: Driver) -> list[torch.Tensor]:
         full = load_driver(args, topology, driver, in_vars, device)
         if on_driver is not None:
             on_driver(driver[0], full)
-        return faces_to_box(full[0], topology, origin, size)
+        return faces_to_pieces(full[0], topology)
 
     drivers = list(drivers)
     if drivers[0][0] == 0.0:
@@ -1022,11 +1021,11 @@ def build_anchored_boundary(
         driver0 = box_of(driver)
         logger.info("boundary driver +0 h: %s", driver[3])
     else:
-        driver0 = ic_box
+        driver0 = ic_boxes
         logger.info("boundary driver +0 h: the initial condition (no 0 h store)")
     boundary = AnchoredBoundary(
         topology=topology,
-        ic_box=ic_box,
+        ic_boxes=ic_boxes,
         driver0=driver0,
         block=args.boundary_block,
         device=device,
@@ -1850,13 +1849,13 @@ def main() -> None:
         x0 = topology.faces_to_local_tiles(full_faces)
         coords = topology.interior_coords(in_coords, time=np.array([t0]))
         if args.region_boundary == "anchored":
-            ic_box = faces_to_box(full_faces[0], topology, *ring_box(topology))
+            ic_boxes = faces_to_pieces(full_faces[0], topology)
             del full_faces
             if ring_reader is None:
                 boundary = build_anchored_boundary(
                     args=args,
                     topology=topology,
-                    ic_box=ic_box,
+                    ic_boxes=ic_boxes,
                     drivers=drivers,
                     in_vars=list(in_coords["variable"]),
                     dt_hours=dt_hours,
@@ -1869,15 +1868,15 @@ def main() -> None:
                 blocks0, _ = ring_reader.get(0)
                 boundary = AnchoredBoundary(
                     topology=topology,
-                    ic_box=ic_box,
-                    driver0_blocks=torch.from_numpy(blocks0).to(device),
+                    ic_boxes=ic_boxes,
+                    driver0_blocks=[torch.from_numpy(b).to(device) for b in blocks0],
                     block=args.boundary_block,
                     device=device,
                 )
                 del blocks0
                 logger.info("boundary driver +0 h: on the fly")
                 ring_pending = ring[1:]
-            del ic_box
+            del ic_boxes
             halo_exchange.ring_source = boundary
 
             def before_step(step_index: int) -> None:
@@ -1886,7 +1885,9 @@ def main() -> None:
                 while ring_pending and boundary.hours[-1] < t:
                     h = ring_pending.pop(0)
                     blocks, info = ring_reader.get(h)
-                    boundary.add_blocks(h, torch.from_numpy(blocks).to(device))
+                    boundary.add_blocks(
+                        h, [torch.from_numpy(b).to(device) for b in blocks]
+                    )
                     logger.info(
                         "boundary driver +%d h: on the fly (waited %.1f s here)",
                         h,

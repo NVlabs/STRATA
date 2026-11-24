@@ -28,7 +28,7 @@ The fine state (9 GB for the globe) never goes to disk. A regional run's produce
 builds only the columns of the window's tiles, and of its ring tiles when the ring is
 anchored. Each rank of the run reads, on a background thread (``TargetReader``), the
 blocks of its own tiles for ``Replay.add_block_target`` and the blocks of the window and
-ring box for ``AnchoredBoundary.add_blocks``. The block means are those
+ring pieces for ``AnchoredBoundary.add_blocks``. The block means are those
 ``Replay.add_target`` and the ring take of a driver store built by ``fast_ic`` or
 ``hres_forecast`` from the same source state.
 
@@ -133,7 +133,7 @@ from screamcast.initial_conditions.ic_store import (
     load_static_array,
 )
 from screamcast.initial_conditions.layout import NLEV_SUBSET, VARS_3D
-from screamcast.regional import parse_region, ring_box
+from screamcast.regional import parse_region
 from screamcast.replay import BLOCK, ReplayStep, block_mean, channel_level
 
 FAILED = "FAILED"
@@ -560,9 +560,10 @@ def read_blocks(path: str, channels: list[str], tiles, tile_size: int) -> np.nda
 
 def read_box_blocks(
     path: str, channels: list[str], topology: TileTopology
-) -> np.ndarray:
-    """Block means ``(channels, H/8, W/8)`` of a regional run's window and ring box
-    (``regional.ring_box``), in the plane's orientation, from a target store."""
+) -> list[np.ndarray]:
+    """Block means ``(channels, H/8, W/8)`` of each of a regional run's ring pieces
+    (``TileTopology.ring_pieces``), in the piece's plane orientation, from a target
+    store."""
     group = zarr.open_group(path, mode="r")
     have = list(group.attrs["variables"])
     missing = [c for c in channels if c not in have]
@@ -570,17 +571,20 @@ def read_box_blocks(
         raise ValueError(f"{path} lacks {missing}")
     idx = [have.index(c) for c in channels]
     array = group["blocks"]
-    (r0, c0), (h, w) = ring_box(topology)
-    box = (r0 // BLOCK, (r0 + h) // BLOCK, c0 // BLOCK, (c0 + w) // BLOCK)
-    out = np.full((len(channels), h // BLOCK, w // BLOCK), np.nan)
     nb = topology.face_size // BLOCK
-    for face, (fr0, fr1, fc0, fc1), (pr0, pr1, pc0, pc1), k in plane_parts(
-        topology.region_plane, box, nb
-    ):
-        part = np.asarray(array[:, face, fr0:fr1, fc0:fc1])[idx]
-        out[:, pr0 - box[0] : pr1 - box[0], pc0 - box[2] : pc1 - box[2]] = np.rot90(
-            part, k, axes=(-2, -1)
-        )
+    out = []
+    for piece in topology.ring_pieces:
+        (r0, c0), (h, w) = piece.origin, piece.size
+        box = (r0 // BLOCK, (r0 + h) // BLOCK, c0 // BLOCK, (c0 + w) // BLOCK)
+        blocks = np.full((len(channels), h // BLOCK, w // BLOCK), np.nan)
+        for face, (fr0, fr1, fc0, fc1), (pr0, pr1, pc0, pc1), k in plane_parts(
+            list(piece.blocks), box, nb
+        ):
+            part = np.asarray(array[:, face, fr0:fr1, fc0:fc1])[idx]
+            blocks[
+                :, pr0 - box[0] : pr1 - box[0], pc0 - box[2] : pc1 - box[2]
+            ] = np.rot90(part, k, axes=(-2, -1))
+        out.append(blocks)
     return out
 
 
@@ -827,8 +831,8 @@ def wait_for_target(
 def producer_tiles(
     region: str | None, tile_size: int, face_size: int, ring: bool = False
 ) -> list:
-    """The tiles a producer builds: the window's (and its ring's, for an anchored
-    ring), or every tile of the cube."""
+    """The tiles a producer builds: the window's (and, for an anchored ring, the tiles
+    of its ring pieces, ``TileTopology.boundary_tiles``), or every tile of the cube."""
     n = face_size // tile_size
     if not region:
         if ring:
@@ -845,7 +849,7 @@ def producer_tiles(
         halo_width=0,
         active_tiles=window,
     )
-    return [*window, *topology.ring_tiles]
+    return [*window, *topology.boundary_tiles]
 
 
 def produce(args: argparse.Namespace) -> None:
