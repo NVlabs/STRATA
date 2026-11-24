@@ -899,6 +899,26 @@ def test_a_dateline_box_is_the_arc_east_of_lon0(big_grid):
     assert set(np.nonzero(mask)[0].tolist()) == {2}
 
 
+def test_a_box_at_a_plane_edge_gets_a_window_flush_with_it(big_grid):
+    """South of face 0 next to its east edge: only the south-joined plane holds the box,
+    and the window reaches that plane's east edge, so its ring leaves the plane."""
+    lat, lon = big_grid
+    box = (-50.0, -40.0, 30.0, 40.0)  # face 0 column 10, one short of its edge
+    spec, margin = find_box_region(lat, lon, box, TILE, 4, margin_tiles=1)
+    tiles = parse_region(spec, BIG // TILE)
+    assert margin >= 1 and _window_holds(lat, lon, box, tiles, 4, 1)
+    topo = TileTopology(
+        world_size=4,
+        rank=0,
+        face_size=BIG,
+        tile_size=TILE,
+        halo_width=HALO,
+        active_tiles=tiles,
+    )
+    assert topo.region_plane == plane_blocks(0, south=True)
+    assert not topo.ring_on_plane
+
+
 def test_a_box_no_plane_can_hold_is_refused(big_grid):
     lat, lon = big_grid
     box = (-60.0, 60.0, -10.0, 10.0)  # from face 4 across face 0 to face 5
