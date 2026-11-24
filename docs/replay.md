@@ -131,8 +131,8 @@ columns at a time, and writes the block means to `DIR/blocks_<YYYYMMDDHH>.zarr` 
 600 MB for the globe, 6 MB for a 4 x 4-tile window, 14 MB with its ring). A window's
 producer builds only the window's columns, and its ring's when the ring is anchored.
 Each rank reads the blocks it needs on a background thread. The fine state never goes
-to disk. Only the initial condition still comes from a store (`--ic-store`, e.g. the
-lead-0 store of `hres_forecast`).
+to disk. The initial condition comes from a store (`--ic-store`, e.g. the lead-0 store
+of `hres_forecast`) or is built at start-up (`--ic-onthefly`, below).
 
 - With `--replay` the targets are at the analysis hours; with an anchored ring also at
   every `--driver-every-hours` (default 6) from 0 to the first at or after the last step.
@@ -154,9 +154,16 @@ bucket (`opendata_root` to use a mirror). The bucket holds the 00 and 12 UTC for
 3-hourly to +144 h and 6-hourly to +240 h; the 06 and 18 UTC runs are not there. Files
 with every field `build_ic` needs start with the 2024-03-05 12 UTC forecast: the files
 from 2024-02-29 to 2024-03-05 00 UTC lack four pressure levels and `w`. Checked on
-2026-11-19, when forecasts to 2026-11-18 were there. The analyses fall at the hours the
-source has; the ring's driver hours must all be there. Older HRES forecasts (2016-2022 in
-WeatherBench2, 2023 at 0.4 deg) are not a source: build stores for them.
+2026-11-19, when forecasts to 2026-11-18 were there. `"wb2_hres"` reads the HRES
+forecast `init` from WeatherBench2's `hres` store (`wb2_zarr` to use a copy): the 00 and
+12 UTC forecasts from 2016-01-01 to 2023-01-10 12 UTC, 6-hourly to +240 h, on the same
+13 levels with `w` and surface pressure (checked on 2026-11-24). The analyses fall at
+the hours the source has; the ring's driver hours must all be there. The 2023 HRES files
+at 0.4 deg (9 levels, no `w`) are not a source.
+
+The HRES data, from open data and from WeatherBench2, are ECMWF's under CC BY 4.0;
+ERA5 is under the Copernicus licence. Both ask you to credit the source in work that
+uses them.
 
 ```bash
 torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \
@@ -191,8 +198,10 @@ torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \
   directory, also by the producer.
 - `python -m screamcast.replay_targets produce --spec SPEC.json --out-dir DIR
   --run-init 2024-09-25T12 --hours 6 12 18 [--region R --tile-size 128 [--ring]]`
-  builds targets without a run, and `python -m screamcast.replay_targets compare A B`
-  checks that two target stores are equal bit for bit.
+  builds targets without a run, `python -m screamcast.replay_targets ic --spec
+  SPEC.json --out-dir DIR --time 2024-09-25T12` the initial condition, and `python -m
+  screamcast.replay_targets compare A B` checks that two target stores are equal bit
+  for bit.
 
 On the 4 x 4-tile Helene window (H100, 2026-11-19) a target took about 7 s to build
 (2.6 s to read the cached GRIB, 2 s on the GPU) and the replayed 24 h run took as long as
@@ -204,6 +213,48 @@ of window and ring, 193 channels, no driver stores) the replayed run took 299 s 
 within the same run-to-run noise of the stores run; a rerun reused all 5 targets. No
 global on-the-fly run yet; a `fast_ic` build of the globe
 takes about 80 s on one GPU.
+
+### The initial condition on the fly
+
+`--ic-onthefly SPEC.json` (with `--driver-target-dir DIR`) replaces `--ic-store`: at
+start-up, before the model loads, rank 0 builds the full initial condition from the
+spec's source with `fast_ic.build_ic` (the steps of `fast_ic`, `hres_ic` and
+`hres_forecast`) into `DIR/ic_<YYYYMMDDHH>.zarr`, a store like the ones `--ic-store`
+takes (about 9 GB). The spec may be the driver's; it also needs the statics `latlon`
+(the `lat`/`lon` NetCDF) and `scream_ref` (the directory with `sgh30.zarr` and
+`landfrac.zarr`), as `fast_ic` does. The initial time is `--initial-time`, by default
+the forecast's `init` for `hres` and `wb2_hres`; `era5` needs `--initial-time`.
+
+- Like a target, the store is written under `.partial<pid>` and renamed, and records
+  its origin (the targets' origin, its time, and the absolute paths of `latlon` and
+  `scream_ref`). A store already there is used if it has this run's origin, so a rerun
+  builds nothing; one with another origin stops the run.
+- The other ranks wait for rank 0's `IC_READY` (the store's path) or `FAILED` (with
+  the traceback) in the run's directory, up to `--driver-target-timeout` seconds. They
+  do not wait in a collective, so a build longer than the NCCL timeout does not fail
+  the run.
+- A `fast_ic` build of the globe takes about 80 s on one GPU, plus reading the source
+  state.
+
+A replayed window of a 2020 hurricane, all on the fly from the WeatherBench2 HRES
+forecast:
+
+```json
+{"source": "wb2_hres", "init": "2020-08-26T00",
+ "map": "/path/to/map_721x1440_to_ne1024pg2.nc", "phis": "/path/to/scream_phis.zarr",
+ "vert": "/path/to/vert_coord_E3SM_L128.nc",
+ "latlon": "/path/to/latlon_ne1024pg2.nc", "scream_ref": "/path/to/scream_static"}
+```
+
+```bash
+torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \
+  --run-name laura_window_replay_onthefly \
+  --checkpoint $AUX_DATA_ROOT/checkpoints/strata_v1.pth \
+  --ic-onthefly hres_laura.json \
+  --region-latlon=20,35,-100,-80 --replay \
+  --driver-onthefly hres_laura.json --driver-target-dir "$WORK/targets/laura" \
+  ... (the other options of the window command above)
+```
 
 ## Resources
 
@@ -231,5 +282,7 @@ every rank evaluates about 172,000 spherical-harmonic modes on its 1.6 million p
 - The increment is computed every 6 hours from 6-hourly drivers; between analyses the
   run is free.
 - `--correction` nudging and `--replay` do not combine.
-- Drivers built on the fly come from ERA5 or HRES open data (from 2024-03-05 12 UTC)
-  only; other drivers need stores. The initial condition always comes from a store.
+- Drivers and initial conditions built on the fly come from ERA5, HRES open data (from
+  2024-03-05 12 UTC) or WeatherBench2's HRES forecasts (2016-01-01 to 2023-01-10
+  12 UTC) only; other sources (the 2023 HRES files at 0.4 deg, other models) need
+  stores.

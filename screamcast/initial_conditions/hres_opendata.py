@@ -77,7 +77,9 @@ def check_init(init: np.datetime64) -> None:
         )
     if init < FIRST_INIT:
         raise ValueError(
-            f"HRES init {init}: the open-data files are complete from {FIRST_INIT} on"
+            f"HRES init {init}: the open-data files are complete from {FIRST_INIT} on "
+            "(forecasts from 2016 to 2022 are in WeatherBench2: hres_forecast "
+            "--archive wb2, or the wb2_hres source of screamcast.replay_targets)"
         )
 
 

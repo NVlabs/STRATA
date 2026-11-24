@@ -26,6 +26,7 @@ producer loop in each mode.
 import argparse
 import json
 import os
+import shutil
 import time
 
 import netCDF4
@@ -850,3 +851,170 @@ def test_producer_runs_in_the_runs_directory(tmp_path, monkeypatch):
     assert "the era5 spec lacks" in failed.read_text()  # the child read bad.json
     assert (other / "analysis_2024092518").exists()
     assert not (tmp_path / "targets" / rt.FAILED).exists()
+
+
+# ------------------------------------------------------------------ WeatherBench2 source
+
+
+def test_wb2_hres_hours_are_the_six_hourly_leads():
+    src = rt.Wb2HresSource({"init": "2020-08-26T00"})
+    t0 = np.datetime64("2020-08-26T00")
+    assert rt.source_hours(src, t0, range(25)) == {0, 6, 12, 18, 24}
+    # a run starting 3 h into the forecast has no state on its 6-hourly hours
+    assert rt.source_hours(src, t0 + np.timedelta64(3, "h"), range(25)) == {
+        3,
+        9,
+        15,
+        21,
+    }
+    # the last lead is +240 h
+    late = t0 + np.timedelta64(228, "h")
+    assert rt.source_hours(src, late, range(25)) == {0, 6, 12}
+    with pytest.raises(ValueError, match=r"\[3, 9\]"):
+        rt.ring_hours(src, t0, 3, 11.5)
+
+
+@pytest.mark.parametrize("init", ["2015-12-31T12", "2023-01-11T00", "2020-08-26T06"])
+def test_wb2_hres_refuses_inits_the_archive_lacks(init):
+    with pytest.raises(ValueError, match="WeatherBench2 holds"):
+        rt.Wb2HresSource({"init": init})
+
+
+def test_wb2_hres_origin_is_not_the_open_data_origin(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    paths = {"map": "m.nc", "phis": "p.zarr", "vert": "v.nc"}
+    wb2 = rt.target_origin({"source": "wb2_hres", "init": "2020-08-26T00", **paths})
+    assert wb2["wb2_zarr"] == rt.WB2_HRES_FORECAST
+    same_init = {"source": "hres", "init": "2020-08-26T00", "cache": "c", **paths}
+    assert rt.target_origin(same_init) != wb2
+    other = {"source": "wb2_hres", "init": "2020-08-26T12", **paths}
+    assert rt.target_origin(other) != wb2
+    mirror = {"source": "wb2_hres", "init": "2020-08-26T00", "wb2_zarr": "x", **paths}
+    assert rt.target_origin(mirror) != wb2
+
+
+def test_spec_keys_of_each_source_and_of_an_ic(tmp_path):
+    def spec_file(**spec):
+        path = tmp_path / "spec.json"
+        path.write_text(json.dumps(spec))
+        return str(path)
+
+    common = {"map": "m", "phis": "p", "vert": "v"}
+    rt.load_spec(spec_file(source="wb2_hres", init="2020-08-26T00", **common))
+    with pytest.raises(ValueError, match=r"lacks \['init'\]"):
+        rt.load_spec(spec_file(source="wb2_hres", **common))
+    with pytest.raises(ValueError, match=r"lacks \['latlon', 'scream_ref'\]"):
+        rt.load_spec(spec_file(source="era5", **common), ic=True)
+    rt.load_spec(
+        spec_file(source="era5", latlon="l", scream_ref="r", **common), ic=True
+    )
+
+
+# ------------------------------------------------------------------ initial condition
+
+IC_TIME = np.datetime64("2024-09-25T18")
+
+
+@pytest.fixture(scope="module")
+def ic_inputs(inputs, tmp_path_factory):
+    """``inputs`` plus the statics of an IC (lat/lon NetCDF, sgh30 and landfrac)."""
+    spec, _ = inputs
+    root = tmp_path_factory.mktemp("statics")
+    rng = np.random.default_rng(5)
+    with netCDF4.Dataset(root / "latlon.nc", "w") as ds:
+        ds.createDimension("ncol", NCOL)
+        for name, values, units in (
+            ("lat", rng.uniform(-90.0, 90.0, NCOL), "degrees_north"),
+            ("lon", rng.uniform(0.0, 360.0, NCOL), "degrees_east"),
+        ):
+            var = ds.createVariable(name, "f8", ("ncol",))
+            var[:] = values
+            var.units = units
+    for name in ("sgh30", "landfrac"):
+        zarr.create_array(
+            str(root / f"{name}.zarr"), data=rng.uniform(size=NCOL).astype("f4")
+        )
+    return {**spec, "latlon": str(root / "latlon.nc"), "scream_ref": str(root)}
+
+
+def _build_ic(spec, out_dir, monkeypatch, source=None):
+    source = source or _FakeSource()
+    monkeypatch.setattr(rt, "make_source", lambda s: source)
+    path = rt.build_ic_store(
+        spec,
+        IC_TIME,
+        str(out_dir),
+        device=torch.device("cpu"),
+        history="test",
+        write_workers=2,
+    )
+    return path, source
+
+
+def test_ic_store_holds_the_build_of_its_time(ic_inputs, tmp_path, monkeypatch):
+    path, source = _build_ic(ic_inputs, tmp_path, monkeypatch)
+    assert path == rt.ic_path(str(tmp_path), IC_TIME)
+    assert os.listdir(tmp_path) == [os.path.basename(path)]  # no partial store left
+    assert source.calls == [str(IC_TIME)]
+    root = zarr.open_consolidated(path, mode="r")
+    assert root.attrs["initial_time"] == "2024-09-25T18:00:00"
+    assert root.attrs["origin"] == rt.ic_origin(ic_inputs, IC_TIME)
+    assert root.attrs["history"] == "test"
+    # what build_ic emits for the source state of that time
+    vert, p0 = load_vert(ic_inputs["vert"])
+    phis = np.asarray(zarr.open_array(ic_inputs["phis"], mode="r")[:])
+    emitted = {}
+
+    def emit(name, j, field):
+        emitted[name, j] = np.asarray(field, np.float32).copy()
+
+    remap = load_map(ic_inputs["map"], torch.device("cpu"))
+    build_ic(_era5(18), remap, torch.from_numpy(phis), vert, p0, NCOL, emit)
+    for (name, j), field in emitted.items():
+        got = root[name][0, j] if root[name].ndim == 3 else root[name][0]
+        np.testing.assert_array_equal(got, field, err_msg=f"{name} {j}")
+    np.testing.assert_array_equal(root["phis"][:], phis)
+    for name in ("sgh30", "landfrac"):
+        want = zarr.open_array(os.path.join(ic_inputs["scream_ref"], f"{name}.zarr"))
+        np.testing.assert_array_equal(root[name][:], want[:])
+    with netCDF4.Dataset(ic_inputs["latlon"]) as ds:
+        np.testing.assert_array_equal(root["lat"][:], ds["lat"][:].astype("f4"))
+
+
+def test_a_kept_ic_is_checked_against_its_origin(ic_inputs, tmp_path, monkeypatch):
+    path, _ = _build_ic(ic_inputs, tmp_path, monkeypatch)
+    again, source = _build_ic(ic_inputs, tmp_path, monkeypatch)
+    assert again == path and source.calls == []  # kept, not rebuilt
+    other = {**ic_inputs, "scream_ref": str(tmp_path)}
+    with pytest.raises(ValueError, match="cannot serve this run"):
+        _build_ic(other, tmp_path, monkeypatch)
+    forecast = {**ic_inputs, "source": "wb2_hres", "init": "2020-08-26T00"}
+    with pytest.raises(ValueError, match="cannot serve this run"):
+        _build_ic(forecast, tmp_path, monkeypatch)
+
+
+def test_a_lost_ic_rename_race_keeps_the_first_store(ic_inputs, tmp_path, monkeypatch):
+    first, _ = _build_ic(ic_inputs, tmp_path / "first", monkeypatch)
+    zarr.open_group(first, mode="r+").attrs["first"] = True
+    out = tmp_path / "shared"
+    rename = os.rename
+
+    def another_run_renames_first(src, dst):
+        shutil.copytree(first, dst)
+        rename(src, dst)
+
+    monkeypatch.setattr(rt.os, "rename", another_run_renames_first)
+    path, _ = _build_ic(ic_inputs, out, monkeypatch)
+    assert zarr.open_group(path, mode="r").attrs["first"]
+    assert os.listdir(out) == [os.path.basename(path)]
+
+
+def test_wait_for_ic_returns_the_path_or_the_failure(tmp_path):
+    with pytest.raises(TimeoutError):
+        rt.wait_for_ic(str(tmp_path), timeout=0.05, poll=0.01)
+    (tmp_path / rt.IC_READY).write_text("/targets/ic_2024092518.zarr")
+    assert rt.wait_for_ic(str(tmp_path), timeout=1) == "/targets/ic_2024092518.zarr"
+    (tmp_path / rt.IC_READY).unlink()
+    (tmp_path / rt.FAILED).write_text("OSError: source unreachable")
+    with pytest.raises(RuntimeError, match="source unreachable"):
+        rt.wait_for_ic(str(tmp_path), timeout=None, poll=0.01)

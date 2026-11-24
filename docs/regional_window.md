@@ -113,7 +113,9 @@ every region; they are then averages over the window.
 ## Drive a window with an ECMWF HRES forecast
 
 `screamcast.initial_conditions.hres_forecast` builds one store per lead of an HRES
-forecast from ECMWF open data (00 and 12 UTC forecasts from 2024-03-05 12 UTC on), with the same steps as `fast_ic` and
+forecast from ECMWF open data (00 and 12 UTC forecasts from 2024-03-05 12 UTC on) or,
+with `--archive wb2`, from WeatherBench2 (00 and 12 UTC forecasts from 2016 to
+2023-01-10 12 UTC, 6-hourly leads, no `--cache`), with the same steps as `fast_ic` and
 `hres_ic` (see [initial_conditions.md](initial_conditions.md) for the map, statics and
 L128 file). The lead-0 store is the HRES analysis and serves as the initial condition:
 
@@ -151,9 +153,10 @@ torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \
 The drivers must cover the run: the last step reads the ring at `(n_steps - 1) x 10`
 minutes. Any other source works the same way: ERA5 hours from `fast_ic`, or HRES
 analyses from `hres_ic` for a hindcast. Instead of `--driver-stores`, the ring's drivers
-can be built while the run goes from ERA5 or ECMWF HRES open data (`--driver-onthefly`,
-see [replay.md](replay.md#drivers-built-on-the-fly)); only the initial condition then
-needs a store.
+can be built while the run goes from ERA5 or an ECMWF HRES forecast (open data or
+WeatherBench2; `--driver-onthefly`, see
+[replay.md](replay.md#drivers-built-on-the-fly)), and so can the initial condition
+(`--ic-onthefly`).
 
 ## Resources
 

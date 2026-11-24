@@ -59,6 +59,7 @@ import logging
 import os
 import sys
 import time
+import traceback
 from collections import OrderedDict
 
 import dotenv
@@ -117,11 +118,11 @@ from screamcast.replay import (
     run_with_replay,
 )
 from screamcast.replay_targets import (
-    MODES as PRODUCER_MODES,
-)
-from screamcast.replay_targets import (
+    FAILED,
+    IC_READY,
     ProducerProcess,
     TargetReader,
+    build_ic_store,
     check_target,
     load_spec,
     make_source,
@@ -135,6 +136,10 @@ from screamcast.replay_targets import (
     target_channels,
     target_origin,
     target_schedule,
+    wait_for_ic,
+)
+from screamcast.replay_targets import (
+    MODES as PRODUCER_MODES,
 )
 from screamcast.sht_omega_filter import DistributedSHTHighpass
 from screamcast.tile_jitter import JitteredModel
@@ -306,6 +311,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "instead of SCREAM_MAIN_ZARR_PATH. Needs --correction none."
         ),
     )
+    parser.add_argument(
+        "--ic-onthefly",
+        default=None,
+        metavar="SPEC.json",
+        help=(
+            "Build the IC store at start-up instead of giving --ic-store: rank 0 "
+            "builds it from SPEC's source (as --driver-onthefly, plus the statics "
+            "'latlon' and 'scream_ref') into --driver-target-dir, or keeps one "
+            "built there earlier from the same origin. The initial time is "
+            "--initial-time, by default the init of an HRES source. Needs "
+            "--correction none."
+        ),
+    )
     region = parser.add_mutually_exclusive_group()
     region.add_argument(
         "--region",
@@ -379,21 +397,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "Build the driver while the run goes instead of reading --driver-stores: "
             "a producer process on rank 0's GPU builds the 8 x 8 block means of the "
-            "driver (ERA5 from ARCO, or ECMWF HRES open data) that --replay and an "
-            "anchored --region ring use, into --driver-target-dir. SPEC names the "
-            "source and the fast_ic inputs; see screamcast/replay_targets.py and "
-            "docs/replay.md. The initial condition still comes from --ic-store."
+            "driver (ERA5 from ARCO, or an ECMWF HRES forecast from open data or "
+            "WeatherBench2) that --replay and an anchored --region ring use, into "
+            "--driver-target-dir. SPEC names the source and the fast_ic inputs; see "
+            "screamcast/replay_targets.py and docs/replay.md. The initial condition "
+            "comes from --ic-store or --ic-onthefly."
         ),
     )
     parser.add_argument(
         "--driver-target-dir",
         default=None,
         help=(
-            "--driver-onthefly: directory of the targets, on a file system every "
-            "rank sees. Targets already there (an earlier run) are used if they were "
-            "built from the same source and fast_ic inputs and cover this run; any "
-            "other target there stops the run. The producer's log, FAILED/DONE and "
-            "the run's markers go to DIR/runs/<run-name>-<time>-<pid>."
+            "--driver-onthefly, --ic-onthefly: directory of the targets and the IC, "
+            "on a file system every rank sees. Targets and ICs already there (an "
+            "earlier run) are used if they were built from the same source and "
+            "fast_ic inputs and cover this run; any other one there stops the run. "
+            "The producer's log, FAILED/DONE and the run's markers go to "
+            "DIR/runs/<run-name>-<time>-<pid>."
         ),
     )
     parser.add_argument(
@@ -411,7 +431,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--driver-target-timeout",
         type=float,
         default=3600.0,
-        help="--driver-onthefly: seconds a rank waits for a target before it fails.",
+        help=(
+            "--driver-onthefly: seconds a rank waits for a target before it fails "
+            "(--ic-onthefly: for the IC)."
+        ),
     )
     parser.add_argument(
         "--driver-every-hours",
@@ -1015,6 +1038,60 @@ def build_anchored_boundary(
     return boundary
 
 
+def onthefly_ic_start(args: argparse.Namespace) -> tuple[dict, np.datetime64]:
+    """``--ic-onthefly``'s spec and initial time (``--initial-time``, by default the
+    init of a forecast source); raises before start-up on what the run cannot do."""
+    if args.ic_store is not None:
+        raise ValueError("give --ic-store or --ic-onthefly, not both")
+    if args.correction != "none":
+        raise ValueError("--ic-onthefly needs --correction none")
+    if args.driver_target_dir is None:
+        raise ValueError("--ic-onthefly needs --driver-target-dir")
+    spec = load_spec(args.ic_onthefly, ic=True)
+    if args.initial_time is None and spec["source"] == "era5":
+        raise ValueError("--ic-onthefly from ERA5 needs --initial-time")
+    t0 = np.datetime64(args.initial_time or spec["init"], "s")
+    if not make_source(spec).has(t0):
+        raise ValueError(f"--ic-onthefly: {spec['source']} has no state at {t0}")
+    return spec, t0
+
+
+def onthefly_ic(
+    args: argparse.Namespace,
+    spec: dict,
+    t0: np.datetime64,
+    run_dir: str,
+    rank: int,
+    device: torch.device,
+) -> str:
+    """The path of the initial condition ``--ic-onthefly`` builds: rank 0 builds it (or
+    keeps a matching one) in ``--driver-target-dir`` and writes ``IC_READY`` (its path)
+    or ``FAILED`` (the traceback) in ``run_dir``; the other ranks wait for either. A
+    file, not a collective, so the build may outlast the NCCL timeout."""
+    if rank != 0:
+        return wait_for_ic(run_dir, args.driver_target_timeout)
+    os.makedirs(run_dir, exist_ok=True)
+    try:
+        path = build_ic_store(
+            spec,
+            t0,
+            args.driver_target_dir,
+            device=device,
+            history=history_entry([sys.executable, *sys.argv]),
+        )
+    except BaseException:
+        with open(os.path.join(run_dir, FAILED), "w") as f:
+            f.write(traceback.format_exc())
+        raise
+    tmp = os.path.join(run_dir, f"{IC_READY}.partial")
+    with open(tmp, "w") as f:
+        f.write(path)
+    os.rename(tmp, os.path.join(run_dir, IC_READY))
+    if device.type == "cuda":
+        torch.cuda.empty_cache()  # before the model loads
+    return path
+
+
 def main() -> None:
     args = parse_args()
     logging.getLogger().setLevel(getattr(logging, args.log_level))
@@ -1040,7 +1117,11 @@ def main() -> None:
     n_steps_outer = args.n_steps_outer
     coarsen = args.coarsen
     correction = args.correction
-    if args.ic_store is None:
+    ic_spec = None
+    if args.ic_onthefly is not None:
+        ic_spec, t0 = onthefly_ic_start(args)
+        scream_data = None  # opened once rank 0 has built it
+    elif args.ic_store is None:
         scream_data = data_catalog.scream_sdecadal
         t0 = np.datetime64(args.initial_time or "2020-10-13T00:00:00")
     else:
@@ -1059,6 +1140,7 @@ def main() -> None:
                 f"initial_time {t0}."
             )
 
+    one_frame_ic = args.ic_store is not None or args.ic_onthefly is not None
     # --region-latlon becomes a --region once the world size is known
     regional = args.region is not None or args.region_latlon is not None
     if regional:
@@ -1080,7 +1162,7 @@ def main() -> None:
             args.region_boundary == "anchored"
             and not args.driver_stores
             and args.driver_onthefly is None
-            and args.ic_store is not None
+            and one_frame_ic
         ):
             raise ValueError(
                 "--region-boundary anchored with --ic-store needs --driver-stores or "
@@ -1128,11 +1210,7 @@ def main() -> None:
     if args.replay:
         if correction != "none":
             raise ValueError("--replay needs --correction none")
-        if (
-            not args.driver_stores
-            and args.driver_onthefly is None
-            and args.ic_store is not None
-        ):
+        if not args.driver_stores and args.driver_onthefly is None and one_frame_ic:
             raise ValueError(
                 "--replay with --ic-store needs --driver-stores or --driver-onthefly "
                 "(the IC store holds one frame)"
@@ -1147,6 +1225,19 @@ def main() -> None:
 
     if rank != 0:
         logger.setLevel(logging.CRITICAL + 1)
+
+    run_dir = None
+    if args.driver_onthefly is not None or ic_spec is not None:
+        # this run's FAILED, DONE, markers and log; targets and ICs are shared
+        name = [f"{args.run_name}-{time.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"]
+        torch.distributed.broadcast_object_list(name, src=0, device=device)
+        run_dir = os.path.join(args.driver_target_dir, "runs", name[0])
+    if ic_spec is not None:
+        ic_path = onthefly_ic(args, ic_spec, t0, run_dir, rank, device)
+        scream_data = data_catalog.ic_store(
+            ic_path, os.getenv("SCREAM_ZARR_PROFILE", "")
+        )
+        logger.info("initial condition on the fly: %s", ic_path)
 
     npg = 2
     grid_tgt = load_scrip_lonlat(args.grid_tgt)
@@ -1386,6 +1477,7 @@ def main() -> None:
             load_spec(args.driver_onthefly) if args.driver_onthefly else None
         ),
         "driver_target_dir": args.driver_target_dir,
+        "ic_onthefly": ic_spec,
         "driver_producer": args.driver_producer if args.driver_onthefly else None,
         "replay_region_edge": (
             args.replay_region_edge if args.replay and args.region else None
@@ -1678,10 +1770,6 @@ def main() -> None:
             # the ring drives every input channel
             list(in_coords["variable"]) if anchored else [],
         )
-        # this run's FAILED, DONE, markers and log; the targets are shared with other runs
-        name = [f"{args.run_name}-{time.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"]
-        torch.distributed.broadcast_object_list(name, src=0, device=device)
-        run_dir = os.path.join(args.driver_target_dir, "runs", name[0])
         check = functools.partial(
             check_target,
             channels=target_channels(stems),

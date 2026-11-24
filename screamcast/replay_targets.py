@@ -19,7 +19,7 @@ the anchored ring of a regional window only as the 8 x 8 block means of the wind
 its ring at the driver hours (its ``smooth`` with ``--boundary-block 8``). A producer
 process builds them from the source while STRATA runs:
 
-    source state (ERA5 from ARCO, or ECMWF HRES open data)
+    source state (ERA5 from ARCO, or an ECMWF HRES forecast: open data or WeatherBench2)
       -> fast_ic.build_ic on one GPU, column group by column group
       -> 8 x 8 block means of every replayed channel (float64)
       -> <out-dir>/blocks_<YYYYMMDDHH>.zarr
@@ -66,11 +66,25 @@ Standalone (a dry run, or targets for later runs)::
 
     python -m screamcast.replay_targets compare A B
 
+    python -m screamcast.replay_targets ic --spec SPEC.json --out-dir DIR \\
+        --time 2024-09-25T12
+
 ``compare`` checks that two target stores hold the same values bit for bit. The spec
-is JSON: ``source`` (``era5`` or ``hres``), ``map`` (the 721 x 1440 -> ne1024pg2 map),
-``phis`` (SCREAM phis Zarr array) and ``vert`` (L128 coefficients), as for ``fast_ic``;
-``init`` and ``cache`` for ``hres`` (optional ``opendata_root``); optional
-``era5_zarr`` and ``fetch_workers`` for ``era5``.
+is JSON: ``source``, ``map`` (the 721 x 1440 -> ne1024pg2 map), ``phis`` (SCREAM phis
+Zarr array) and ``vert`` (L128 coefficients), as for ``fast_ic``. The sources:
+
+- ``era5``: hourly ERA5 from ARCO (optional ``era5_zarr``, ``fetch_workers``);
+- ``hres``: the HRES forecast from ``init`` in ECMWF open data (00/12 UTC from
+  2024-03-05 12 UTC; every 3 h to +144 h, then 6-hourly), GRIB files kept in
+  ``cache`` (optional ``opendata_root``);
+- ``wb2_hres``: the HRES forecast from ``init`` in WeatherBench2 (00/12 UTC from
+  2016-01-01 to 2023-01-10 12 UTC; every 6 h to +240 h; optional ``wb2_zarr``,
+  ``fetch_workers``).
+
+``ic`` builds the run's initial condition (``ic_<YYYYMMDDHH>.zarr``, a store for
+``--ic-store``, stamped with its origin like the targets); the spec then also names the
+statics ``latlon`` and ``scream_ref``, as for ``fast_ic``. The runner builds it itself
+with ``--ic-onthefly``.
 """
 
 from __future__ import annotations
@@ -99,11 +113,24 @@ from screamcast.distributed_halo import TileTopology, plane_parts
 from screamcast.history import history_entry
 from screamcast.initial_conditions.fast_ic import (
     ARCO_ERA5,
+    ChunkWriter,
     Era5,
+    _lower_priority,
     build_ic,
     fetch_era5_arco,
     load_map,
     load_vert,
+)
+from screamcast.initial_conditions.hres_ic import (
+    WB2_HRES_FORECAST,
+    WB2_LEADS,
+    check_wb2_init,
+    fetch_hres_forecast,
+)
+from screamcast.initial_conditions.ic_store import (
+    compute_coszr,
+    load_latlon,
+    load_static_array,
 )
 from screamcast.initial_conditions.layout import NLEV_SUBSET, VARS_3D
 from screamcast.regional import parse_region, ring_box
@@ -113,13 +140,16 @@ FAILED = "FAILED"
 DONE = "DONE"
 PRODUCER_LOG = "producer.log"
 MODES = ("gated", "ahead", "serial")
-SOURCES = ("era5", "hres")
+SOURCES = ("era5", "hres", "wb2_hres")
 SURFACE = ("T_2m", "ps")  # the 2D fields build_ic emits
 SPEC_KEYS = {
     "common": ("source", "map", "phis", "vert"),
     "era5": (),
     "hres": ("init", "cache"),
+    "wb2_hres": ("init",),
 }
+IC_KEYS = ("latlon", "scream_ref")  # the statics of an initial condition
+IC_READY = "IC_READY"
 # ECMWF open data, HRES "oper" (00 and 12 UTC runs): every 3 h to +144 h, then every
 # 6 h to +240 h. The first complete cycle is hres_opendata.FIRST_INIT.
 HRES_LEADS = frozenset((*range(0, 145, 3), *range(150, 241, 6)))
@@ -143,16 +173,32 @@ def target_path(out_dir: str, valid: np.datetime64) -> str:
 # ------------------------------------------------------------------ sources
 
 
-def load_spec(path: str) -> dict:
+def load_spec(path: str, ic: bool = False) -> dict:
+    """The spec at ``path``; with ``ic``, also the keys an initial condition needs."""
     with open(path) as f:
         spec = json.load(f)
     source = spec.get("source")
     if source not in SOURCES:
         raise ValueError(f"{path}: source must be one of {SOURCES}, got {source!r}")
-    missing = [k for k in SPEC_KEYS["common"] + SPEC_KEYS[source] if k not in spec]
+    keys = SPEC_KEYS["common"] + SPEC_KEYS[source] + (IC_KEYS if ic else ())
+    missing = [k for k in keys if k not in spec]
     if missing:
         raise ValueError(f"{path}: the {source} spec lacks {missing}")
     return spec
+
+
+def _with_retries(what: str, read: Callable[[], Era5], attempts: int = 3) -> Era5:
+    """``read()``, retried after a failure (HTTP errors vary; a missing time is a
+    SystemExit and is not retried)."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return read()
+        except Exception as err:  # noqa: BLE001
+            if attempt == attempts:
+                raise
+            log(f"{what}: {type(err).__name__} {err}; retry in {10 * attempt} s")
+            time.sleep(10 * attempt)
+    raise AssertionError("unreachable")
 
 
 class Era5Source:
@@ -161,25 +207,15 @@ class Era5Source:
     def __init__(self, spec: dict) -> None:
         self.zarr = spec.get("era5_zarr", ARCO_ERA5)
         self.workers = int(spec.get("fetch_workers", 8))
-        self.attempts = 3
 
     def has(self, valid: np.datetime64) -> bool:
         return np.datetime64(valid, "h") == np.datetime64(valid, "s")
 
     def __call__(self, valid: np.datetime64) -> Era5:
-        for attempt in range(1, self.attempts + 1):
-            try:
-                return fetch_era5_arco(
-                    str(np.datetime64(valid, "s")), self.zarr, self.workers
-                )
-            except Exception as err:  # noqa: BLE001 (HTTP errors vary; a missing time is SystemExit)
-                if attempt == self.attempts:
-                    raise
-                log(
-                    f"ERA5 {valid}: {type(err).__name__} {err}; retry in {10 * attempt} s"
-                )
-                time.sleep(10 * attempt)
-        raise AssertionError("unreachable")
+        stamp = str(np.datetime64(valid, "s"))
+        return _with_retries(
+            f"ERA5 {stamp}", lambda: fetch_era5_arco(stamp, self.zarr, self.workers)
+        )
 
     def describe(self, valid: np.datetime64) -> str:
         return f"ERA5 {self.zarr}"
@@ -225,8 +261,43 @@ class HresSource:
         return f"ECMWF HRES open data {self.root}/{opendata_name(self.init, self.lead(valid))}"
 
 
-def make_source(spec: dict) -> Era5Source | HresSource:
-    return Era5Source(spec) if spec["source"] == "era5" else HresSource(spec)
+class Wb2HresSource:
+    """One ECMWF HRES forecast from WeatherBench2's ``hres`` store
+    (``hres_ic.fetch_hres_forecast``). A failed read is retried."""
+
+    def __init__(self, spec: dict) -> None:
+        self.init = np.datetime64(spec["init"], "h")
+        self.zarr = spec.get("wb2_zarr", WB2_HRES_FORECAST)
+        self.workers = int(spec.get("fetch_workers", 8))
+        check_wb2_init(self.init)
+
+    def lead(self, valid: np.datetime64) -> int:
+        return int((np.datetime64(valid, "h") - self.init) / np.timedelta64(1, "h"))
+
+    def has(self, valid: np.datetime64) -> bool:
+        return (
+            np.datetime64(valid, "h") == np.datetime64(valid, "s")
+            and self.lead(valid) in WB2_LEADS
+        )
+
+    def __call__(self, valid: np.datetime64) -> Era5:
+        lead = self.lead(valid)
+        return _with_retries(
+            f"HRES {self.init} +{lead} h",
+            lambda: fetch_hres_forecast(str(self.init), lead, self.zarr, self.workers),
+        )
+
+    def describe(self, valid: np.datetime64) -> str:
+        return f"ECMWF HRES {self.zarr} init {self.init} +{self.lead(valid)} h"
+
+
+Source = Era5Source | HresSource | Wb2HresSource
+
+
+def make_source(spec: dict) -> Source:
+    return {"era5": Era5Source, "hres": HresSource, "wb2_hres": Wb2HresSource}[
+        spec["source"]
+    ](spec)
 
 
 def target_origin(spec: dict) -> dict[str, str]:
@@ -238,14 +309,14 @@ def target_origin(spec: dict) -> dict[str, str]:
         origin["era5_zarr"] = spec.get("era5_zarr", ARCO_ERA5)
     else:
         origin["init"] = str(np.datetime64(spec["init"], "h"))
+    if spec["source"] == "wb2_hres":
+        origin["wb2_zarr"] = spec.get("wb2_zarr", WB2_HRES_FORECAST)
     for key in ("map", "phis", "vert"):
         origin[key] = os.path.abspath(spec[key])
     return origin
 
 
-def source_hours(
-    source: Era5Source | HresSource, run_init: np.datetime64, hours
-) -> set[int]:
+def source_hours(source: Source, run_init: np.datetime64, hours) -> set[int]:
     """The run hours among ``hours`` at which the source has a state (the driver hours
     of ``replay_plan``)."""
     t0 = np.datetime64(run_init, "s")
@@ -565,6 +636,135 @@ def compare_stores(a: str, b: str) -> list[str]:
         return []
     d = np.abs(x - y)
     return [f"max |a - b| {np.nanmax(d):.3g}, {int((d > 0).sum())} values differ"]
+
+
+# ------------------------------------------------------------------ initial condition
+
+
+def ic_path(out_dir: str, valid: np.datetime64) -> str:
+    return os.path.join(out_dir, f"ic_{hour_stamp(valid)}.zarr")
+
+
+def ic_origin(spec: dict, valid: np.datetime64) -> dict[str, str]:
+    """What the initial condition at ``valid`` is built from: the targets' origin, its
+    time and the statics (absolute paths)."""
+    origin = target_origin(spec)
+    origin["valid_time"] = str(np.datetime64(valid, "s"))
+    for key in IC_KEYS:
+        origin[key] = os.path.abspath(spec[key])
+    return origin
+
+
+def check_ic(path: str, origin: dict[str, str]) -> None:
+    """Raise unless the store at ``path`` is an initial condition built from ``origin``."""
+    built_from = zarr.open_group(path, mode="r").attrs.get("origin")
+    if built_from != origin:
+        raise ValueError(
+            f"{path} cannot serve this run (built from {built_from}, this run's "
+            f"initial condition from {origin}): remove it or use another target "
+            "directory"
+        )
+
+
+def build_ic_store(
+    spec: dict,
+    valid: np.datetime64,
+    out_dir: str,
+    *,
+    device: torch.device,
+    history: str,
+    write_workers: int = 32,
+    rows_per_chunk: int = 8 * 1024 * 1024,
+) -> str:
+    """The one-frame initial condition at ``valid`` from ``spec``'s source, as
+    ``fast_ic`` writes it (a store for ``--ic-store``): its path in ``out_dir``. A store
+    already there is kept if it was built from the same origin (``ic_origin``), and
+    stops the build otherwise. A new store is written beside its path, stamped with its
+    origin and renamed into place; if another run renamed one there first, that one is
+    checked and kept."""
+    path = ic_path(out_dir, valid)
+    origin = ic_origin(spec, valid)
+    if os.path.isdir(path):
+        check_ic(path, origin)
+        log(f"{path} exists, kept")
+        return path
+    source = make_source(spec)
+    if not source.has(valid):
+        raise ValueError(f"{spec['source']} has no state at {valid}")
+    stamp = str(np.datetime64(valid, "s"))
+    start = time.perf_counter()
+    state = source(valid)
+    t_source = time.perf_counter() - start
+    lat, lon, lat_deg, lon_deg = load_latlon(spec["latlon"])
+    statics = {
+        "phis": np.asarray(zarr.open_array(spec["phis"], mode="r")[:], np.float32),
+        "lat": lat,
+        "lon": lon,
+        "sgh30": load_static_array(spec["scream_ref"], "sgh30"),
+        "landfrac": load_static_array(spec["scream_ref"], "landfrac"),
+    }
+    remap = load_map(spec["map"], device)
+    ncol = remap.shape[0]
+    if remap.shape[1] != state.sfc["ps"].size:
+        raise ValueError(
+            f"map columns {remap.shape[1]} != source points {state.sfc['ps'].size}"
+        )
+    for name, arr in statics.items():
+        if arr.shape != (ncol,):
+            raise ValueError(f"{name} shape {arr.shape}, the map has {ncol} rows")
+    vert, p0 = load_vert(spec["vert"])
+    os.makedirs(out_dir, exist_ok=True)
+    tmp = f"{path}.partial{os.getpid()}"
+    with ThreadPoolExecutor(write_workers, initializer=_lower_priority) as writers:
+        writer = ChunkWriter(
+            tmp,
+            ncol,
+            stamp,
+            f"{source.describe(valid)} via screamcast.replay_targets",
+            history,
+            writers,
+        )
+        zarr.open_group(tmp, mode="r+").attrs["origin"] = origin
+        for name, arr in (
+            *statics.items(),
+            ("coszr", compute_coszr(stamp, lat_deg, lon_deg)),
+        ):
+            writer.submit(name, 0, arr)
+        phis = torch.from_numpy(statics["phis"]).to(device)
+        build_ic(state, remap, phis, vert, p0, rows_per_chunk, writer.submit)
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        writer.close()
+    try:
+        os.rename(tmp, path)
+    except OSError:
+        if not os.path.isdir(path):
+            raise
+        shutil.rmtree(tmp)
+        check_ic(path, origin)
+    log(
+        f"{path}: source {t_source:.1f} s, "
+        f"total {time.perf_counter() - start:.1f} s"
+    )
+    return path
+
+
+def wait_for_ic(run_dir: str, timeout: float | None, poll: float = 0.5) -> str:
+    """The initial condition's path once the rank building it has written ``IC_READY``
+    in ``run_dir``; raises at once if it wrote ``FAILED``, and after ``timeout``
+    seconds unless it is None."""
+    ready = os.path.join(run_dir, IC_READY)
+    failed = os.path.join(run_dir, FAILED)
+    start = time.perf_counter()
+    while not os.path.exists(ready):
+        if os.path.exists(failed):
+            with open(failed) as f:
+                raise RuntimeError(f"initial condition build failed:\n{f.read()}")
+        if timeout is not None and time.perf_counter() - start > timeout:
+            raise TimeoutError(f"no initial condition after {timeout:.0f} s")
+        time.sleep(poll)
+    with open(ready) as f:
+        return f.read()
 
 
 # ------------------------------------------------------------------ markers
@@ -1099,6 +1299,11 @@ def main() -> None:
     q.add_argument("--face-size", type=int, default=2048)
     q.add_argument("--group-columns", type=int, default=1 << 21)
     q.add_argument("--device", default="cuda")
+    i = sub.add_parser("ic", help="build the initial condition of a run")
+    i.add_argument("--spec", required=True, help="source spec (JSON) with the statics")
+    i.add_argument("--out-dir", required=True, help="the target directory")
+    i.add_argument("--time", required=True, help="YYYY-MM-DDTHH (UTC)")
+    i.add_argument("--device", default="cuda")
     args = p.parse_args()
     if args.cmd == "compare":
         bad = compare_stores(args.a, args.b)
@@ -1107,6 +1312,15 @@ def main() -> None:
         if bad:
             raise SystemExit(f"TARGETS_DIFFER {args.a} {args.b}")
         print(f"TARGETS_EQUAL {args.a} {args.b}")
+    elif args.cmd == "ic":
+        argv = [sys.executable, "-m", "screamcast.replay_targets", *sys.argv[1:]]
+        build_ic_store(
+            load_spec(args.spec, ic=True),
+            np.datetime64(args.time, "h"),
+            args.out_dir,
+            device=torch.device(args.device),
+            history=history_entry(argv),
+        )
     else:
         produce(args)
 
