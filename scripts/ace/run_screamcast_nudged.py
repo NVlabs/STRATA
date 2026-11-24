@@ -376,7 +376,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--driver-stores",
-        "--boundary-stores",
         dest="driver_stores",
         nargs="+",
         default=None,
@@ -423,8 +422,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "--driver-onthefly: 'gated' builds what the run needs before its first "
             "analysis at once and each later target once the run begins the analysis "
-            "before it; 'ahead' builds every target as early as it can; 'serial' "
-            "builds each one when the run needs it (the run waits)."
+            "before it; 'ahead' builds every target as early as it can."
         ),
     )
     parser.add_argument(
@@ -438,7 +436,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--driver-every-hours",
-        "--boundary-every-hours",
         dest="driver_every_hours",
         type=int,
         default=6,
@@ -1816,7 +1813,6 @@ def main() -> None:
                     path, replay.names, topology.local_tiles, topology.tile_size
                 ),
                 check=check,
-                mode=args.driver_producer,
                 timeout=args.driver_target_timeout,
             )
             target_reader.prefetch(sorted(analyses))
@@ -1828,7 +1824,6 @@ def main() -> None:
                 t0,
                 lambda path: read_box_blocks(path, ring_names, topology),
                 check=check,
-                mode=args.driver_producer,
                 timeout=args.driver_target_timeout,
             )
             ring_reader.prefetch(ring)

@@ -180,9 +180,9 @@ torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \
   the run begins the last analysis before it needs that target; rank 0 empties its CUDA
   cache first, so the build does not meet STRATA's peak memory of start-up and
   compilation. A window without `--replay` has no analyses and is not gated. `ahead`
-  builds every target as early as it can; `serial` builds each target when the run asks
-  for it and the run waits (for debugging). Outside `serial` the next source state is
-  fetched while the GPU builds the current one.
+  builds every target as early as it can. A rank that needs a target not yet built asks
+  for it, and a gated producer then builds it without waiting for its gate. The next
+  source state is fetched while the GPU builds the current one.
 - A target is written under `.partial<pid>` and renamed, so a rank never reads half a
   store. Each run has its own directory `DIR/runs/<run-name>-<time>-<pid>`: there the
   producer writes `FAILED` (with the traceback) or `DONE` and its `producer.log`, and
@@ -198,10 +198,8 @@ torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \
   directory, also by the producer.
 - `python -m screamcast.replay_targets produce --spec SPEC.json --out-dir DIR
   --run-init 2024-09-25T12 --hours 6 12 18 [--region R --tile-size 128 [--ring]]`
-  builds targets without a run, `python -m screamcast.replay_targets ic --spec
-  SPEC.json --out-dir DIR --time 2024-09-25T12` the initial condition, and `python -m
-  screamcast.replay_targets compare A B` checks that two target stores are equal bit
-  for bit.
+  builds targets ahead of a run, for example on a node that can reach the source when
+  the compute nodes cannot; the run then reuses them.
 
 On the 4 x 4-tile Helene window (H100, 2026-11-19) a target took about 7 s to build
 (2.6 s to read the cached GRIB, 2 s on the GPU) and the replayed 24 h run took as long as

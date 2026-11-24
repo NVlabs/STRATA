@@ -315,7 +315,7 @@ def test_ring_from_block_means_is_the_ring_from_boxes(region):
 
 def test_column_groups_give_the_same_bits(inputs, tmp_path):
     """Each column's build is independent of the others: one tile per group equals the
-    whole grid in one group, bit for bit (``compare``)."""
+    whole grid in one group, bit for bit."""
     spec, _ = inputs
     state = _era5(2)
     tiles = rt.producer_tiles(None, TILE, FACE)
@@ -335,7 +335,8 @@ def test_column_groups_give_the_same_bits(inputs, tmp_path):
             source="synthetic",
             origin=ORIGIN,
         )
-    assert rt.compare_stores(*paths) == []
+    a, b = (np.asarray(zarr.open_group(p, mode="r")["blocks"][...]) for p in paths)
+    np.testing.assert_array_equal(a, b)  # NaN equal to NaN
 
 
 def test_tile_columns_are_the_window_pixels():
@@ -500,7 +501,6 @@ def test_a_prefetched_targets_timeout_counts_from_get(tmp_path):
         t0,
         lambda path: path,
         check=_ok,
-        mode="gated",
         timeout=0.5,
     )
     reader.prefetch([6, 12])
@@ -529,7 +529,6 @@ def test_a_closed_reader_stops_waiting(tmp_path):
         np.datetime64("2024-09-25T12"),
         lambda path: path,
         check=_ok,
-        mode="gated",
         timeout=60,
     )
     reader.prefetch([6, 12, 18])
@@ -606,15 +605,12 @@ def _produce_args(spec_path, out_dir, mode, region=None):
     )
 
 
-@pytest.mark.parametrize("mode", ["ahead", "gated", "serial"])
+@pytest.mark.parametrize("mode", ["ahead", "gated"])
 def test_producer_builds_every_target_in_each_mode(inputs, tmp_path, monkeypatch, mode):
     spec, spec_path = inputs
     source = _FakeSource()
     monkeypatch.setattr(rt, "make_source", lambda s: source)
     t0 = np.datetime64("2024-09-25T12")
-    if mode == "serial":  # the run asks for each target
-        for h in (6, 12):
-            rt.mark(str(tmp_path), "request", t0 + np.timedelta64(h, "h"))
     if mode == "gated":  # the second target waits for the analysis at +6 h
         rt.mark(str(tmp_path), "analysis", t0 + np.timedelta64(6, "h"))
     rt.produce(_produce_args(spec_path, tmp_path, mode, REGION))
@@ -630,7 +626,6 @@ def test_producer_builds_every_target_in_each_mode(inputs, tmp_path, monkeypatch
             path, rt.target_channels(STEMS), topo.local_tiles, TILE
         ),
         check=_check(spec),
-        mode=mode,
         timeout=5,
     )
     reader.prefetch([6, 12])
@@ -655,10 +650,9 @@ def test_producer_builds_every_target_in_each_mode(inputs, tmp_path, monkeypatch
     assert "does not cover" in (tmp_path / rt.FAILED).read_text()
 
 
-@pytest.mark.parametrize("mode,built", [("gated", [6]), ("serial", [])])
+@pytest.mark.parametrize("mode,built", [("gated", [6])])
 def test_producer_waits_for_its_marker(inputs, tmp_path, monkeypatch, mode, built):
-    """Gated: without the analysis marker the second target is not built, the first is.
-    Serial: without a request no target is built."""
+    """Gated: without the analysis marker the second target is not built, the first is."""
     _, spec_path = inputs
     monkeypatch.setattr(rt, "make_source", lambda s: _FakeSource())
     monkeypatch.setattr(rt.time, "sleep", lambda s: None)
@@ -688,9 +682,35 @@ def test_producer_waits_for_its_marker(inputs, tmp_path, monkeypatch, mode, buil
     assert (tmp_path / rt.FAILED).exists()
 
 
+def test_a_request_opens_a_gated_target(inputs, tmp_path, monkeypatch):
+    """Without the analysis marker at +6 h, a request for the +12 h target (a rank
+    that needs it now) lets a gated producer build it."""
+    _, spec_path = inputs
+    monkeypatch.setattr(rt, "make_source", lambda s: _FakeSource())
+    monkeypatch.setattr(rt.time, "sleep", lambda s: None)
+    polls = {"n": 0}
+    real_exists = os.path.exists
+
+    def exists(p):
+        # a producer that ignores the request would wait at the gate for good
+        if os.path.basename(p).startswith(("analysis_", "request_")):
+            polls["n"] += 1
+            if polls["n"] > 200:
+                raise TimeoutError("still waiting at the gate")
+        return real_exists(p)
+
+    monkeypatch.setattr(rt.os.path, "exists", exists)
+    t0 = np.datetime64("2024-09-25T12")
+    rt.mark(str(tmp_path), "request", t0 + np.timedelta64(12, "h"))
+    rt.produce(_produce_args(spec_path, tmp_path, "gated", REGION))
+    for h in (6, 12):
+        assert os.path.isdir(rt.target_path(str(tmp_path), t0 + np.timedelta64(h, "h")))
+    assert (tmp_path / rt.DONE).exists()
+
+
 def test_reader_asks_for_a_missing_target(tmp_path):
-    """A rank that finds its target missing writes the request a serial producer (or a
-    gated one retrying out of memory) waits for."""
+    """A rank that finds its target missing writes the request a gated producer (waiting
+    at the target's gate, or retrying out of memory) waits for."""
     t0 = np.datetime64("2024-09-25T12")
     reader = rt.TargetReader(
         str(tmp_path),
@@ -698,7 +718,6 @@ def test_reader_asks_for_a_missing_target(tmp_path):
         t0,
         lambda path: None,
         check=_ok,
-        mode="serial",
         timeout=0.1,
     )
     with pytest.raises(TimeoutError):
@@ -778,7 +797,6 @@ def test_a_target_from_another_source_is_never_used(inputs, tmp_path, monkeypatc
         np.datetime64("2024-09-25T12"),
         lambda path: path,
         check=_check(other),
-        mode="ahead",
         timeout=5,
     )
     reader.prefetch([6])
@@ -794,7 +812,6 @@ def test_a_target_from_another_source_is_never_used(inputs, tmp_path, monkeypatc
         np.datetime64("2024-09-25T12"),
         lambda path: path,
         check=_check(spec),
-        mode="ahead",
         timeout=5,
     )
     assert reader.get(6)[0] == rt.target_path(str(tmp_path), reader.valid(6))

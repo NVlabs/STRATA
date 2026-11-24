@@ -52,25 +52,20 @@ Modes (``--driver-producer``):
   start-up and compilation. A run without analyses (a window driven by the ring alone)
   is not gated.
 - ``ahead``: every target as early as possible.
-- ``serial``: each target only when the run asks for it (``request_<stamp>``), and the
-  run waits: the slowest mode, for debugging.
 
-In ``gated`` and ``ahead`` the next source state is fetched while the GPU builds the
-current one, and the zarr write runs on its own thread.
+A rank that needs a target not yet there writes a request (``request_<stamp>``) in the
+run directory; a gated producer builds that target without waiting for its gate. The
+next source state is fetched while the GPU builds the current one, and the zarr write
+runs on its own thread.
 
-Standalone (a dry run, or targets for later runs)::
+The producer process is this module's ``produce`` command; run by hand it builds the
+targets ahead of a run (on a node that can reach the source, say)::
 
     python -m screamcast.replay_targets produce --spec SPEC.json --out-dir DIR \\
         --run-init 2024-09-25T12 --hours 6 12 18 \\
         [--region 3,10,14,7,11 --tile-size 128 [--ring]]
 
-    python -m screamcast.replay_targets compare A B
-
-    python -m screamcast.replay_targets ic --spec SPEC.json --out-dir DIR \\
-        --time 2024-09-25T12
-
-``compare`` checks that two target stores hold the same values bit for bit. The spec
-is JSON: ``source``, ``map`` (the 721 x 1440 -> ne1024pg2 map), ``phis`` (SCREAM phis
+The spec is JSON: ``source``, ``map`` (the 721 x 1440 -> ne1024pg2 map), ``phis`` (SCREAM phis
 Zarr array) and ``vert`` (L128 coefficients), as for ``fast_ic``. The sources:
 
 - ``era5``: hourly ERA5 from ARCO (optional ``era5_zarr``, ``fetch_workers``);
@@ -81,10 +76,10 @@ Zarr array) and ``vert`` (L128 coefficients), as for ``fast_ic``. The sources:
   2016-01-01 to 2023-01-10 12 UTC; every 6 h to +240 h; optional ``wb2_zarr``,
   ``fetch_workers``).
 
-``ic`` builds the run's initial condition (``ic_<YYYYMMDDHH>.zarr``, a store for
-``--ic-store``, stamped with its origin like the targets); the spec then also names the
-statics ``latlon`` and ``scream_ref``, as for ``fast_ic``. The runner builds it itself
-with ``--ic-onthefly``.
+``build_ic_store`` builds a run's initial condition (``ic_<YYYYMMDDHH>.zarr``, a store
+like those ``--ic-store`` takes, stamped with its origin like the targets) for
+``--ic-onthefly``; the spec then also names the statics ``latlon`` and ``scream_ref``,
+as for ``fast_ic``.
 """
 
 from __future__ import annotations
@@ -139,7 +134,7 @@ from screamcast.replay import BLOCK, ReplayStep, block_mean, channel_level
 FAILED = "FAILED"
 DONE = "DONE"
 PRODUCER_LOG = "producer.log"
-MODES = ("gated", "ahead", "serial")
+MODES = ("gated", "ahead")
 SOURCES = ("era5", "hres", "wb2_hres")
 SURFACE = ("T_2m", "ps")  # the 2D fields build_ic emits
 SPEC_KEYS = {
@@ -627,21 +622,6 @@ def check_target(
         )
 
 
-def compare_stores(a: str, b: str) -> list[str]:
-    """Differences between two target stores: variables, or values bit for bit (NaN
-    equal to NaN)."""
-    ga, gb = zarr.open_group(a, mode="r"), zarr.open_group(b, mode="r")
-    if list(ga.attrs["variables"]) != list(gb.attrs["variables"]):
-        return ["variables differ"]
-    x, y = np.asarray(ga["blocks"][...]), np.asarray(gb["blocks"][...])
-    if x.shape != y.shape:
-        return [f"shape {x.shape} vs {y.shape}"]
-    if np.array_equal(x, y, equal_nan=True):
-        return []
-    d = np.abs(x - y)
-    return [f"max |a - b| {np.nanmax(d):.3g}, {int((d > 0).sum())} values differ"]
-
-
 # ------------------------------------------------------------------ initial condition
 
 
@@ -923,7 +903,6 @@ def produce(args: argparse.Namespace) -> None:
         fetcher = ThreadPoolExecutor(1)
         writer = ThreadPoolExecutor(1)
         pending: list[Future] = []
-        prefetch = args.mode != "serial"
 
         def check() -> None:
             """Raise a failed write, or stop if the run that started us is gone."""
@@ -988,18 +967,14 @@ def produce(args: argparse.Namespace) -> None:
                 f"(write {time.perf_counter() - t:.1f} s, built {t_ready:.1f} s)"
             )
 
-        nxt = fetcher.submit(source, todo[0]) if todo and prefetch else None
+        nxt = fetcher.submit(source, todo[0]) if todo else None
         for i, valid in enumerate(todo):
             k = valids.index(valid)
             check()
             t = time.perf_counter()
-            if not prefetch:
-                wait_for_markers([marker_path(run_dir, "request", valid)], check)
-                state = source(valid)
-            else:
-                state = nxt.result()
-                if i + 1 < len(todo):
-                    nxt = fetcher.submit(source, todo[i + 1])
+            state = nxt.result()
+            if i + 1 < len(todo):
+                nxt = fetcher.submit(source, todo[i + 1])
             t_source = time.perf_counter() - t
             t = time.perf_counter()
             gate(k)
@@ -1016,8 +991,6 @@ def produce(args: argparse.Namespace) -> None:
             pending.append(
                 writer.submit(finish, valid, blocks, time.perf_counter() - start)
             )
-            if not prefetch:
-                pending[-1].result()
         for future in pending:
             future.result()
         fetcher.shutdown()
@@ -1161,9 +1134,9 @@ class ProducerProcess:
 
 class TargetReader:
     """A rank's reader of the targets, ``read(path)`` of each (its own tiles' blocks for
-    the replay, the window and ring box for the ring), on a background thread
-    (``prefetch``) so the run does not wait on the file system. With a ``serial``
-    producer nothing is prefetched: ``get`` asks for each target.
+    the replay, the window and ring pieces for the ring), on a background thread
+    (``prefetch``) so the run does not wait on the file system. ``get`` of a target not
+    there yet asks the producer for it (a request in ``run_dir``).
 
     ``timeout`` counts from the ``get`` call: a prefetched target may take as long as
     the run takes to need it. The background thread is a daemon and stops waiting at
@@ -1180,17 +1153,13 @@ class TargetReader:
         read: Callable[[str], np.ndarray],
         *,
         check: Callable[[str], None],
-        mode: str,
         timeout: float,
     ) -> None:
-        if mode not in MODES:
-            raise ValueError(f"producer mode must be one of {MODES}, got {mode!r}")
         self.out_dir = out_dir
         self.run_dir = run_dir
         self.check = check
         self.run_init = np.datetime64(run_init, "s")
         self.read = read
-        self.mode = mode
         self.timeout = timeout
         self.stop = threading.Event()
         self.queue: queue.SimpleQueue[tuple[int, Future]] = queue.SimpleQueue()
@@ -1225,8 +1194,6 @@ class TargetReader:
                 future.set_exception(e)
 
     def prefetch(self, hours: list[int]) -> None:
-        if self.mode == "serial":
-            return
         if self.worker is None:
             self.worker = threading.Thread(target=self._work, daemon=True)
             self.worker.start()
@@ -1267,9 +1234,6 @@ class TargetReader:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
-    c = sub.add_parser("compare", help="bitwise comparison of two target stores")
-    c.add_argument("a")
-    c.add_argument("b")
     q = sub.add_parser("produce", help="build the targets of a run")
     q.add_argument("--spec", required=True, help="source spec (JSON)")
     q.add_argument("--out-dir", required=True, help="the target directory")
@@ -1303,30 +1267,8 @@ def main() -> None:
     q.add_argument("--face-size", type=int, default=2048)
     q.add_argument("--group-columns", type=int, default=1 << 21)
     q.add_argument("--device", default="cuda")
-    i = sub.add_parser("ic", help="build the initial condition of a run")
-    i.add_argument("--spec", required=True, help="source spec (JSON) with the statics")
-    i.add_argument("--out-dir", required=True, help="the target directory")
-    i.add_argument("--time", required=True, help="YYYY-MM-DDTHH (UTC)")
-    i.add_argument("--device", default="cuda")
     args = p.parse_args()
-    if args.cmd == "compare":
-        bad = compare_stores(args.a, args.b)
-        for line in bad:
-            print(line)
-        if bad:
-            raise SystemExit(f"TARGETS_DIFFER {args.a} {args.b}")
-        print(f"TARGETS_EQUAL {args.a} {args.b}")
-    elif args.cmd == "ic":
-        argv = [sys.executable, "-m", "screamcast.replay_targets", *sys.argv[1:]]
-        build_ic_store(
-            load_spec(args.spec, ic=True),
-            np.datetime64(args.time, "h"),
-            args.out_dir,
-            device=torch.device(args.device),
-            history=history_entry(argv),
-        )
-    else:
-        produce(args)
+    produce(args)
 
 
 if __name__ == "__main__":
