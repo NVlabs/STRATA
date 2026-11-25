@@ -197,6 +197,15 @@ needs `--initial-time`.
 
 ### Sources
 
+**Forecast or analysis.** `"hres"` and `"wb2_hres"` read one HRES *forecast*, the one
+started at `init`. Its lead 0 is the HRES analysis at `init`, and that is the initial
+condition. The driver at +6 h, +12 h, ... is that forecast's +6 h, +12 h, ... lead, not
+the HRES analysis at those times. A replayed run from them therefore uses nothing
+known after `init`: it is a forecast, the HRES forecast downscaled by STRATA.
+`"era5"` is a reanalysis at every hour: replaying to it pulls the run toward the
+observed weather at each analysis time, so it is a hindcast. An `--initial-time` later
+than `init` starts from that forecast lead, not from an analysis.
+
 `"source": "era5"` reads ERA5 from the public ARCO store (`era5_zarr` to use another),
 which has every hour. `"hres"` reads the ECMWF HRES forecast `init` from the open-data
 bucket (`opendata_root` to use a mirror). The bucket holds the 00 and 12 UTC forecasts,

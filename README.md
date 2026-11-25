@@ -301,10 +301,11 @@ torchrun --nproc_per_node=4 scripts/ace/run_screamcast_nudged.py \
   $OUTPUT
 ```
 
-`{"source": "hres", "init": ..., "cache": ...}` starts from an ECMWF HRES analysis
-in open data (00 and 12 UTC from 2024-03-05 12 UTC), and `"wb2_hres"` from one in
-WeatherBench2 (00 and 12 UTC, 2016 to 2023-01-10); `--initial-time` then defaults to
-`init` ([docs/replay.md](docs/replay.md#sources)).
+`{"source": "hres", "init": ..., "cache": ...}` starts from the ECMWF HRES analysis
+at `init` (lead 0 of the HRES forecast started then) in open data (00 and 12 UTC from
+2024-03-05 12 UTC), and `"wb2_hres"` from one in WeatherBench2 (00 and 12 UTC, 2016
+to 2023-01-10); `--initial-time` then defaults to `init`
+([docs/replay.md](docs/replay.md#sources)).
 
 `fast_ic` and `hres_ic` (the HRES analyses every 6 h of 2016-2022 in WeatherBench2's
 `hres_t0`) build the same IC as a store, which `--ic-store` takes in place of
@@ -345,8 +346,10 @@ limitations.
 `--replay` keeps a run's large scales on a driver forecast and leaves the scales below
 about 250 km to STRATA: every 6 hours the low-passed difference between the driver and
 the run is added over the 6 hours centred on that time, re-running each window. The
-driver is an ECMWF HRES forecast (open data from 2024-03, WeatherBench2 for 2016-2022)
-or ERA5, named in a JSON spec: the run builds its initial condition (`--ic-onthefly`)
+driver is an ECMWF HRES forecast (open data from 2024-03, WeatherBench2 for 2016-2022):
+the run starts from its analysis (lead 0) and is replayed to its +6 h, +12 h, ...
+leads, so it uses nothing known after the start and is a forecast. ERA5 can be the
+driver too; replaying to reanalysis makes a hindcast. Either is named in a JSON spec: the run builds its initial condition (`--ic-onthefly`)
 and the driver's block means for the replay and a window's ring (`--driver-onthefly`)
 itself, with nothing to prepare. It works for global runs and for regional windows; a
 replayed 4 x 4-tile window runs 24 h in about 5 minutes on one node of 8 H100 GPUs,
