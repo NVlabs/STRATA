@@ -274,7 +274,41 @@ One-time inputs: the SCREAM `phis`, `sgh30` and `landfrac` arrays from the
 `nvidia/STRATA-SCREAM-sdy1` dataset, the L128 coordinate file from HICCUP,
 and the ERA5 to ne1024pg2 remap map. `build_map.py` builds the map (3.2 GB)
 in about 30 min on 72 cores; it needs conda-forge `nco` and `tempest-remap`.
-Then:
+
+With those, a forecast builds its own initial condition at start-up
+(`--ic-onthefly`): a JSON spec names the source and the inputs, and rank 0 builds
+the IC into `--driver-target-dir` before the model loads (about 80 s on one GPU,
+plus the download); a rerun reuses it. A one-frame IC has no later truth, so
+`--correction none` is required:
+
+```json
+{"source": "era5",
+ "map": "/path/to/map_721x1440_to_ne1024pg2.nc", "phis": "/path/to/scream_phis.zarr",
+ "vert": "/path/to/vert_coord_E3SM_L128.nc",
+ "latlon": "/path/to/latlon_ne1024pg2.nc", "scream_ref": "/path/to/scream_static"}
+```
+
+```bash
+torchrun --nproc_per_node=4 scripts/ace/run_screamcast_nudged.py \
+  --run-name maria_2017091400 \
+  --checkpoint $AUX_DATA_ROOT/checkpoints/strata_v1.pth \
+  --ic-onthefly era5.json --driver-target-dir "$WORK/ics" \
+  --initial-time 2017-09-14T00 \
+  --forecast-model screamcast --correction none --n-steps 2 \
+  --tile-size 128 --halo-width 16 --halo-adjoint --no-halo-adjoint-cross-face \
+  --tile-jitter 4 --tile-jitter-mode cycle16 --sht-omega-lmax 3 \
+  --inference-batch-size 1 --no-zarr-output \
+  $OUTPUT
+```
+
+`{"source": "hres", "init": ..., "cache": ...}` starts from an ECMWF HRES analysis
+in open data (00 and 12 UTC from 2024-03-05 12 UTC), and `"wb2_hres"` from one in
+WeatherBench2 (00 and 12 UTC, 2016 to 2023-01-10); `--initial-time` then defaults to
+`init` ([docs/replay.md](docs/replay.md#sources)).
+
+`fast_ic` and `hres_ic` (the HRES analyses every 6 h of 2016-2022 in WeatherBench2's
+`hres_t0`) build the same IC as a store, which `--ic-store` takes in place of
+`--ic-onthefly`:
 
 ```bash
 python -m screamcast.initial_conditions.fast_ic \
@@ -286,23 +320,6 @@ python -m screamcast.initial_conditions.fast_ic \
   --vert "$WORK/vert_coord_E3SM_L128.nc"
 ```
 
-To forecast from it, run the v1 forecast above with `--ic-store` in place of
-`SCREAM_MAIN_ZARR_PATH` and `--initial-time`. The forecast starts at the
-store's `initial_time`. A one-frame store has no later truth, so
-`--correction none` is required:
-
-```bash
-torchrun --nproc_per_node=4 scripts/ace/run_screamcast_nudged.py \
-  --run-name maria_2017091400 \
-  --checkpoint $AUX_DATA_ROOT/checkpoints/strata_v1.pth \
-  --ic-store "$WORK/ics/scream_hiccup_ne1024pg2_2017091400.zarr" \
-  --forecast-model screamcast --correction none --n-steps 2 \
-  --tile-size 128 --halo-width 16 --halo-adjoint --no-halo-adjoint-cross-face \
-  --tile-jitter 4 --tile-jitter-mode cycle16 --sht-omega-lmax 3 \
-  --inference-batch-size 1 --no-zarr-output \
-  $OUTPUT
-```
-
 [`docs/initial_conditions.md`](docs/initial_conditions.md) has the downloads,
 the map build, the Docker command, the HRES path and the validation.
 
@@ -311,10 +328,10 @@ the map build, the Docker command, the HRES path and the validation.
 `--region face,i0,i1,j0,j1` runs STRATA on a window of tiles instead of the whole
 globe; on one node of 8 H100 GPUs an 8 x 8-tile window (about 5,000 km across) runs
 24 h in about 8 minutes and a 4 x 4-tile window (about 2,500 km) in about 4. The
-window's edge
-is the initial state plus the large-scale change of a driver, for example an ECMWF HRES
-forecast built with `screamcast.initial_conditions.hres_forecast`, and STRATA runs
-freely inside. `--region-latlon LAT0,LAT1,LON0,LON1` instead picks the smallest window
+window's edge is the initial state plus the large-scale change of a driver, for example
+an ECMWF HRES forecast, and STRATA runs freely inside. The run builds the initial
+condition and the driver's block means itself from a JSON spec (`--ic-onthefly`,
+`--driver-onthefly`); full-resolution driver stores (`--driver-stores`) also work. `--region-latlon LAT0,LAT1,LON0,LON1` instead picks the smallest window
 that holds a lat/lon box with a tile to spare (`--region-margin-tiles`); `python -m
 screamcast.regional --latlon-box .. --world-size 8 --latlon
 $AUX_DATA_ROOT/latlon_ne1024pg2.nc` prints the same window, and `--lat .. --lon ..

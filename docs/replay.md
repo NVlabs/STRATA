@@ -9,9 +9,9 @@ its 5 km, 10-minute grid. It works for global runs and for regional windows
 
 ## Run
 
-A replayed run needs nothing built beforehand. A JSON spec names the driver forecast and
-the `fast_ic` inputs, and the run builds its initial condition and its driver targets
-itself while it goes:
+Apart from the one-time `fast_ic` inputs, a replayed run needs nothing built
+beforehand. A JSON spec names the driver forecast and those inputs, and the run builds
+its initial condition and its driver targets itself while it goes:
 
 ```json
 {"source": "hres", "init": "2024-09-25T12", "cache": "/path/to/grib-cache",
@@ -20,8 +20,9 @@ itself while it goes:
  "latlon": "/path/to/latlon_ne1024pg2.nc", "scream_ref": "/path/to/scream_static"}
 ```
 
-`map`, `phis`, `vert`, `latlon` and `scream_ref` are the inputs of `fast_ic`
-([initial_conditions.md](initial_conditions.md#inputs)). A replayed 24 h window over
+`map`, `phis`, `vert`, `latlon` and `scream_ref` are the inputs of `fast_ic`, downloaded
+or built once ([initial_conditions.md](initial_conditions.md#inputs)). A replayed 24 h
+window over
 Hurricane Helene, driven by the HRES forecast of 2024-09-25 12 UTC:
 
 ```bash
@@ -220,7 +221,7 @@ A source the producer does not read (another model, the 2023 HRES files) can dri
 as full-resolution stores instead: `--ic-store` and `--driver-stores` take the place of
 `--ic-onthefly` and `--driver-onthefly`. `hres_forecast` builds one store per lead from
 an HRES forecast (about 9 GB each; the lead-0 store is the initial condition; see
-[regional_window.md](regional_window.md#drive-a-window-with-an-ecmwf-hres-forecast)):
+[regional_window.md](regional_window.md#driver-stores)):
 
 ```bash
 python -m screamcast.initial_conditions.hres_forecast \

@@ -11,6 +11,54 @@ tiles instead of the globe's 1,536. On one node of 8 H100 GPUs it runs 24 hours 
 about 8 minutes, and a 4 x 4-tile window (about 2,500 km) in about 4 minutes (see
 [Resources](#resources)).
 
+## Run
+
+Apart from the one-time `fast_ic` inputs
+([initial_conditions.md](initial_conditions.md#inputs)), a window needs nothing built
+beforehand. A JSON spec names the driver forecast and those inputs, and the run builds
+its initial condition and the ring's driver itself while it goes. Hurricane Erin
+from the HRES forecast of 2025-08-15 12 UTC, in an 8 x 8-tile window around 25 N 70 W:
+
+```json
+{"source": "hres", "init": "2025-08-15T12", "cache": "/path/to/grib-cache",
+ "map": "/path/to/map_721x1440_to_ne1024pg2.nc", "phis": "/path/to/scream_phis.zarr",
+ "vert": "/path/to/vert_coord_E3SM_L128.nc",
+ "latlon": "/path/to/latlon_ne1024pg2.nc", "scream_ref": "/path/to/scream_static"}
+```
+
+```bash
+torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \
+  --run-name erin_window \
+  --checkpoint $AUX_DATA_ROOT/checkpoints/strata_v1.pth \
+  --ic-onthefly hres_erin.json \
+  --driver-onthefly hres_erin.json --driver-target-dir "$WORK/targets/erin" \
+  --region "$(python -m screamcast.regional --lat 25 --lon -70 --tiles 8 \
+      --latlon $AUX_DATA_ROOT/latlon_ne1024pg2.nc | head -1)" \
+  --forecast-model screamcast --correction none --n-steps 144 \
+  --tile-size 128 --halo-width 16 --halo-adjoint --no-halo-adjoint-cross-face \
+  --tile-jitter 4 --tile-jitter-mode cycle16 --inference-batch-size 1 \
+  --output-variables T_2m ps U V qv omega precip_liq_surf_mass_flux \
+  --output-levels 13,18,24,25,29,30 \
+  $OUTPUT
+```
+
+At start-up rank 0 builds the initial condition from the forecast's analysis (lead 0).
+A producer process on its GPU then builds the 8 x 8-block means of the window and its
+ring at every driver hour (every 6 h, to the first at or after the last step), and the
+ring follows them ([The boundary](#the-boundary)). A rerun with the same spec builds
+nothing again. [replay.md](replay.md#drivers-built-on-the-fly) has the details.
+
+- `--replay` also keeps the window's large scales on the forecast inside
+  ([replay.md](replay.md)).
+- `"source": "wb2_hres"` takes an HRES forecast from 2016 to 2023-01-10 from
+  WeatherBench2, and `"source": "era5"` takes ERA5 at any hour (with `--initial-time`);
+  see [replay.md](replay.md#sources).
+- If the open-data bucket on AWS answers HTTP 503 (`SlowDown`), add
+  `"opendata_root": "https://storage.googleapis.com/ecmwf-open-data"` (ECMWF's Google
+  Cloud mirror) to the spec.
+- `--region-latlon LAT0,LAT1,LON0,LON1` lets the runner choose the window around a box
+  ([below](#a-window-from-a-latlon-box)).
+
 ## Choose a window
 
 `--region face,i0,i1,j0,j1` is a rectangle of tiles (half-open ranges, in units of
@@ -87,20 +135,24 @@ the large-scale change of a *driver* since the start:
 
     ring(t) = IC + (smooth(D(t)) - smooth(D(t0)))
 
-- `D` is a sequence of states on the SCREAM grid at known valid times, given as
-  one-frame stores with `--driver-stores` (the same layout as `--ic-store`). Between
-  two driver times the ring is linear in time.
+- `D` is a sequence of states on the SCREAM grid at known valid times: built on the fly
+  from a forecast (`--driver-onthefly`, [Run](#run)), or given as one-frame stores
+  (`--driver-stores`, [Driver stores](#driver-stores)). Between two driver times the
+  ring is linear in time.
 - `smooth` is a block mean over `--boundary-block` x `--boundary-block` cells (default 8,
   about 40 km), upsampled back bilinearly. Only the driver's large-scale evolution
-  enters the ring.
+  enters the ring. A driver built on the fly is already these block means, so it needs
+  the default 8.
 - At `t0` the ring equals the initial state, so the window starts without a jump at its
   edge. Fine structure locked to the terrain (surface pressure over mountains, 2 m
   temperature) is kept from the initial state; the driver's own version of it cancels
   in the difference.
-- If no store is at the initial time, `D(t0)` is the initial condition itself.
-- Without `--driver-stores` and without `--ic-store`, the driver is the SCREAM run in
-  `SCREAM_MAIN_ZARR_PATH` itself, every `--driver-every-hours` (default 6). That is a
-  test of the window against a known truth.
+- If the driver has no state at the initial time, `D(t0)` is the initial condition
+  itself.
+- With none of `--ic-onthefly`, `--ic-store`, `--driver-onthefly` and
+  `--driver-stores`, the window starts from and is driven by the SCREAM run in
+  `SCREAM_MAIN_ZARR_PATH`, every `--driver-every-hours` (default 6). That is a test of
+  the window against a known truth.
 
 Inside the window STRATA runs freely unless `--replay` is set: then the window's large
 scales are also replayed to the same driver every 6 hours ([replay.md](replay.md)).
@@ -117,14 +169,21 @@ window equatorward of `--tropics-lat-deg`, default 23.5, has no extratropics), a
 empty region at start-up. `--regional-averages` turns them on for a window that covers
 every region; they are then averages over the window.
 
-## Drive a window with an ECMWF HRES forecast
+## Driver stores
+
+A driver the producer does not read (ERA5 hours from `fast_ic`, HRES analyses from
+`hres_ic` for a hindcast, another model) can be given as full-resolution one-frame
+stores instead: `--ic-store` and `--driver-stores` take the place of `--ic-onthefly` and
+`--driver-onthefly` (either pair can also be mixed with the other). Stores also keep the
+driver's full-resolution fields to look at.
 
 `screamcast.initial_conditions.hres_forecast` builds one store per lead of an HRES
-forecast from ECMWF open data (00 and 12 UTC forecasts from 2024-03-05 12 UTC on) or,
-with `--archive wb2`, from WeatherBench2 (00 and 12 UTC forecasts from 2016 to
-2023-01-10 12 UTC, 6-hourly leads, no `--cache`), with the same steps as `fast_ic` and
-`hres_ic` (see [initial_conditions.md](initial_conditions.md) for the map, statics and
-L128 file). The lead-0 store is the HRES analysis and serves as the initial condition:
+forecast (about 9 GB each) from ECMWF open data (00 and 12 UTC forecasts from 2024-03-05
+12 UTC on) or, with `--archive wb2`, from WeatherBench2 (00 and 12 UTC forecasts from
+2016 to 2023-01-10 12 UTC, 6-hourly leads, no `--cache`), with the same steps as
+`fast_ic` and `hres_ic` (see [initial_conditions.md](initial_conditions.md) for the map,
+statics and L128 file). The lead-0 store is the HRES analysis and serves as the initial
+condition:
 
 ```bash
 python -m screamcast.initial_conditions.hres_forecast \
@@ -138,32 +197,23 @@ python -m screamcast.initial_conditions.hres_forecast \
 If the AWS bucket answers HTTP 503 (`SlowDown`), read the same files from ECMWF's
 Google Cloud mirror with `--opendata-root https://storage.googleapis.com/ecmwf-open-data`.
 
-Then run the window. `--driver-stores` takes the stores in any order; their
-`initial_time` attributes are the valid times:
+Then run the window with the stores in place of the on-the-fly options.
+`--driver-stores` takes the stores in any order; their `initial_time` attributes are the
+valid times:
 
 ```bash
 torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \
-  --run-name erin_window \
+  --run-name erin_window_stores \
   --checkpoint $AUX_DATA_ROOT/checkpoints/strata_v1.pth \
   --ic-store "$WORK/ics/scream_hiccup_ne1024pg2_erin_f000.zarr" \
+  --driver-stores "$WORK"/ics/scream_hiccup_ne1024pg2_erin_f0*.zarr \
   --region "$(python -m screamcast.regional --lat 25 --lon -70 --tiles 8 \
       --latlon $AUX_DATA_ROOT/latlon_ne1024pg2.nc | head -1)" \
-  --driver-stores "$WORK"/ics/scream_hiccup_ne1024pg2_erin_f0*.zarr \
-  --forecast-model screamcast --correction none --n-steps 144 \
-  --tile-size 128 --halo-width 16 --halo-adjoint --no-halo-adjoint-cross-face \
-  --tile-jitter 4 --tile-jitter-mode cycle16 --inference-batch-size 1 \
-  --output-variables T_2m ps U V qv omega precip_liq_surf_mass_flux \
-  --output-levels 13,18,24,25,29,30 \
-  $OUTPUT
+  ... (the other options of the command in Run)
 ```
 
 The drivers must cover the run: the last step reads the ring at `(n_steps - 1) x 10`
-minutes. Any other source works the same way: ERA5 hours from `fast_ic`, or HRES
-analyses from `hres_ic` for a hindcast. Instead of `--driver-stores`, the ring's drivers
-can be built while the run goes from ERA5 or an ECMWF HRES forecast (open data or
-WeatherBench2; `--driver-onthefly`, see
-[replay.md](replay.md#drivers-built-on-the-fly)), and so can the initial condition
-(`--ic-onthefly`).
+minutes.
 
 ## Resources
 
@@ -184,9 +234,15 @@ the 4 x 4-tile window is `3,10,14,7,11`, all on face 3. Building the 5 HRES stor
 These windows also fit in one GPU's memory, but then all their tiles run on it: expect
 several times the per-step times above.
 
-Each driver time is loaded once at the start, as the initial condition is (the full
+Each driver store is loaded once at the start, as the initial condition is (the full
 globe, then cut to the window and its ring), so start-up grows with the number of
-drivers.
+drivers. A driver built on the fly is read hour by hour instead, only the window's and
+ring's block means.
+
+With the initial condition and the ring built on the fly and the window replayed
+(2026-11-24, hourly output), the 4 x 4-tile Helene window took 5 min 15 s, start-up
+included; a 40-tile window across a face edge 8 min 9 s and a 32-tile window at a cube
+corner 7 min 18 s ([replay.md](replay.md#resources)).
 
 ## How it works
 
