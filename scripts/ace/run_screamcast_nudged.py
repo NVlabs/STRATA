@@ -54,9 +54,12 @@ occasionally drops to 80%, probably related to I/O events
 from __future__ import annotations
 
 import argparse
+import functools
 import logging
 import os
+import sys
 import time
+import traceback
 from collections import OrderedDict
 
 import dotenv
@@ -80,15 +83,62 @@ from screamcast.distributed_state_fetch import (
     load_full_face_scream_state,
 )
 from screamcast.earth2studio_wrappers import ScreamcastModel
+from screamcast.history import history_entry
 from screamcast.horizontal_regridding import (
     LatLonToPointGridRegridder,
     UnstructuredToLatLonRegridder,
 )
 from screamcast.omega_filter import low_pass
+from screamcast.regional import (
+    AnchoredBoundary,
+    ReplicateRing,
+    faces_to_pieces,
+    find_box_region,
+    parse_latlon_box,
+    parse_region,
+)
 from screamcast.regional_averages import (
     RegionalAverager,
     load_grid_area_face,
     load_landfrac_face,
+)
+from screamcast.replay import (
+    BLOCK as REPLAY_BLOCK,
+)
+from screamcast.replay import (
+    DEFAULT_VARS as REPLAY_DEFAULT_VARS,
+)
+from screamcast.replay import (
+    Replay,
+    ReplayStep,
+    analysis_hours,
+    level_ramp_weights,
+    replay_plan,
+    run_with_replay,
+)
+from screamcast.replay_targets import (
+    FAILED,
+    IC_READY,
+    ProducerProcess,
+    TargetReader,
+    build_ic_store,
+    check_target,
+    load_spec,
+    make_source,
+    mark,
+    producer_stems,
+    producer_tiles,
+    read_blocks,
+    read_box_blocks,
+    ring_hours,
+    source_hours,
+    target_channels,
+    target_origin,
+    target_schedule,
+    wait_for_ic,
+)
+from screamcast.replay_targets import (
+    MODES as PRODUCER_MODES,
 )
 from screamcast.sht_omega_filter import DistributedSHTHighpass
 from screamcast.tile_jitter import JitteredModel
@@ -135,7 +185,7 @@ def channel_chunked(channel_chunk: int):
     return decorate
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--log-level",
@@ -258,6 +308,211 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Start from a one-frame IC store built by screamcast/initial_conditions/ "
             "instead of SCREAM_MAIN_ZARR_PATH. Needs --correction none."
+        ),
+    )
+    parser.add_argument(
+        "--ic-onthefly",
+        default=None,
+        metavar="SPEC.json",
+        help=(
+            "Build the IC store at start-up instead of giving --ic-store: rank 0 "
+            "builds it from SPEC's source (as --driver-onthefly, plus the statics "
+            "'latlon' and 'scream_ref') into --driver-target-dir, or keeps one "
+            "built there earlier from the same origin. The initial time is "
+            "--initial-time, by default the init of an HRES source. Needs "
+            "--correction none."
+        ),
+    )
+    region = parser.add_mutually_exclusive_group()
+    region.add_argument(
+        "--region",
+        default=None,
+        help=(
+            "Regional window: predict only this rectangle of tiles, "
+            "'face,i0,i1,j0,j1' in tile units (half-open) on the plane of `face`; "
+            "i1 or j1 beyond the face's tiles joins the north polar face or the "
+            "next equatorial face to the east, a negative i0 the south polar face "
+            "(the '=' form: --region=3,-4,4,5,13). The ring is the tiles that touch "
+            "the window, on any face. "
+            "`python -m screamcast.regional "
+            "--lat .. --lon .. --tiles N --latlon latlon_ne1024pg2.nc` prints one "
+            "for a point. Needs "
+            "--correction none (see docs/regional_window.md)."
+        ),
+    )
+    region.add_argument(
+        "--region-latlon",
+        default=None,
+        help=(
+            "Regional window from a lat/lon box 'LAT0,LAT1,LON0,LON1' (degrees; the "
+            "box runs east from LON0 to LON1, so LON0 > LON1 crosses the dateline): "
+            "the smallest --region that holds every grid cell of the box with "
+            "--region-margin-tiles tiles to spare, lies on one plane and has a "
+            "multiple of the world size of tiles. `python -m "
+            "screamcast.regional --latlon-box ..` prints the same window. A box "
+            "south of the equator needs the '=' form: --region-latlon=-40,-20,140,160."
+        ),
+    )
+    parser.add_argument(
+        "--region-margin-tiles",
+        type=int,
+        default=1,
+        help=(
+            "With --region-latlon: whole tiles of window kept between the box and "
+            "the window edge (the driven ring). Default 1."
+        ),
+    )
+    parser.add_argument(
+        "--region-boundary",
+        choices=["anchored", "replicate"],
+        default="anchored",
+        help=(
+            "Lateral boundary of --region. 'anchored': the initial state plus the "
+            "large-scale change of a driver since the start, "
+            "IC + (smooth(D(t)) - smooth(D(t0))), with D from --driver-stores. "
+            "'replicate': the window's own edge pixels extended outward (no "
+            "outside information)."
+        ),
+    )
+    parser.add_argument(
+        "--driver-stores",
+        dest="driver_stores",
+        nargs="+",
+        default=None,
+        help=(
+            "Driver of --region-boundary anchored and of --replay: one-frame stores "
+            "built by screamcast/initial_conditions/ (same layout as --ic-store), one "
+            "per driver time, e.g. HRES forecast leads 0, 6, ..., 24 h "
+            "(screamcast.initial_conditions.hres_forecast). Their initial_time "
+            "attributes are the valid times. A missing 0 h driver is taken from the "
+            "initial condition itself. Without this option the driver is read from "
+            "SCREAM_MAIN_ZARR_PATH every --driver-every-hours (not with --ic-store)."
+        ),
+    )
+    parser.add_argument(
+        "--driver-onthefly",
+        default=None,
+        metavar="SPEC.json",
+        help=(
+            "Build the driver while the run goes instead of reading --driver-stores: "
+            "a producer process on rank 0's GPU builds the 8 x 8 block means of the "
+            "driver (ERA5 from ARCO, or an ECMWF HRES forecast from open data or "
+            "WeatherBench2) that --replay and an anchored --region ring use, into "
+            "--driver-target-dir. SPEC names the source and the fast_ic inputs; see "
+            "screamcast/replay_targets.py and docs/replay.md. The initial condition "
+            "comes from --ic-store or --ic-onthefly."
+        ),
+    )
+    parser.add_argument(
+        "--driver-target-dir",
+        default=None,
+        help=(
+            "--driver-onthefly, --ic-onthefly: directory of the targets and the IC, "
+            "on a file system every rank sees. Targets and ICs already there (an "
+            "earlier run) are used if they were built from the same source and "
+            "fast_ic inputs and cover this run; any other one there stops the run. "
+            "The producer's log, FAILED/DONE and the run's markers go to "
+            "DIR/runs/<run-name>-<time>-<pid>."
+        ),
+    )
+    parser.add_argument(
+        "--driver-producer",
+        choices=PRODUCER_MODES,
+        default="gated",
+        help=(
+            "--driver-onthefly: 'gated' builds what the run needs before its first "
+            "analysis at once and each later target once the run begins the analysis "
+            "before it; 'ahead' builds every target as early as it can."
+        ),
+    )
+    parser.add_argument(
+        "--driver-target-timeout",
+        type=float,
+        default=3600.0,
+        help=(
+            "--driver-onthefly: seconds a rank waits for a target before it fails "
+            "(--ic-onthefly: for the IC)."
+        ),
+    )
+    parser.add_argument(
+        "--driver-every-hours",
+        dest="driver_every_hours",
+        type=int,
+        default=6,
+        help=(
+            "Driver interval of the anchored ring when the driver is read from "
+            "SCREAM_MAIN_ZARR_PATH or built --driver-onthefly."
+        ),
+    )
+    parser.add_argument(
+        "--boundary-block",
+        type=int,
+        default=8,
+        help=(
+            "Block size (px) of the driver smoothing: block means, then bilinear "
+            "upsampling, so only the driver's large-scale change enters the ring. "
+            "1 uses the driver at full resolution."
+        ),
+    )
+    parser.add_argument(
+        "--replay",
+        action="store_true",
+        help=(
+            "Replay the run to the driver (--driver-stores): every "
+            "--replay-every-hours, the large-scale difference between the driver and "
+            "the run is added over the window centred on that time (incremental "
+            "analysis update; the run is rewound and re-run over each window). Works "
+            "for global runs and --region windows. See docs/replay.md."
+        ),
+    )
+    parser.add_argument(
+        "--replay-every-hours",
+        type=int,
+        default=6,
+        help="Analysis interval (even hours); each analysis needs a driver state.",
+    )
+    parser.add_argument(
+        "--replay-ell-half",
+        type=float,
+        default=160.0,
+        help=(
+            "Spherical-harmonic degree at which the increment's Gaussian taper has "
+            "gain 1/2 (160 ~ 250 km wavelength, 40 ~ 1000 km): smaller keeps more of "
+            "the scales STRATA's own."
+        ),
+    )
+    parser.add_argument(
+        "--replay-vars",
+        default=",".join(REPLAY_DEFAULT_VARS),
+        help=(
+            "Comma-separated input variables that receive the increment, all levels "
+            "of each (strata_v1: any of the default; e.g. leave out omega or T_2m). "
+            "Diagnostics such as ps are not inputs and cannot be replayed. The "
+            "anchored ring of a window drives every input variable regardless."
+        ),
+    )
+    parser.add_argument(
+        "--replay-level-ramp",
+        default=None,
+        metavar="PFULL,PZERO",
+        help=(
+            "Replay the free atmosphere only: the increment of each 3D channel is "
+            "weighted 1 at reference pressures <= PFULL hPa, 0 at >= PZERO hPa, "
+            "linear in pressure between (e.g. 800,900). The reference pressure is "
+            "(hyam + hybm) * 1000 hPa of the model levels. Surface channels are not "
+            "weighted: leave T_2m out of --replay-vars to leave the boundary layer "
+            "free."
+        ),
+    )
+    parser.add_argument(
+        "--replay-region-edge",
+        choices=("normalized", "zero"),
+        default="normalized",
+        help=(
+            "--region windows: the increment exists on the window's blocks only, so "
+            "the low-pass gives cells near the window edge only part of it (half on "
+            "the edge). 'normalized' divides by the low-passed window indicator, so "
+            "the whole increment reaches the edge; 'zero' keeps the share."
         ),
     )
     parser.add_argument(
@@ -404,11 +659,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--regional-averages",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
         help=(
             "Compute area-weighted regional averages (global, land, ocean, "
             "tropics, extratropics) every step and write them to a netCDF "
-            "file alongside the zarr output."
+            "file alongside the zarr output. Default: on for global runs, off "
+            "with --region (a window can miss a whole region, e.g. the "
+            "extratropics, and then the averages fail at start-up)."
         ),
     )
     parser.add_argument(
@@ -436,7 +693,10 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional output path. Defaults to a parameterized `.pt` filename.",
     )
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.regional_averages is None:
+        args.regional_averages = args.region is None and args.region_latlon is None
+    return args
 
 
 def get_checkpoint_path(run: str) -> str:
@@ -507,12 +767,20 @@ def run_scream(
     F=None,
     write_step=None,
     sht_highpass=None,
+    before_step=None,
+    start_step=0,
+    return_coords=False,
+    tag="",
 ):
+    """Run ``n_steps`` steps numbered ``start_step, start_step + 1, ...`` (the numbers
+    ``before_step`` and ``write_step`` see). ``F`` is added after every step. Returns the
+    final state, and its coords with ``return_coords``."""
     t_run0 = time.perf_counter()
     logger.info(
         "run_scream start n_steps=%d F=%s", n_steps, "yes" if F is not None else "no"
     )
-    in_vars = list(coords["variable"])
+    in_variable = coords["variable"]
+    in_vars = list(in_variable)
     omega_channel_indices = _get_omega_channel_indices(in_vars)
     model_coords = topology.pad_coords(coords)
     model_coords["batch"] = np.empty(1)
@@ -522,7 +790,9 @@ def run_scream(
     from_out_out = [out_var_idx[in_vars[i]] for i in from_out_in]
 
     with torch.inference_mode():
-        for step_index in range(n_steps):
+        for step_index in range(start_step, start_step + n_steps):
+            if before_step is not None:
+                before_step(step_index)
             logger.debug("step %d/%d starting pad", step_index + 1, n_steps)
             x_with_halo = pad(x_tensor)
             logger.debug("step %d/%d pad done", step_index + 1, n_steps)
@@ -561,8 +831,15 @@ def run_scream(
             x_tensor = x_next
             coords = dict(out_coords)
             coords["batch"] = np.empty(1)
-            logger.info("run_scream step %d/%d", step_index + 1, n_steps)
+            logger.info(
+                "run_scream step %d/%d%s", step_index + 1, start_step + n_steps, tag
+            )
     logger.info("run_scream done in %.1fs", time.perf_counter() - t_run0)
+    if return_coords:
+        # the loop carries the model's output coords; the state holds the inputs
+        coords = dict(coords)
+        coords["variable"] = in_variable
+        return x_tensor, coords
     return x_tensor
 
 
@@ -611,6 +888,38 @@ def subset_channels(x_tensor, source_vars, target_vars):
     return x_tensor[:, keep]
 
 
+def replay_stepper(
+    model, steps_per_hour: int, pad, unpad, topology, write_step, **run_kwargs
+):
+    """``advance_hour`` of ``run_with_replay``: one hour of ``run_scream``, its steps
+    numbered from ``(hour - 1) * steps_per_hour``. A tile-jittered model is set to that
+    step first, so a window re-run after a rewind sees the jitter offsets of its first
+    run, and a replay with a zero increment is the run without replay."""
+
+    def advance_hour(state, hour, forcing, write):
+        x, c = state
+        start = (hour - 1) * steps_per_hour
+        if isinstance(model, JitteredModel):
+            model.step = start
+        return run_scream(
+            x,
+            c,
+            steps_per_hour,
+            model,
+            pad,
+            unpad,
+            topology,
+            F=forcing,
+            write_step=write_step if write else None,
+            start_step=start,
+            return_coords=True,
+            tag="" if write else " (replay predictor)",
+            **run_kwargs,
+        )
+
+    return advance_hour
+
+
 def load_scrip_lonlat(path: str) -> dict:
     """Load grid_center_lon/lat from a SCRIP .nc file into a float32 dict."""
     with xr.open_dataset(path) as ds:
@@ -618,6 +927,165 @@ def load_scrip_lonlat(path: str) -> dict:
             "lon": np.asarray(ds["grid_center_lon"].values, dtype=np.float32),
             "lat": np.asarray(ds["grid_center_lat"].values, dtype=np.float32),
         }
+
+
+Driver = tuple[float, object, np.datetime64, str]  # hours, data source, time, label
+
+
+def resolve_drivers(
+    *,
+    args: argparse.Namespace,
+    t0: np.datetime64,
+    ds,
+    n_steps: int,
+    dt_hours: float,
+) -> list[Driver]:
+    """Driver states, sorted by lead: ``--driver-stores`` or, without them,
+    SCREAM_MAIN_ZARR_PATH every ``--driver-every-hours`` over the run."""
+    if args.driver_stores:
+        profile = os.getenv("SCREAM_ZARR_PROFILE", "")
+        drivers = []
+        for path in args.driver_stores:
+            entry = data_catalog.ic_store(path, profile)
+            t = np.datetime64(entry.reference_time)
+            hours = float((t - t0) / np.timedelta64(1, "h"))
+            drivers.append((hours, entry.to_data_source(), t, path))
+    else:
+        every = args.driver_every_hours
+        if every <= 0:
+            raise ValueError("--driver-every-hours must be positive")
+        last = int(np.ceil(n_steps * dt_hours / every)) * every
+        drivers = [
+            (float(h), ds, t0 + np.timedelta64(h, "h"), "SCREAM_MAIN_ZARR_PATH")
+            for h in range(0, last + 1, every)
+        ]
+    drivers.sort(key=lambda d: d[0])
+    hours = [d[0] for d in drivers]
+    if len(set(hours)) != len(hours):
+        raise ValueError(f"two drivers share a valid time: {hours} h")
+    if hours[0] < 0:
+        raise ValueError(f"driver at {hours[0]} h is before the initial time")
+    return drivers
+
+
+def load_driver(
+    args: argparse.Namespace, topology: TileTopology, driver: Driver, in_vars, device
+):
+    """A driver state as ``(1, C, 6, n, n)`` full faces on every rank."""
+    _, source, t, _ = driver
+    return load_full_face_scream_state(
+        t,
+        in_vars,
+        topology.face_size,
+        source,
+        device,
+        args.ace_fetch_channel_chunk,
+        topology.world_size,
+        topology.rank,
+    )
+
+
+def build_anchored_boundary(
+    *,
+    args: argparse.Namespace,
+    topology: TileTopology,
+    ic_boxes: list[torch.Tensor],
+    drivers: list[Driver],
+    in_vars: list[str],
+    dt_hours: float,
+    n_steps: int,
+    device: torch.device,
+    on_driver=None,
+) -> AnchoredBoundary:
+    """The anchored ring of a regional run. ``on_driver(hours, full_faces)`` sees every
+    driver state as it is loaded (the replay takes its targets from them)."""
+    hours = [d[0] for d in drivers]
+    needed = (n_steps - 1) * dt_hours  # the last step pads the state at this time
+    if hours[-1] < needed:
+        raise ValueError(
+            f"boundary drivers end at +{hours[-1]} h; the run needs +{needed:.2f} h"
+        )
+
+    def box_of(driver: Driver) -> list[torch.Tensor]:
+        full = load_driver(args, topology, driver, in_vars, device)
+        if on_driver is not None:
+            on_driver(driver[0], full)
+        return faces_to_pieces(full[0], topology)
+
+    drivers = list(drivers)
+    if drivers[0][0] == 0.0:
+        driver = drivers.pop(0)
+        driver0 = box_of(driver)
+        logger.info("boundary driver +0 h: %s", driver[3])
+    else:
+        driver0 = ic_boxes
+        logger.info("boundary driver +0 h: the initial condition (no 0 h store)")
+    boundary = AnchoredBoundary(
+        topology=topology,
+        ic_boxes=ic_boxes,
+        driver0=driver0,
+        block=args.boundary_block,
+        device=device,
+    )
+    del driver0
+    for driver in drivers:
+        boundary.add(driver[0], box_of(driver))
+        logger.info("boundary driver +%g h: %s", driver[0], driver[3])
+    return boundary
+
+
+def onthefly_ic_start(args: argparse.Namespace) -> tuple[dict, np.datetime64]:
+    """``--ic-onthefly``'s spec and initial time (``--initial-time``, by default the
+    init of a forecast source); raises before start-up on what the run cannot do."""
+    if args.ic_store is not None:
+        raise ValueError("give --ic-store or --ic-onthefly, not both")
+    if args.correction != "none":
+        raise ValueError("--ic-onthefly needs --correction none")
+    if args.driver_target_dir is None:
+        raise ValueError("--ic-onthefly needs --driver-target-dir")
+    spec = load_spec(args.ic_onthefly, ic=True)
+    if args.initial_time is None and spec["source"] == "era5":
+        raise ValueError("--ic-onthefly from ERA5 needs --initial-time")
+    t0 = np.datetime64(args.initial_time or spec["init"], "s")
+    if not make_source(spec).has(t0):
+        raise ValueError(f"--ic-onthefly: {spec['source']} has no state at {t0}")
+    return spec, t0
+
+
+def onthefly_ic(
+    args: argparse.Namespace,
+    spec: dict,
+    t0: np.datetime64,
+    run_dir: str,
+    rank: int,
+    device: torch.device,
+) -> str:
+    """The path of the initial condition ``--ic-onthefly`` builds: rank 0 builds it (or
+    keeps a matching one) in ``--driver-target-dir`` and writes ``IC_READY`` (its path)
+    or ``FAILED`` (the traceback) in ``run_dir``; the other ranks wait for either. A
+    file, not a collective, so the build may outlast the NCCL timeout."""
+    if rank != 0:
+        return wait_for_ic(run_dir, args.driver_target_timeout)
+    os.makedirs(run_dir, exist_ok=True)
+    try:
+        path = build_ic_store(
+            spec,
+            t0,
+            args.driver_target_dir,
+            device=device,
+            history=history_entry([sys.executable, *sys.argv]),
+        )
+    except BaseException:
+        with open(os.path.join(run_dir, FAILED), "w") as f:
+            f.write(traceback.format_exc())
+        raise
+    tmp = os.path.join(run_dir, f"{IC_READY}.partial")
+    with open(tmp, "w") as f:
+        f.write(path)
+    os.rename(tmp, os.path.join(run_dir, IC_READY))
+    if device.type == "cuda":
+        torch.cuda.empty_cache()  # before the model loads
+    return path
 
 
 def main() -> None:
@@ -645,7 +1113,11 @@ def main() -> None:
     n_steps_outer = args.n_steps_outer
     coarsen = args.coarsen
     correction = args.correction
-    if args.ic_store is None:
+    ic_spec = None
+    if args.ic_onthefly is not None:
+        ic_spec, t0 = onthefly_ic_start(args)
+        scream_data = None  # opened once rank 0 has built it
+    elif args.ic_store is None:
         scream_data = data_catalog.scream_sdecadal
         t0 = np.datetime64(args.initial_time or "2020-10-13T00:00:00")
     else:
@@ -664,6 +1136,82 @@ def main() -> None:
                 f"initial_time {t0}."
             )
 
+    one_frame_ic = args.ic_store is not None or args.ic_onthefly is not None
+    # --region-latlon becomes a --region once the world size is known
+    regional = args.region is not None or args.region_latlon is not None
+    if regional:
+        if correction != "none":
+            raise ValueError("--region needs --correction none")
+        if args.pressure_levels is not None:
+            raise ValueError("--pressure-levels does not support --region yet")
+        if args.boundary_block < 1:
+            raise ValueError("--boundary-block must be >= 1")
+        if (
+            args.region_boundary == "replicate"
+            and args.driver_stores
+            and not args.replay
+        ):
+            raise ValueError(
+                "--driver-stores needs --region-boundary anchored or --replay"
+            )
+        if (
+            args.region_boundary == "anchored"
+            and not args.driver_stores
+            and args.driver_onthefly is None
+            and one_frame_ic
+        ):
+            raise ValueError(
+                "--region-boundary anchored with --ic-store needs --driver-stores or "
+                "--driver-onthefly (the IC store holds one frame)"
+            )
+        if (
+            args.region_boundary == "anchored"
+            and args.driver_onthefly is not None
+            and args.boundary_block != REPLAY_BLOCK
+        ):
+            raise ValueError(
+                f"an anchored ring built --driver-onthefly needs --boundary-block "
+                f"{REPLAY_BLOCK} (the targets are {REPLAY_BLOCK} x {REPLAY_BLOCK} means)"
+            )
+        if args.halo_channel_chunk != 0:
+            logger.info("--region: halo exchange with every channel at once")
+            args.halo_channel_chunk = 0
+        if args.sht_omega_lmax > 0:
+            # The l < lmax omega modes are global; a window cannot know them.
+            logger.warning("--region: omega SHT high-pass OFF (a global operator)")
+            args.sht_omega_lmax = 0
+    elif args.driver_stores and not args.replay:
+        raise ValueError("--driver-stores needs --region or --replay")
+    level_ramp = None
+    if args.replay_level_ramp is not None:
+        if not args.replay:
+            raise ValueError("--replay-level-ramp needs --replay")
+        level_ramp = tuple(float(v) for v in args.replay_level_ramp.split(","))
+        if len(level_ramp) != 2 or not level_ramp[1] > level_ramp[0]:
+            raise ValueError(
+                f"--replay-level-ramp PFULL,PZERO needs PZERO > PFULL (hPa), got "
+                f"{args.replay_level_ramp!r}"
+            )
+    if args.driver_onthefly is not None:
+        anchored_ring = regional and args.region_boundary == "anchored"
+        if not (args.replay or anchored_ring):
+            raise ValueError(
+                "--driver-onthefly drives --replay or an anchored --region ring"
+            )
+        if args.driver_stores:
+            raise ValueError("give --driver-stores or --driver-onthefly, not both")
+        if args.driver_target_dir is None:
+            raise ValueError("--driver-onthefly needs --driver-target-dir")
+        load_spec(args.driver_onthefly)  # fail before start-up on a bad spec
+    if args.replay:
+        if correction != "none":
+            raise ValueError("--replay needs --correction none")
+        if not args.driver_stores and args.driver_onthefly is None and one_frame_ic:
+            raise ValueError(
+                "--replay with --ic-store needs --driver-stores or --driver-onthefly "
+                "(the IC store holds one frame)"
+            )
+
     DistributedManager.initialize()
     dist_mgr = DistributedManager()
 
@@ -674,6 +1222,43 @@ def main() -> None:
     if rank != 0:
         logger.setLevel(logging.CRITICAL + 1)
 
+    run_dir = None
+    if args.driver_onthefly is not None or ic_spec is not None:
+        # this run's FAILED, DONE, markers and log; targets and ICs are shared
+        name = [f"{args.run_name}-{time.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"]
+        torch.distributed.broadcast_object_list(name, src=0, device=device)
+        run_dir = os.path.join(args.driver_target_dir, "runs", name[0])
+    if ic_spec is not None:
+        ic_path = onthefly_ic(args, ic_spec, t0, run_dir, rank, device)
+        scream_data = data_catalog.ic_store(
+            ic_path, os.getenv("SCREAM_ZARR_PROFILE", "")
+        )
+        logger.info("initial condition on the fly: %s", ic_path)
+
+    npg = 2
+    grid_tgt = load_scrip_lonlat(args.grid_tgt)
+    ne_padded = 1536
+    pad_width_data = 512
+    lon = unstructured_to_6faces(torch.from_numpy(grid_tgt["lon"]), ne_padded, npg)
+    lat = unstructured_to_6faces(torch.from_numpy(grid_tgt["lat"]), ne_padded, npg)
+    if args.region_latlon is not None:
+        interior = slice(pad_width_data, pad_width_data + 1024 * npg)
+        args.region, margin = find_box_region(
+            lat[:, interior, interior].numpy(),
+            lon[:, interior, interior].numpy(),
+            parse_latlon_box(args.region_latlon),
+            tile_size,
+            world_size,
+            args.region_margin_tiles,
+        )
+        logger.info(
+            "--region-latlon %s: --region %s (margin %d tiles, %d ranks)",
+            args.region_latlon,
+            args.region,
+            margin,
+            world_size,
+        )
+
     model = load_forecast_model(
         checkpoint_path,
         tile_size,
@@ -681,9 +1266,6 @@ def main() -> None:
         args.forecast_model,
         inference_batch_size=args.inference_batch_size,
     )
-
-    npg = 2
-    grid_tgt = load_scrip_lonlat(args.grid_tgt)
 
     logger.info("building halo exchange plan")
 
@@ -693,16 +1275,23 @@ def main() -> None:
         face_size=1024 * npg,
         tile_size=tile_size,
         halo_width=args.halo_width,
+        active_tiles=(
+            parse_region(args.region, 1024 * npg // tile_size)
+            if args.region is not None
+            else None
+        ),
     )
+    if topology.is_regional:
+        logger.info(
+            "REGIONAL window %s: %d active tiles, %d ring tiles, boundary=%s",
+            args.region,
+            topology.total_tiles,
+            len(topology.ring_tiles),
+            args.region_boundary,
+        )
     my_tiles = topology.local_tiles
     tile_size = topology.tile_size
 
-    lon = grid_tgt["lon"]
-    lat = grid_tgt["lat"]
-    ne_padded = 1536
-    pad_width_data = 512
-    lon = unstructured_to_6faces(torch.from_numpy(lon), ne_padded, npg)
-    lat = unstructured_to_6faces(torch.from_numpy(lat), ne_padded, npg)
     halo_exchange = DistributedTileKNNHaloPadding_AllGather.from_padded_face_grid(
         topology=topology,
         lon=lon,
@@ -844,6 +1433,8 @@ def main() -> None:
 
     output_path = args.output or f"{default_output_dir(args)}.zarr"
     params = {
+        # one line per run: every run creates its output stores afresh (no resume)
+        "history": history_entry([sys.executable, *sys.argv]),
         "run_name": args.run_name,
         "checkpoint": checkpoint_path,
         "forecast_model": args.forecast_model,
@@ -866,6 +1457,28 @@ def main() -> None:
         ),
         "tile_jitter": args.tile_jitter,
         "tile_jitter_mode": args.tile_jitter_mode if args.tile_jitter > 0 else None,
+        "region": args.region,
+        "region_latlon": args.region_latlon,
+        "region_margin_tiles": (
+            args.region_margin_tiles if args.region_latlon is not None else None
+        ),
+        "region_boundary": args.region_boundary if args.region else None,
+        "driver_stores": list(args.driver_stores or []),
+        "replay": args.replay,
+        "replay_every_hours": args.replay_every_hours if args.replay else None,
+        "replay_ell_half": args.replay_ell_half if args.replay else None,
+        "replay_vars": args.replay_vars if args.replay else None,
+        "replay_level_ramp": args.replay_level_ramp,
+        "driver_onthefly": (
+            load_spec(args.driver_onthefly) if args.driver_onthefly else None
+        ),
+        "driver_target_dir": args.driver_target_dir,
+        "ic_onthefly": ic_spec,
+        "driver_producer": args.driver_producer if args.driver_onthefly else None,
+        "replay_region_edge": (
+            args.replay_region_edge if args.replay and args.region else None
+        ),
+        "boundary_block": args.boundary_block if args.region else None,
     }
     # Build output variable grouping and output store before rollout so we can
     # write each step as it is produced.
@@ -1059,17 +1672,244 @@ def main() -> None:
         if rank == 0:
             plev_store = zarr.open_group(plev_output_path, mode="a")
 
-    logger.info("opening initial condition")
-    x0, coords = fetch_local_tiles(
-        ds,
-        in_coords,
-        topology,
-        device,
-        t0,
-        args.ace_fetch_channel_chunk,
+    dt_hours = float(model.dt / np.timedelta64(1, "h"))
+    onthefly = args.driver_onthefly is not None
+    anchored = topology.is_regional and args.region_boundary == "anchored"
+    needs_drivers = not onthefly and (args.replay or anchored)
+    driver_spec = load_spec(args.driver_onthefly) if onthefly else None
+    driver_source = make_source(driver_spec) if onthefly else None
+    drivers = (
+        resolve_drivers(args=args, t0=t0, ds=ds, n_steps=n_steps, dt_hours=dt_hours)
+        if needs_drivers
+        else []
     )
+    replay = None
+    replay_target = None
+    target_reader = None
+    ring_reader = None
+    producer = None
+    plan = []
+    analyses: set[int] = set()
+    if args.replay:
+        steps_per_hour = round(1.0 / dt_hours)
+        if abs(steps_per_hour * dt_hours - 1.0) > 1e-9 or n_steps % steps_per_hour:
+            raise ValueError(
+                f"--replay needs whole hours: {n_steps} steps of {dt_hours * 60:g} min"
+            )
+        if onthefly:
+            driver_hours = source_hours(
+                driver_source, t0, range(n_steps // steps_per_hour + 1)
+            )
+        else:
+            driver_hours = {int(h) for h, *_ in drivers if float(h).is_integer()}
+        plan = replay_plan(
+            n_steps // steps_per_hour, args.replay_every_hours, driver_hours
+        )
+        analyses = set(analysis_hours(plan))
+        if not analyses:
+            raise ValueError(
+                f"--replay: no analysis fits; drivers at {sorted(driver_hours)} h, "
+                f"every {args.replay_every_hours} h, run of {n_steps // steps_per_hour} h "
+                "(an analysis at t needs t + every/2 <= the run length)"
+            )
+        replay = Replay(
+            in_vars=list(in_coords["variable"]),
+            replay_vars=args.replay_vars.split(","),
+            lat_face=lat_face,
+            lon_face=lon_face,
+            area_face=np.asarray(load_grid_area_face(GRID_PATH, ne=1024, npg=npg)),
+            topology=topology,
+            ell_half=args.replay_ell_half,
+            window_steps=args.replay_every_hours * steps_per_hour,
+            omega_lmax=args.sht_omega_lmax,
+            normalize_edge=(
+                topology.is_regional and args.replay_region_edge == "normalized"
+            ),
+            level_weights=(
+                None
+                if level_ramp is None
+                else level_ramp_weights(hyam, hybm, *level_ramp)
+            ),
+        ).to(device)
+        if level_ramp is not None:
+            logger.info(
+                "replay level ramp %s hPa: weight by level %s",
+                args.replay_level_ramp,
+                np.round(level_ramp_weights(hyam, hybm, *level_ramp), 3).tolist(),
+            )
+        logger.info(
+            "REPLAY every %d h at +%s h, ell_half=%g (lmax %d), %d channels%s",
+            args.replay_every_hours,
+            sorted(analyses),
+            args.replay_ell_half,
+            replay.lmax,
+            len(replay.channels),
+            f", window edge {args.replay_region_edge}" if topology.is_regional else "",
+        )
+
+        def replay_target(hours: float, full: torch.Tensor) -> None:
+            if hours in analyses and not onthefly:
+                replay.add_target(int(hours), topology.faces_to_local_tiles(full))
+                logger.info("replay target +%g h loaded", hours)
+
+    if onthefly:
+        ring = []
+        if anchored:
+            ring = ring_hours(
+                driver_source, t0, args.driver_every_hours, (n_steps - 1) * dt_hours
+            )
+        n_hours = int(np.ceil(n_steps * dt_hours))
+        steps = plan or [ReplayStep("window", h) for h in range(1, n_hours + 1)]
+        schedule = target_schedule(steps, ring)
+        stems = producer_stems(
+            args.replay_vars.split(",") if args.replay else [],
+            # the ring drives every input channel
+            list(in_coords["variable"]) if anchored else [],
+        )
+        check = functools.partial(
+            check_target,
+            channels=target_channels(stems),
+            tiles=producer_tiles(
+                args.region, topology.tile_size, topology.face_size, anchored
+            ),
+            tile_size=topology.tile_size,
+            origin=target_origin(driver_spec),
+        )
+        if rank == 0:
+            visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+            gpu = str(device.index)
+            if visible:
+                gpu = visible.split(",")[device.index]
+            producer = ProducerProcess(
+                spec=args.driver_onthefly,
+                out_dir=args.driver_target_dir,
+                run_dir=run_dir,
+                run_init=t0,
+                hours=[h for h, _ in schedule],
+                gates=[g for _, g in schedule],
+                mode=args.driver_producer,
+                stems=stems,
+                tile_size=topology.tile_size,
+                face_size=topology.face_size,
+                region=args.region,
+                ring=anchored,
+                gpu=gpu,
+            )
+            logger.info(
+                "driver on the fly (%s, %s) on GPU %s -> %s: targets at +%s h",
+                driver_source.describe(t0),
+                args.driver_producer,
+                gpu,
+                args.driver_target_dir,
+                [h for h, _ in schedule],
+            )
+        torch.distributed.barrier()  # the producer has made the run directory
+        if replay is not None:
+            target_reader = TargetReader(
+                args.driver_target_dir,
+                run_dir,
+                t0,
+                lambda path: read_blocks(
+                    path, replay.names, topology.local_tiles, topology.tile_size
+                ),
+                check=check,
+                timeout=args.driver_target_timeout,
+            )
+            target_reader.prefetch(sorted(analyses))
+        if anchored:
+            ring_names = list(in_coords["variable"])
+            ring_reader = TargetReader(
+                args.driver_target_dir,
+                run_dir,
+                t0,
+                lambda path: read_box_blocks(path, ring_names, topology),
+                check=check,
+                timeout=args.driver_target_timeout,
+            )
+            ring_reader.prefetch(ring)
+
+    logger.info("opening initial condition")
+    before_step = None
+    if topology.is_regional:
+        full_faces = load_full_face_scream_state(
+            t0,
+            in_coords["variable"],
+            topology.face_size,
+            ds,
+            device,
+            args.ace_fetch_channel_chunk,
+            topology.world_size,
+            topology.rank,
+        )
+        x0 = topology.faces_to_local_tiles(full_faces)
+        coords = topology.interior_coords(in_coords, time=np.array([t0]))
+        if args.region_boundary == "anchored":
+            ic_boxes = faces_to_pieces(full_faces[0], topology)
+            del full_faces
+            if ring_reader is None:
+                boundary = build_anchored_boundary(
+                    args=args,
+                    topology=topology,
+                    ic_boxes=ic_boxes,
+                    drivers=drivers,
+                    in_vars=list(in_coords["variable"]),
+                    dt_hours=dt_hours,
+                    n_steps=n_steps,
+                    device=device,
+                    on_driver=replay_target,
+                )
+                ring_pending: list[int] = []
+            else:
+                blocks0, _ = ring_reader.get(0)
+                boundary = AnchoredBoundary(
+                    topology=topology,
+                    ic_boxes=ic_boxes,
+                    driver0_blocks=[torch.from_numpy(b).to(device) for b in blocks0],
+                    block=args.boundary_block,
+                    device=device,
+                )
+                del blocks0
+                logger.info("boundary driver +0 h: on the fly")
+                ring_pending = ring[1:]
+            del ic_boxes
+            halo_exchange.ring_source = boundary
+
+            def before_step(step_index: int) -> None:
+                t = step_index * dt_hours
+                # on the fly: add each driver state when the steps first reach it
+                while ring_pending and boundary.hours[-1] < t:
+                    h = ring_pending.pop(0)
+                    blocks, info = ring_reader.get(h)
+                    boundary.add_blocks(
+                        h, [torch.from_numpy(b).to(device) for b in blocks]
+                    )
+                    logger.info(
+                        "boundary driver +%d h: on the fly (waited %.1f s here)",
+                        h,
+                        info["blocked_s"],
+                    )
+                boundary.time_h = t
+
+        else:
+            del full_faces
+            halo_exchange.ring_source = ReplicateRing(topology)
+    else:
+        x0, coords = fetch_local_tiles(
+            ds,
+            in_coords,
+            topology,
+            device,
+            t0,
+            args.ace_fetch_channel_chunk,
+        )
     logger.info("initial condition loaded")
     in_vars = list(in_coords["variable"])
+    if replay is not None and not onthefly:
+        for driver in drivers:
+            if driver[0] in analyses and int(driver[0]) not in replay.targets:
+                replay_target(
+                    driver[0], load_driver(args, topology, driver, in_vars, device)
+                )
 
     wind_mask = torch.zeros(1, len(in_vars), 1, 1, 1, device=device)
     for i, var_name in enumerate(in_vars):
@@ -1211,6 +2051,11 @@ def main() -> None:
 
     regional_averager: RegionalAverager | None = None
     regional_output_path = ""
+    if args.region is not None and not args.regional_averages:
+        logger.info(
+            "regional averages off for the --region window "
+            "(pass --regional-averages to compute them)"
+        )
     if args.regional_averages:
         regional_output_path = (
             args.regional_averages_output or f"{output_path}_regional_averages.nc"
@@ -1269,20 +2114,82 @@ def main() -> None:
                     " ".join(parts),
                 )
 
-    run_scream(
-        x0,
-        coords,
-        n_steps,
-        model,
-        pad,
-        unpad,
-        topology,
-        omega_filter_strength=args.omega_filter_strength,
-        omega_filter_coarsen=coarsen,
-        F=f_nudge,
-        write_step=write_step,
-        sht_highpass=sht_highpass,
-    )
+    if replay is None:
+        run_scream(
+            x0,
+            coords,
+            n_steps,
+            model,
+            pad,
+            unpad,
+            topology,
+            omega_filter_strength=args.omega_filter_strength,
+            omega_filter_coarsen=coarsen,
+            F=f_nudge,
+            write_step=write_step,
+            sht_highpass=sht_highpass,
+            before_step=before_step,
+        )
+    else:
+
+        advance_hour = replay_stepper(
+            model,
+            steps_per_hour,
+            pad,
+            unpad,
+            topology,
+            write_step,
+            omega_filter_strength=args.omega_filter_strength,
+            omega_filter_coarsen=coarsen,
+            sht_highpass=sht_highpass,
+            before_step=before_step,
+        )
+
+        def increment(state, hour):
+            if target_reader is not None:
+                if producer is not None and args.driver_producer == "gated":
+                    # the producer builds the next target from here on, on this GPU
+                    torch.cuda.empty_cache()
+                    mark(run_dir, "analysis", target_reader.valid(hour))
+                blocks, info = target_reader.get(hour)
+                replay.add_block_target(hour, torch.from_numpy(blocks))
+                logger.info(
+                    "replay target +%d h: waited %.1f s here (producer %.1f s, read "
+                    "%.1f s)",
+                    hour,
+                    info["blocked_s"],
+                    info["waited_s"],
+                    info["read_s"],
+                )
+            forcing, stats = replay.increment(state[0], hour)
+            for name in (
+                n
+                for n in replay.names
+                if n in ("U_24", "PotentialTemperature_24", "qv_24", "T_2m")
+            ):
+                raw, low = stats[name]
+                logger.info(
+                    "replay +%d h %s: increment rms %.3g, low-passed %.3g",
+                    hour,
+                    name,
+                    raw,
+                    low,
+                )
+            return forcing
+
+        run_with_replay(
+            (x0, coords),
+            plan,
+            advance_hour,
+            increment,
+            copy=lambda state: (state[0].clone(), dict(state[1])),
+        )
+    for reader in (target_reader, ring_reader):
+        if reader is not None:
+            reader.close()
+    if producer is not None:
+        code = producer.close()
+        logger.info("driver target producer exited with code %s", code)
 
     if writer is not None:
         writer.close()

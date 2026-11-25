@@ -26,6 +26,13 @@ bracketing levels (ECMWF fills levels below the ground by extrapolation), and be
 hypsometric equation with the 1000 hPa temperature. It is therefore consistent with the ps it
 adjusts.
 
+WeatherBench2's ``hres`` store holds the HRES forecasts themselves: the 00 and 12 UTC runs
+from 2016-01-01 to 2023-01-10 12 UTC, every 6 h to +240 h, on the same grid and levels
+(``fetch_hres_forecast``; ``hres_forecast --archive wb2`` and the ``wb2_hres`` source of
+``screamcast.replay_targets`` read it). Lead 0 of a forecast is its ``hres_t0`` time.
+WeatherBench2's HRES data are ECMWF's, under CC BY 4.0: credit ECMWF when you use them, as
+the README's License section says.
+
 Every output field is HRES. Above HRES's 50 hPa top HICCUP holds the 50 hPa values up to the
 model top, so the five output levels above 50 hPa (L128 3-19) are not physical (PotentialTemperature
 far too cold at the top). STRATA reads L128 ``[3::4][8:]`` (levels 35-127, from 100 hPa down) and
@@ -73,6 +80,15 @@ WB2_HRES_T0 = (
     "https://storage.googleapis.com/weatherbench2/datasets/hres_t0/"
     "2016-2022-6h-1440x721.zarr"
 )
+WB2_HRES_FORECAST = (
+    "https://storage.googleapis.com/weatherbench2/datasets/hres/"
+    "2016-2022-0012-1440x721.zarr"
+)
+# the inits and leads of WB2_HRES_FORECAST (read from the store on 2026-11-24)
+WB2_FIRST_INIT = np.datetime64("2016-01-01T00", "h")
+WB2_LAST_INIT = np.datetime64("2023-01-10T12", "h")
+WB2_LEADS = frozenset(range(0, 241, 6))
+WB2_EPOCH = "hours since 2016-01-01"
 HRES_ATM = {
     "T_mid": "temperature",
     "qv": "specific_humidity",
@@ -100,20 +116,61 @@ def surface_geopotential(
     return np.where(log_ps > log_p[-1], below, inside).astype(np.float32)
 
 
+def check_wb2_init(init: np.datetime64) -> None:
+    """Raise ``ValueError`` unless ``WB2_HRES_FORECAST`` holds forecast ``init``."""
+    init = np.datetime64(init, "h")
+    hour = int(np.datetime_as_string(init, unit="h")[11:13])
+    if hour not in (0, 12) or not WB2_FIRST_INIT <= init <= WB2_LAST_INIT:
+        raise ValueError(
+            f"HRES init {init}: WeatherBench2 holds the 00 and 12 UTC forecasts from "
+            f"{WB2_FIRST_INIT} to {WB2_LAST_INIT}"
+        )
+
+
 def fetch_hres_t0(timestamp: str, url: str, workers: int) -> Era5:
     """One HRES analysis time in fast_ic's ERA5 layout (north to south, increasing pressure)."""
     root = zarr.open_group(url, mode="r", zarr_format=2)
     if np.datetime64(timestamp, "s") != np.datetime64(timestamp, "h"):
         raise SystemExit(f"--timestamp {timestamp} is not on the hour")
+    idx = _time_index(root, timestamp)
+    if idx is None:
+        raise SystemExit(f"HRES t0 has no {timestamp} in {url}")
+    return _wb2_state(root, (idx,), ("time",), url, workers)
+
+
+def fetch_hres_forecast(init: str, lead: int, url: str, workers: int) -> Era5:
+    """The ``lead``-hour state of the HRES forecast from ``init`` in WeatherBench2's
+    ``hres`` store, as ``fetch_hres_t0`` gives an analysis."""
+    root = zarr.open_group(url, mode="r", zarr_format=2)
+    if np.datetime64(init, "s") != np.datetime64(init, "h"):
+        raise SystemExit(f"HRES init {init} is not on the hour")
+    idx = _time_index(root, init)
+    if idx is None:
+        raise SystemExit(f"HRES forecasts have no init {init} in {url}")
+    units = str(root["prediction_timedelta"].attrs.get("units", ""))
+    if units != "hours":
+        raise SystemExit(f"{url}: prediction_timedelta is in {units!r}, not hours")
+    k = np.flatnonzero(np.asarray(root["prediction_timedelta"][:]) == lead)
+    if k.size != 1:
+        raise SystemExit(f"HRES forecast {init} has no +{lead} h in {url}")
+    return _wb2_state(
+        root, (idx, int(k[0])), ("time", "prediction_timedelta"), url, workers
+    )
+
+
+def _time_index(root: zarr.Group, timestamp: str) -> int | None:
     hours = int(
         (np.datetime64(timestamp, "h") - np.datetime64("2016-01-01T00", "h"))
         / np.timedelta64(1, "h")
     )
-    times = np.asarray(root["time"][:])
-    idx = np.flatnonzero(times == hours)
-    if idx.size != 1:
-        raise SystemExit(f"HRES t0 has no {timestamp} in {url}")
-    idx = int(idx[0])
+    idx = np.flatnonzero(np.asarray(root["time"][:]) == hours)
+    return int(idx[0]) if idx.size == 1 else None
+
+
+def _wb2_state(
+    root: zarr.Group, index: tuple, leading: tuple[str, ...], url: str, workers: int
+) -> Era5:
+    """Era5 of the WeatherBench2 fields at ``index`` along the ``leading`` dimensions."""
     lat = np.asarray(root["latitude"][:])
     lon = np.asarray(root["longitude"][:])
     plev_hpa = np.asarray(root["level"][:])
@@ -124,8 +181,9 @@ def fetch_hres_t0(timestamp: str, url: str, workers: int) -> Era5:
         root,
         [*HRES_ATM.values(), "geopotential"],
         ["surface_pressure", "2m_temperature"],
-        "hours since 2016-01-01",
+        WB2_EPOCH,
         url,
+        leading,
     )
     omega_units = str(root["vertical_velocity"].attrs.get("units", ""))
     if "Pa" not in omega_units or "hPa" in omega_units:
@@ -135,7 +193,7 @@ def fetch_hres_t0(timestamp: str, url: str, workers: int) -> Era5:
         data = dict(
             zip(
                 names,
-                pool.map(lambda n: np.asarray(root[n][idx], dtype=np.float32), names),
+                pool.map(lambda n: np.asarray(root[n][index], dtype=np.float32), names),
             )
         )
     # south-to-north -> north-to-south, like ARCO ERA5

@@ -50,6 +50,8 @@ class _FakeTopology:
         self.face_size = tile_size
         self.n_faces = 6
         self.global_tiles = [(face, 0, 0) for face in range(self.total_tiles)]
+        self.active_tiles = None
+        self.is_regional = False
 
 
 def test_face_zarr_write_step_selects_owned_channels_and_writes_faces(monkeypatch):

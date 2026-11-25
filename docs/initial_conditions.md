@@ -237,9 +237,19 @@ levels from 50 to 1000 hPa) for the whole globe. It runs on one GPU, or with
   output levels above 100 hPa, and expect a full-column IC check to flag them.
 - **Boundary layer.** HRES has 3 levels from 850 to 1000 hPa where ERA5 has 7,
   so its boundary layer is interpolated over coarser steps.
-- **Coverage.** HRES for 2023 and later is not in WeatherBench2. ECMWF's open
-  data for those years (0.4 deg, 9 levels, no omega) is too coarse to be worth
-  building from.
+- **Coverage.** HRES for 2023 and later is not in WeatherBench2's `hres_t0`. Its
+  `hres` store holds the forecasts themselves (00 and 12 UTC, 2016-01-01 to
+  2023-01-10 12 UTC, 6-hourly to +240 h, same grid and levels, with surface
+  pressure); `hres_forecast.py --archive wb2` builds one store per lead from it. From
+  the 2024-03-05 12 UTC forecast on, ECMWF's open data holds the 00 and 12 UTC HRES
+  forecasts at 0.25 deg with omega on the same 13 levels; `hres_forecast.py` builds
+  one store per lead from it, and lead 0 is the analysis (see
+  [regional_window.md](regional_window.md)). Earlier open data (0.4 deg in 2023, then
+  0.25 deg files without four of the levels and omega until 2024-03-05 00 UTC) is
+  refused.
+- **Licence.** The HRES data, from WeatherBench2 and from open data, are ECMWF's
+  under CC BY 4.0; credit ECMWF in work that uses them, with the wording the
+  [README](../README.md#license) gives.
 
 Run it in the STRATA Docker image as for `fast_ic` (it imports torch):
 

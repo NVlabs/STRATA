@@ -183,14 +183,17 @@ def check_store_layout(
     names_2d: list[str],
     time_units: str,
     url: str,
+    leading: tuple[str, ...] = ("time",),
 ) -> None:
-    """Stop on a store whose time epoch or dimension order the readers do not assume."""
+    """Stop on a store whose time epoch or dimension order the readers do not assume.
+    ``leading`` are the dimensions before level / latitude (a forecast store's
+    ``("time", "prediction_timedelta")``)."""
     units = str(root["time"].attrs.get("units", ""))
     if not units.startswith(time_units):
         raise SystemExit(f"{url}: time units are {units!r}, expected {time_units!r}")
     expected = {
-        **{name: ["time", "level", "latitude", "longitude"] for name in names_3d},
-        **{name: ["time", "latitude", "longitude"] for name in names_2d},
+        **{name: [*leading, "level", "latitude", "longitude"] for name in names_3d},
+        **{name: [*leading, "latitude", "longitude"] for name in names_2d},
     }
     for name, dims in expected.items():
         got = list(root[name].attrs.get("_ARRAY_DIMENSIONS", []))

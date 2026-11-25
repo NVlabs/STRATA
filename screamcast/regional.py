@@ -1,0 +1,669 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Limited-area (regional window) STRATA rollouts.
+
+A regional run predicts only the active tiles of a ``TileTopology``: a rectangle of
+tiles on one cube face, or across the edge between an equatorial face and its east,
+north or south neighbour (a region *plane*, see ``distributed_halo.plane_blocks``).
+Boxes and distances below are in plane pixels. The halo of the tiles at the region edge
+reads a one-tile ``ring`` of the tiles that touch the region, on the plane or, where
+the region is flush with a face edge the plane does not cross, on the faces beyond.
+Its values come from a ring source:
+
+- ``AnchoredBoundary``: the initial state plus the change of a driver since the start,
+  ``ring(t) = IC + (smooth(D(t)) - smooth(D(t0)))``. ``D`` is a sequence of states on
+  the SCREAM grid at known valid times (for example ECMWF HRES forecasts built with
+  ``screamcast.initial_conditions``); ``smooth`` is an ``n x n`` block mean followed
+  by bilinear upsampling, so only the driver's large-scale evolution enters. At
+  ``t0`` the ring is the initial state, so the window starts without a jump at its
+  edge, and terrain-locked fine structure of the initial state (surface pressure
+  over orography, 2 m temperature) is kept. Inside the window STRATA runs freely.
+  ``smooth`` works on the ``ring_pieces`` of the topology: the region and its ring on
+  the plane, or, for a ring off the plane, one rectangle per face, so near a face edge
+  the plane does not cross the block means do not blend across it.
+- ``ReplicateRing``: the region's own edge pixels extended outward. No outside
+  information enters; useful as a baseline. It needs the ring on the plane.
+
+``python -m screamcast.regional --lat .. --lon .. --tiles N`` prints a ``--region``
+for a window of ``N x N`` tiles around a point, ``--latlon-box LAT0,LAT1,LON0,LON1
+--world-size N`` the smallest window that holds a lat/lon box (``find_box_region``).
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+from screamcast.distributed_halo import (
+    NORTH_POLAR_FACE,
+    Tile,
+    TileTopology,
+    base_offset,
+    from_plane,
+    plane_blocks,
+    plane_parts,
+    plane_shape,
+    region_plane_for,
+    to_plane,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def spec_frame(spec: str, tiles_per_dim: int) -> list:
+    """The plane a ``"face,i0,i1,j0,j1"`` spec is written on: ``i1`` beyond the face's
+    tiles reaches into the north polar face, ``j1`` beyond them into the next equatorial
+    face to the east, a negative ``i0`` into the south polar face."""
+    face, i0, i1, _, j1 = (int(v) for v in spec.split(","))
+    return plane_blocks(
+        face, north=i1 > tiles_per_dim, east=j1 > tiles_per_dim, south=i0 < 0
+    )
+
+
+def region_plane_of(spec: str, tiles_per_dim: int) -> list:
+    """The plane a ``TileTopology`` of this region runs on (``region_plane_for``): the
+    spec's frame, or for a window flush with an equatorial face's north, east or west
+    edge the plane that joins the neighbour holding its ring."""
+    return region_plane_for(list(parse_region(spec, tiles_per_dim)), tiles_per_dim)
+
+
+def parse_region(spec: str, tiles_per_dim: int) -> tuple[Tile, ...]:
+    """``"face,i0,i1,j0,j1"`` (tile units on the plane of ``face``, half-open) -> active
+    tiles, row-major on the plane. E.g. with 16 tiles per face side ``3,6,14,8,24`` is two
+    8 x 8 windows on faces 3 and 0 sharing their edge, ``3,8,24,5,13`` one on face 3 and
+    one on the north polar face, ``3,-4,4,5,13`` one on face 3 and one on the south polar
+    face."""
+    parts = spec.split(",")
+    if len(parts) != 5:
+        raise ValueError(f"--region needs face,i0,i1,j0,j1, got {spec!r}")
+    _, i0, i1, j0, j1 = (int(v) for v in parts)
+    if not (i0 < i1 and j0 < j1):
+        raise ValueError(f"--region {spec!r} is empty")
+    blocks = spec_frame(spec, tiles_per_dim)
+    di, dj = base_offset(blocks, tiles_per_dim)
+    return tuple(
+        from_plane(blocks, i + di, j + dj, tiles_per_dim)
+        for i in range(i0, i1)
+        for j in range(j0, j1)
+    )
+
+
+def faces_to_box(
+    x: torch.Tensor,
+    topology: TileTopology,
+    origin: tuple[int, int],
+    size: tuple[int, int],
+    blocks: list | None = None,
+) -> torch.Tensor:
+    """Cut the ``(..., *size)`` box at pixel ``origin`` of the plane ``blocks`` (default
+    the region plane) out of ``(..., 6, n, n)`` face-major fields, without building the
+    whole plane."""
+    n = topology.face_size
+    r0, c0 = origin
+    box = (r0, r0 + size[0], c0, c0 + size[1])
+    out = x.new_zeros(*x.shape[:-3], *size)
+    for face, (fr0, fr1, fc0, fc1), (pr0, pr1, pc0, pc1), k in plane_parts(
+        list(blocks or topology.region_plane), box, n
+    ):
+        part = x[..., face, fr0:fr1, fc0:fc1]
+        out[..., pr0 - r0 : pr1 - r0, pc0 - c0 : pc1 - c0] = torch.rot90(
+            part, k, dims=(-2, -1)
+        )
+    return out
+
+
+def faces_to_pieces(x: torch.Tensor, topology: TileTopology) -> list[torch.Tensor]:
+    """The ``topology.ring_pieces`` boxes of ``(..., 6, n, n)`` face-major fields."""
+    return [
+        faces_to_box(x, topology, piece.origin, piece.size, piece.blocks)
+        for piece in topology.ring_pieces
+    ]
+
+
+def block_means(box: torch.Tensor, n: int) -> torch.Tensor:
+    """``n x n`` block means of ``(..., H, W)``, float64 ``(..., H/n, W/n)``."""
+    H, W = box.shape[-2:]
+    if H % n or W % n:
+        raise ValueError(f"box {H} x {W} is not a multiple of the block size {n}")
+    coarse = F.avg_pool2d(box.reshape(-1, 1, H, W).double(), n)
+    return coarse.reshape(*box.shape[:-2], H // n, W // n)
+
+
+def upsample(coarse: torch.Tensor, n: int, dtype: torch.dtype) -> torch.Tensor:
+    """Block means ``(..., h, w)`` back on the ``(..., n h, n w)`` pixels, bilinearly
+    (cell-centred, edges clamped)."""
+    h, w = coarse.shape[-2:]
+    fine = F.interpolate(
+        coarse.reshape(-1, 1, h, w),
+        scale_factor=n,
+        mode="bilinear",
+        align_corners=False,
+    )
+    return fine.to(dtype).reshape(*coarse.shape[:-2], h * n, w * n)
+
+
+def smooth(box: torch.Tensor, n: int) -> torch.Tensor:
+    """``n x n`` block means of ``(..., H, W)`` upsampled back bilinearly (cell-centred,
+    edges clamped). ``n = 1`` returns ``box``. A constant stays constant."""
+    if n == 1:
+        return box
+    return upsample(block_means(box, n), n, box.dtype)
+
+
+def edge_distance(topology: TileTopology, tiles: list[Tile]) -> torch.Tensor:
+    """Distance (px) of every pixel of ``tiles`` (in each tile's own orientation) to the
+    region edge on the plane, ``(len(tiles), ts, ts)``.
+
+    0 is the outermost row/column inside the region; pixels outside are negative.
+    """
+    _, r0, r1, c0, c1 = topology.region_pixel_box()
+    ts = topology.tile_size
+    origin = (r0 - ts, c0 - ts)
+    rows = torch.arange(origin[0], r1 + ts)
+    cols = torch.arange(origin[1], c1 + ts)
+    dr = torch.minimum(rows - r0, r1 - 1 - rows)
+    dc = torch.minimum(cols - c0, c1 - 1 - cols)
+    box = torch.minimum(dr[:, None], dc[None, :])
+    return topology.box_to_tiles(box, tiles, origin)
+
+
+class ReplicateRing:
+    """Ring source that extends the region's edge pixels outward (free boundary)."""
+
+    def __init__(self, topology: TileTopology) -> None:
+        if not topology.ring_on_plane:
+            raise ValueError(
+                "--region-boundary replicate needs the window's ring on its plane; "
+                "this window is flush with a face edge the plane does not cross (use "
+                "--region-boundary anchored)"
+            )
+        self.topology = topology
+
+    def __call__(self, gathered: torch.Tensor) -> torch.Tensor:
+        topo = self.topology
+        _, r0, r1, c0, c1 = topo.region_pixel_box()
+        H, W, ts = r1 - r0, c1 - c0, topo.tile_size
+        box = topo.tiles_to_box(gathered, topo.global_tiles, (r0, c0), (H, W))
+        lead = box.shape[:-2]
+        padded = F.pad(box.reshape(-1, 1, H, W), (ts, ts, ts, ts), mode="replicate")
+        padded = padded.reshape(*lead, H + 2 * ts, W + 2 * ts)
+        return topo.box_to_tiles(padded, topo.ring_tiles, (r0 - ts, c0 - ts))
+
+
+class AnchoredBoundary:
+    """Ring values anchored at the initial state: ``IC + (smooth(D(t)) - smooth(D(t0)))``.
+
+    ``ic_boxes``, ``driver0`` and every driver given to ``add`` are lists of ``(C, H,
+    W)`` boxes, one per ``topology.ring_pieces`` (``faces_to_pieces``), in the model's
+    input channel order. ``driver0`` is the driver at the initial time; ``add(h,
+    boxes)`` adds the driver ``h`` hours later. ``time_h`` (set by the caller before
+    each step) selects the linear-in-time blend of the two driver states around it.
+    Ring calls need every channel at once (``--halo-channel-chunk 0``).
+
+    A driver may also come as the ``block x block`` means of each piece, ``(C,
+    H/block, W/block)`` (``driver0_blocks``, ``add_blocks``; the on-the-fly targets of
+    ``replay_targets``): ``smooth`` is those means upsampled.
+    """
+
+    def __init__(
+        self,
+        *,
+        topology: TileTopology,
+        ic_boxes: list[torch.Tensor],
+        block: int,
+        device: torch.device,
+        driver0: list[torch.Tensor] | None = None,
+        driver0_blocks: list[torch.Tensor] | None = None,
+        channel_chunk: int = 16,
+    ) -> None:
+        if (driver0 is None) == (driver0_blocks is None):
+            raise ValueError("give the initial driver as driver0 or driver0_blocks")
+        pieces = topology.ring_pieces
+        if len(ic_boxes) != len(pieces):
+            raise ValueError(f"{len(ic_boxes)} IC boxes for {len(pieces)} ring pieces")
+        channels = ic_boxes[0].shape[0]
+        self.shapes = [(channels, *piece.size) for piece in pieces]
+        for box, shape in zip(ic_boxes, self.shapes):
+            if tuple(box.shape) != shape:
+                raise ValueError(f"IC box {tuple(box.shape)} is not a {shape} ring box")
+        self.topology = topology
+        self.pieces = pieces
+        self.dtype = ic_boxes[0].dtype
+        self.block = int(block)
+        self.device = device
+        self.channel_chunk = int(channel_chunk)
+        self.hours: list[float] = []
+        self.ring: dict[float, torch.Tensor] = {}
+        self._ring_ic = self._assemble([lambda c, b=b: b[c] for b in ic_boxes])
+        if driver0 is not None:
+            self._base = self._smooth_ring(driver0)
+        else:
+            self._base = self._ring_of_blocks(driver0_blocks)
+        self._add_ring(0.0, self._base)
+        self.time_h = 0.0
+
+    def _assemble(self, fields) -> torch.Tensor:
+        """The ring tiles ``(C, n_ring, ts, ts)`` from one ``fields[k](channels)`` per
+        piece, the piece's box of those channels, a few channels at a time to bound
+        memory."""
+        topo = self.topology
+        order = {tile: n for n, tile in enumerate(topo.ring_tiles)}
+        channels = self.shapes[0][0]
+        out = None
+        for c in range(0, channels, self.channel_chunk):
+            sl = slice(c, c + self.channel_chunk)
+            for piece, field in zip(self.pieces, fields):
+                tiles = topo.box_to_tiles(
+                    field(sl), list(piece.tiles), piece.origin, list(piece.blocks)
+                )
+                if out is None:
+                    out = tiles.new_zeros(channels, len(order), *tiles.shape[-2:])
+                out[sl, [order[t] for t in piece.tiles]] = tiles
+        return out
+
+    def _smooth_ring(self, boxes: list[torch.Tensor]) -> torch.Tensor:
+        """``smooth`` of each piece's box on the ring tiles, ``(C, n_ring, ts, ts)``."""
+        shapes = [tuple(box.shape) for box in boxes]
+        if shapes != self.shapes:
+            raise ValueError(
+                f"driver boxes {shapes} differ from the IC boxes {self.shapes}"
+            )
+        return self._assemble([lambda c, b=b: smooth(b[c], self.block) for b in boxes])
+
+    def _ring_of_blocks(self, coarse: list[torch.Tensor]) -> torch.Tensor:
+        """The ring tiles of ``smooth`` given each piece's block means ``(C, H/b,
+        W/b)``."""
+        want = [(c, h // self.block, w // self.block) for c, h, w in self.shapes]
+        got = [tuple(x.shape) for x in coarse]
+        if got != want:
+            raise ValueError(f"driver blocks {got}, expected {want}")
+        return self._assemble(
+            [
+                lambda c, x=x: upsample(x[c].double(), self.block, self.dtype)
+                for x in coarse
+            ]
+        )
+
+    def add(self, h: float, boxes: list[torch.Tensor]) -> None:
+        """Add the driver state ``h`` hours after the initial time."""
+        self._add_ring(h, self._smooth_ring(boxes))
+
+    def add_blocks(self, h: float, coarse: list[torch.Tensor]) -> None:
+        """Add the driver ``h`` hours after the initial time, as its block means."""
+        self._add_ring(h, self._ring_of_blocks(coarse))
+
+    def _add_ring(self, h: float, smoothed: torch.Tensor) -> None:
+        h = float(h)
+        ring = self._ring_ic + (smoothed - self._base)
+        if not torch.isfinite(ring).all():
+            raise ValueError(f"boundary ring at +{h} h is not finite")
+        self.ring[h] = ring.to(self.device)
+        self.hours = sorted(self.ring)
+
+    def ring_at(self, t: float) -> torch.Tensor:
+        """The ring at ``t`` hours, linear in time between driver states."""
+        if not self.hours[0] <= t <= self.hours[-1]:
+            raise ValueError(
+                f"no boundary driver around +{t:.2f} h (drivers at {self.hours} h)"
+            )
+        lo = max(h for h in self.hours if h <= t)
+        hi = min(h for h in self.hours if h >= t)
+        if hi == lo:
+            return self.ring[lo]
+        a = (t - lo) / (hi - lo)
+        return (1.0 - a) * self.ring[lo] + a * self.ring[hi]
+
+    def __call__(self, gathered: torch.Tensor) -> torch.Tensor:
+        ring = self.ring_at(self.time_h)
+        lead = gathered.shape[:-3]
+        if lead[-1] != ring.shape[0]:
+            raise ValueError(
+                "the anchored ring needs every input channel in one halo call "
+                "(run with --halo-channel-chunk 0)"
+            )
+        return ring.expand(*lead, *ring.shape[-3:])
+
+
+# ---------------------------------------------------------------- region finder
+
+
+def _unit_vectors(lat_deg: np.ndarray, lon_deg: np.ndarray) -> np.ndarray:
+    la, lo = np.deg2rad(lat_deg), np.deg2rad(lon_deg)
+    return np.stack([np.cos(la) * np.cos(lo), np.cos(la) * np.sin(lo), np.sin(la)])
+
+
+def nearest_pixel(
+    lat_faces: np.ndarray, lon_faces: np.ndarray, lat: float, lon: float
+) -> tuple[int, int, int]:
+    """``(face, row, col)`` of the grid cell nearest to ``(lat, lon)`` on
+    ``(6, n, n)`` face-major lat/lon in degrees."""
+    target = _unit_vectors(np.asarray(lat), np.asarray(lon))
+    best = (-2.0, (0, 0, 0))
+    for face in range(lat_faces.shape[0]):
+        dot = np.tensordot(target, _unit_vectors(lat_faces[face], lon_faces[face]), 1)
+        k = int(np.argmax(dot))
+        if dot.flat[k] > best[0]:
+            best = (float(dot.flat[k]), (face, *np.unravel_index(k, dot.shape)))
+    face, row, col = best[1]
+    return int(face), int(row), int(col)
+
+
+def _candidate_planes(face: int) -> list[list]:
+    """The planes (``plane_blocks``) that contain ``face``, simplest first."""
+    if face < 4:
+        return [
+            plane_blocks(face),
+            plane_blocks(face, east=True),
+            plane_blocks((face - 1) % 4, east=True),
+            plane_blocks(face, north=True),
+            plane_blocks(face, south=True),
+        ]
+    if face == NORTH_POLAR_FACE:
+        return [plane_blocks(face)] + [plane_blocks(g, north=True) for g in range(4)]
+    return [plane_blocks(face)] + [plane_blocks(g, south=True) for g in range(4)]
+
+
+def find_region(
+    lat_faces: np.ndarray,
+    lon_faces: np.ndarray,
+    lat: float,
+    lon: float,
+    n_tiles: int,
+    tile_size: int,
+) -> str:
+    """A ``--region`` of ``n_tiles x n_tiles`` tiles whose centre tile holds the grid cell
+    nearest to ``(lat, lon)``, moved as little as needed to stay on one plane.
+
+    Tries the point's own face first, then the planes joining it to a neighbour.
+    """
+    n = lat_faces.shape[-1]
+    if n % tile_size:
+        raise ValueError(
+            f"face size {n} is not a multiple of the tile size {tile_size}"
+        )
+    tpd = n // tile_size
+    face, row, col = nearest_pixel(lat_faces, lon_faces, lat, lon)
+    best = None
+    for blocks in _candidate_planes(face):
+        P, Q = to_plane(blocks, face, row, col, n)
+        ci, cj = P // tile_size, Q // tile_size
+        rows, cols = plane_shape(blocks, tpd)
+        lo_i, hi_i = 0, rows - n_tiles
+        lo_j, hi_j = 0, cols - n_tiles
+        if hi_i < lo_i or hi_j < lo_j:
+            continue
+        i0 = min(max(ci - (n_tiles - 1) // 2, lo_i), hi_i)
+        j0 = min(max(cj - (n_tiles - 1) // 2, lo_j), hi_j)
+        if not (i0 <= ci < i0 + n_tiles and j0 <= cj < j0 + n_tiles):
+            continue  # cannot be moved far enough and still hold the point
+        shift = abs(i0 - (ci - (n_tiles - 1) // 2)) + abs(
+            j0 - (cj - (n_tiles - 1) // 2)
+        )
+        tiles = [
+            from_plane(blocks, i, j, tpd)
+            for i in range(i0, i0 + n_tiles)
+            for j in range(j0, j0 + n_tiles)
+        ]
+        # the window must lie on this plane's faces as it runs (not inside one face)
+        if region_plane_for(tiles, tpd) != blocks:
+            continue
+        spec = TileTopology(
+            world_size=1,
+            rank=0,
+            face_size=n,
+            tile_size=tile_size,
+            halo_width=0,
+            active_tiles=tuple(tiles),
+        ).region_spec
+        if best is None or shift < best[0]:
+            best = (shift, spec)
+        if shift == 0:
+            break
+    if best is None:
+        raise ValueError(
+            f"no {n_tiles} x {n_tiles}-tile window around ({lat}, {lon}) fits on one "
+            "region plane; use fewer tiles"
+        )
+    return best[1]
+
+
+# Every region plane, simplest first: single faces, then east, north and south joins.
+ALL_PLANES = (
+    [plane_blocks(f) for f in range(6)]
+    + [plane_blocks(f, east=True) for f in range(4)]
+    + [plane_blocks(f, north=True) for f in range(4)]
+    + [plane_blocks(f, south=True) for f in range(4)]
+)
+
+
+def box_mask(
+    lat_faces: np.ndarray, lon_faces: np.ndarray, box: tuple[float, float, float, float]
+) -> np.ndarray:
+    """Grid cells inside ``box = (lat0, lat1, lon0, lon1)`` (degrees): ``lat0 <= lat <=
+    lat1`` and the longitude on the arc running east from ``lon0`` to ``lon1``, so
+    ``lon0 > lon1`` (e.g. ``170, -170``) crosses the dateline."""
+    lat0, lat1, lon0, lon1 = box
+    if not lat0 < lat1:
+        raise ValueError(f"latitude range {lat0}..{lat1} is empty")
+    width = (lon1 - lon0) % 360
+    if width == 0 and lon1 != lon0:
+        width = 360
+    in_lon = (lon_faces - lon0) % 360 <= width
+    return (lat_faces >= lat0) & (lat_faces <= lat1) & in_lon
+
+
+def find_box_region(
+    lat_faces: np.ndarray,
+    lon_faces: np.ndarray,
+    box: tuple[float, float, float, float],
+    tile_size: int,
+    world_size: int,
+    margin_tiles: int = 1,
+) -> tuple[str, int]:
+    """The smallest ``--region`` that holds every grid cell of ``box`` (``box_mask``)
+    with at least ``margin_tiles`` whole tiles between the box's tiles and the window
+    edge, lies on one region plane and has a multiple of ``world_size`` tiles. Returns
+    ``(spec, margin)``, ``margin`` the smallest such gap in tiles.
+
+    Every plane that holds all the box's faces is searched for rectangles; ties in
+    tile count go to the larger margin, then to the more centred window.
+    """
+    n = lat_faces.shape[-1]
+    if n % tile_size:
+        raise ValueError(
+            f"face size {n} is not a multiple of the tile size {tile_size}"
+        )
+    if margin_tiles < 0:
+        raise ValueError("margin_tiles must be >= 0")
+    tpd = n // tile_size
+    mask = box_mask(lat_faces, lon_faces, box)
+    if not mask.any():
+        raise ValueError(f"the box {box} holds no grid cell")
+    hit = mask.reshape(6, tpd, tile_size, tpd, tile_size).any(axis=(2, 4))
+    target = list(zip(*(v.tolist() for v in np.nonzero(hit))))
+    faces = {f for f, _, _ in target}
+    m = margin_tiles
+    best, why = None, []
+    for blocks in ALL_PLANES:
+        if not faces <= {f for f, _, _, _ in blocks}:
+            continue
+        pos = np.array([to_plane(blocks, f, i, j, tpd) for f, i, j in target])
+        a0, b0 = pos.min(axis=0)
+        a1, b1 = pos.max(axis=0) + 1
+        rows, cols = plane_shape(blocks, tpd)
+        if a0 - m < 0 or b0 - m < 0 or a1 + m > rows or b1 + m > cols:
+            why.append("margin off the plane")
+            continue
+        # every window [i0, i1) x [j0, j1) holding the box's tiles plus the margin
+        i0, i1 = np.meshgrid(np.arange(0, a0 - m + 1), np.arange(a1 + m, rows + 1))
+        j0, j1 = np.meshgrid(np.arange(0, b0 - m + 1), np.arange(b1 + m, cols + 1))
+        i0, i1, j0, j1 = (v.ravel() for v in (i0, i1, j0, j1))
+        area = (i1 - i0)[:, None] * (j1 - j0)[None, :]
+        margin = np.minimum(
+            np.minimum(a0 - i0, i1 - a1)[:, None], np.minimum(b0 - j0, j1 - b1)[None, :]
+        )
+        off = np.abs((a0 - i0) - (i1 - a1))[:, None] + np.abs((b0 - j0) - (j1 - b1))
+        ok = area % world_size == 0
+        if not ok.any():
+            why.append(f"no window with a multiple of {world_size} tiles")
+            continue
+        r, c = np.nonzero(ok)
+        order = np.lexsort((off[r, c], -margin[r, c], area[r, c]))
+        for k in order:
+            key = (
+                int(area[r[k], c[k]]),
+                -int(margin[r[k], c[k]]),
+                int(off[r[k], c[k]]),
+            )
+            if best is not None and key >= best[0]:
+                break
+            tiles = tuple(
+                from_plane(blocks, i, j, tpd)
+                for i in range(i0[r[k]], i1[r[k]])
+                for j in range(j0[c[k]], j1[c[k]])
+            )
+            try:
+                topo = TileTopology(
+                    world_size=world_size,
+                    rank=0,
+                    face_size=n,
+                    tile_size=tile_size,
+                    halo_width=0,
+                    active_tiles=tiles,
+                )
+            except ValueError as e:
+                why.append(str(e))
+                continue
+            best = (key, topo.region_spec)
+            break
+    if best is None:
+        detail = "; ".join(sorted(set(why))) or (
+            f"no region plane holds faces {sorted(faces)}"
+        )
+        raise ValueError(
+            f"no window holds the box {box} with a {m}-tile margin ({detail}). A box "
+            "too large for one plane is not supported; try a smaller box or margin."
+        )
+    return best[1], -best[0][1]
+
+
+def load_latlon_faces(path: str) -> tuple[np.ndarray, np.ndarray]:
+    """``latlon_ne1024pg2.nc`` (flat ``ncol``, degrees) as ``(6, 2048, 2048)`` faces."""
+    import netCDF4
+
+    from screamcast.dali_ext_src import unstructured_to_6faces
+
+    with netCDF4.Dataset(path) as ds:
+        lat = np.asarray(ds["lat"][:], dtype=np.float64)
+        lon = np.asarray(ds["lon"][:], dtype=np.float64)
+    if np.abs(lat).max() <= np.pi / 2 + 1e-6 and np.abs(lon).max() <= 2 * np.pi + 1e-6:
+        lat, lon = np.rad2deg(lat), np.rad2deg(lon)
+    faces = [
+        unstructured_to_6faces(torch.from_numpy(v), 1024, 2).numpy() for v in (lat, lon)
+    ]
+    return faces[0], faces[1]
+
+
+def _corners(lat_faces, lon_faces, spec: str, tile_size: int) -> list[tuple]:
+    n = lat_faces.shape[-1]
+    face, i0, i1, j0, j1 = (int(v) for v in spec.split(","))
+    blocks = spec_frame(spec, n // tile_size)
+    di, dj = base_offset(blocks, n // tile_size)
+    i0, i1, j0, j1 = i0 + di, i1 + di, j0 + dj, j1 + dj
+    out = []
+    for P, Q in (
+        (i0 * tile_size, j0 * tile_size),
+        (i0 * tile_size, j1 * tile_size - 1),
+        (i1 * tile_size - 1, j0 * tile_size),
+        (i1 * tile_size - 1, j1 * tile_size - 1),
+    ):
+        f, p, q = from_plane(blocks, P, Q, n)
+        out.append((float(lat_faces[f, p, q]), float(lon_faces[f, p, q])))
+    return out
+
+
+def parse_latlon_box(text: str) -> tuple[float, float, float, float]:
+    """``"LAT0,LAT1,LON0,LON1"`` (degrees) -> a box for ``box_mask``."""
+    parts = text.split(",")
+    if len(parts) != 4:
+        raise ValueError(f"need LAT0,LAT1,LON0,LON1, got {text!r}")
+    lat0, lat1, lon0, lon1 = (float(v) for v in parts)
+    return lat0, lat1, lon0, lon1
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Print a --region: N x N tiles around a point (--lat/--lon), or the "
+            "smallest window that holds a lat/lon box (--latlon-box)."
+        )
+    )
+    parser.add_argument("--lat", type=float)
+    parser.add_argument("--lon", type=float)
+    parser.add_argument("--tiles", type=int, default=8, help="Window side in tiles.")
+    parser.add_argument(
+        "--latlon-box",
+        help=(
+            "LAT0,LAT1,LON0,LON1 in degrees; the box runs east from LON0 to LON1, so "
+            "LON0 > LON1 crosses the dateline. A negative LAT0 needs the '=' form: "
+            "--latlon-box=-40,-20,140,160."
+        ),
+    )
+    parser.add_argument("--world-size", type=int, default=8)
+    parser.add_argument("--margin-tiles", type=int, default=1)
+    parser.add_argument("--tile-size", type=int, default=128)
+    parser.add_argument(
+        "--latlon",
+        required=True,
+        help="latlon_ne1024pg2.nc (generated by data_prep/scrip_generation).",
+    )
+    args = parser.parse_args(argv)
+    if (args.latlon_box is None) == (args.lat is None or args.lon is None):
+        parser.error("give --lat and --lon, or --latlon-box")
+    lat_faces, lon_faces = load_latlon_faces(args.latlon)
+    if args.latlon_box is not None:
+        spec, margin = find_box_region(
+            lat_faces,
+            lon_faces,
+            parse_latlon_box(args.latlon_box),
+            args.tile_size,
+            args.world_size,
+            args.margin_tiles,
+        )
+        _, i0, i1, j0, j1 = (int(v) for v in spec.split(","))
+        print(spec)
+        print(
+            f"# {i1 - i0} x {j1 - j0} tiles ({(i1 - i0) * (j1 - j0)}), "
+            f"{margin}-tile margin, world size {args.world_size}; corners:"
+        )
+    else:
+        spec = find_region(
+            lat_faces, lon_faces, args.lat, args.lon, args.tiles, args.tile_size
+        )
+        print(spec)
+        km = args.tiles * args.tile_size * 4.9  # ne1024pg2: about 4.9 km per cell
+        print(
+            f"# {args.tiles} x {args.tiles} tiles, about {km:.0f} km across; corners:"
+        )
+    for la, lo in _corners(lat_faces, lon_faces, spec, args.tile_size):
+        print(f"#   lat {la:7.2f}  lon {lo:7.2f}")
+
+
+if __name__ == "__main__":
+    main()

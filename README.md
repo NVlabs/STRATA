@@ -1,4 +1,4 @@
-# Strata
+# STRATA
 
 [![Paper](https://img.shields.io/badge/Paper-NeurIPS%202026-b31b1b?logo=arxiv&logoColor=white)](https://arxiv.org/abs/2606.31248)
 [![Project page](https://img.shields.io/badge/Project-page-76b900?logo=nvidia&logoColor=white)](https://research.nvidia.com/labs/climate/strata/)
@@ -9,12 +9,12 @@
 Code for *Scaling Storm-Resolving Atmospheric AI Simulation to the Entire
 Planet* (NeurIPS 2026, Main Track).
 
-Strata is a deep-learning weather emulator for the
+STRATA is a deep-learning weather emulator for the
 [SCREAM](https://e3sm.org/scream/) global atmosphere model. It trains
 transformer-based neural networks to emulate SCREAM atmospheric physics on
 the cubed-sphere grid and supports multi-day global forecasting.
 
-The Strata architecture (a two-stage 3D neighborhood-attention transformer
+The STRATA architecture (a two-stage 3D neighborhood-attention transformer
 with stereographic rotary position embeddings) lives in
 [NVIDIA PhysicsNeMo](https://github.com/NVIDIA/physicsnemo) as
 `physicsnemo.experimental.models.strata`. This repository adds the
@@ -22,12 +22,12 @@ SCREAM-specific pieces around it: spherical tile geometry, tile-local wind
 rotation, data pipelines, training configs, rollout/inference tooling
 (see `screamcast/strata_wrappers.py`), and a pipeline that builds SCREAM
 initial conditions from ERA5 or the ECMWF HRES analysis
-(see [Initial conditions](#initial-conditions-from-era5-or-ecmwf-hres)).
+(see [Forecasts from ERA5 or ECMWF HRES](#forecasts-from-era5-or-ecmwf-hres)).
 
-The public release is named *Strata*, but the Python package, command-line
+The public release is named *STRATA*, but the Python package, command-line
 scripts, and environment variables keep the project's original name: you import
 `screamcast`, run the `screamcast`-prefixed entry points, and configure
-`SCREAM_*` variables. *Strata* and *screamcast* refer to the same project.
+`SCREAM_*` variables. *STRATA* and *screamcast* refer to the same project.
 
 > This code is provided for research and development purposes only.
 
@@ -48,7 +48,7 @@ Build the training/inference image from the repository root:
 The image contains the complete environment, including NATTEN built from
 source for Ada and Hopper GPUs (pass `--build-arg CUDA_ARCH=8.0` for A100; see
 [`docker/build_natten.sh`](docker/build_natten.sh)) and PhysicsNeMo pinned to a
-commit that includes the Strata models. It does not contain this repository;
+commit that includes the STRATA models. It does not contain this repository;
 mount it at run time.
 
 ### pip install (plain PyPI environment)
@@ -222,7 +222,7 @@ diagnostic output and does not feed back into the forecast.
 The forecast is written to the Zarr store `$OUTPUT`, and area-weighted
 regional means (global, land, ocean, tropics, extratropics) of every output
 channel to `${OUTPUT}_regional_averages.nc` (`--no-zarr-output` writes only
-the latter). Arrays in the store are `(time, step, face, x, y)` for 2-D fields
+the latter; off by default for a regional window). Arrays in the store are `(time, step, face, x, y)` for 2-D fields
 and `(time, step, level, face, x, y)` for 3-D fields, on the six
 2048 × 2048 cube faces:
 
@@ -250,61 +250,130 @@ check with the same model settings (eager, regional means only; setup in
 `--n-steps` and drop `--no-zarr-output`.
 `python3 scripts/ace/run_screamcast_nudged.py --help` lists all options.
 
-## Initial conditions from ERA5 or ECMWF HRES
+## Forecasts from ERA5 or ECMWF HRES
 
-`screamcast.initial_conditions` builds STRATA initial conditions (ICs) on the
-SCREAM ne1024pg2 physics grid with the E3SM L128 vertical grid, for any hour of
-ERA5 or of the ECMWF HRES analysis (2016-2022). It follows the E3SM
-[HICCUP](https://github.com/E3SM-Project/HICCUP) steps: conservative
-horizontal remap, surface-pressure adjustment to the SCREAM topography,
-vertical remap to L128, supersaturation removal, then potential temperature
-and hydrostatic heights.
+STRATA can also forecast real weather. At start-up the run builds a SCREAM initial
+condition from ERA5 or the ECMWF HRES analysis; it can run on the globe or on a
+regional window; and it can run freely or keep its large scales on a driver forecast
+(*replay*). Nothing has to be prepared per case: four choices and one command make a
+run.
 
-- `fast_ic.py` is a torch port of those steps (HICCUP is BSD-3-licensed; its
-  notice is kept in the file). It reads ERA5 from the public ARCO store and
-  builds one IC in about 80 s on one GPU. Its output matched HICCUP itself bit
-  for bit on ten cases, apart from last-bit differences in a few values.
-- `hres_ic.py` does the same from the WeatherBench2 HRES `hres_t0` store.
+### One-time setup
 
-Each IC is a one-frame Zarr store with flat `ncol` and the 32 model levels
-STRATA uses. They are STRATA inputs, not ICs EAMxx can start from (EAMxx reads
-its ICs on the np4 GLL grid).
+The initial condition follows the E3SM [HICCUP](https://github.com/E3SM-Project/HICCUP)
+steps (conservative remap, surface pressure adjusted to the SCREAM topography, vertical
+remap to L128); `screamcast/initial_conditions/fast_ic.py` is a torch port of them
+(HICCUP is BSD-3-licensed; its notice is kept in the file) that matched HICCUP bit for
+bit on ten cases apart from last-bit differences, and builds one in about 80 s on one
+GPU. It needs, once:
 
-One-time inputs: the SCREAM `phis`, `sgh30` and `landfrac` arrays from the
-`nvidia/STRATA-SCREAM-sdy1` dataset, the L128 coordinate file from HICCUP,
-and the ERA5 to ne1024pg2 remap map. `build_map.py` builds the map (3.2 GB)
-in about 30 min on 72 cores; it needs conda-forge `nco` and `tempest-remap`.
-Then:
+- the SCREAM `phis`, `sgh30` and `landfrac` arrays from `nvidia/STRATA-SCREAM-sdy1`
+  (about 60 MB);
+- the L128 coordinate file from HICCUP (8 KB);
+- the ERA5 to ne1024pg2 remap map (3.2 GB): `build_map.py` builds it in about 30 min on
+  72 cores and needs conda-forge `nco` and `tempest-remap`.
 
-```bash
-python -m screamcast.initial_conditions.fast_ic \
-  --timestamp 2017-09-14T00 \
-  --out-dir "$WORK/ics" \
-  --map "$WORK/map/map_721x1440_to_ne1024pg2.nc" \
-  --phis "$WORK/scream_phis.zarr" \
-  --latlon "$AUX_DATA_ROOT/latlon_ne1024pg2.nc" --scream-ref "$WORK/scream_static" \
-  --vert "$WORK/vert_coord_E3SM_L128.nc"
+[`docs/initial_conditions.md`](docs/initial_conditions.md#inputs) has the commands.
+
+### 1. Date and data source
+
+A JSON spec names the source and the one-time inputs:
+
+```json
+{"source": "hres", "init": "2024-09-25T12", "cache": "/path/to/grib-cache",
+ "map": "/path/to/map_721x1440_to_ne1024pg2.nc", "phis": "/path/to/scream_phis.zarr",
+ "vert": "/path/to/vert_coord_E3SM_L128.nc",
+ "latlon": "/path/to/latlon_ne1024pg2.nc", "scream_ref": "/path/to/scream_static"}
 ```
 
-To forecast from it, run the v1 forecast above with `--ic-store` in place of
-`SCREAM_MAIN_ZARR_PATH` and `--initial-time`. The forecast starts at the
-store's `initial_time`. A one-frame store has no later truth, so
-`--correction none` is required:
+| `source` | Dates | Initial condition | Driver at +6 h, +12 h, ... |
+|---|---|---|---|
+| `hres` | 00 and 12 UTC forecasts from 2024-03-05 12 UTC (ECMWF open data) | the HRES analysis at `init` (lead 0 of the forecast) | the same forecast's +6 h, +12 h, ... leads |
+| `wb2_hres` | 00 and 12 UTC forecasts, 2016-01-01 to 2023-01-10 12 UTC (WeatherBench2) | the same | the same |
+| `era5` | any hour (ARCO ERA5); give `--initial-time` | ERA5 at that hour | ERA5 at those hours |
+
+An HRES run starts at `init` and uses nothing known after it: it is a forecast, the HRES
+forecast downscaled by STRATA. An ERA5 driver is reanalysis, so a replay to it is a
+hindcast pulled toward the observed weather. `cache` (`hres` only) is where the GRIB
+files are kept; if the AWS bucket answers HTTP 503, add
+`"opendata_root": "https://storage.googleapis.com/ecmwf-open-data"`.
+
+### 2. Domain: the globe or a window
+
+- **Globe**: all 1,536 tiles. Add `--sht-omega-lmax 3`. A 24 h run takes about 1 to
+  1.5 h on two nodes of 8 H100 GPUs (87 min replayed).
+- **Window**: `--region-latlon LAT0,LAT1,LON0,LON1` predicts only the smallest window of
+  128-px tiles that holds the box with a tile to spare; 24 h take 4 to 8 minutes on one
+  node of 8 H100 GPUs (4 x 4 to 8 x 8 tiles, about 2,500 to 5,000 km). The box runs
+  east from `LON0` to `LON1`; write a southern box with `=`
+  (`--region-latlon=-40,-20,140,160`). The window's edge is a one-tile ring that follows
+  the driver's large-scale change, so a window always needs a driver
+  (`--driver-onthefly`). `python -m screamcast.regional --latlon-box 8,18,-91,-79
+  --world-size 8 --latlon $AUX_DATA_ROOT/latlon_ne1024pg2.nc` prints the window
+  (`--region face,i0,i1,j0,j1`) first. Windows can cross cube-face edges and touch cube
+  corners.
+
+### 3. Free rollout or replay
+
+- **Free**: after the initial condition STRATA runs on its own (in a window, only the
+  ring is driven).
+- **Replay** (`--replay`): every 6 hours the scales above about 250 km are pulled to the
+  driver and the scales below stay STRATA's. The difference between the driver and the
+  run, averaged on 40 km blocks and low-passed on the sphere, is added over the 6 hours
+  centred on that time (an incremental analysis update). A 24 h run is replayed at +6,
+  +12 and +18 h; run 27 h (`--n-steps 162`) to replay at +24 h too. Tuning:
+  `--replay-every-hours` (6), `--replay-ell-half` (160, the scale where the increment is
+  halved, about 250 km), `--replay-vars` (default all seven model inputs) and
+  `--replay-level-ramp 800,900` (leave the boundary layer free).
+
+| | Globe | Window |
+|---|---|---|
+| Free | `--ic-onthefly S` | `--ic-onthefly S --driver-onthefly S --region-latlon ...` |
+| Replay | `--ic-onthefly S --driver-onthefly S --replay` | `--ic-onthefly S --driver-onthefly S --region-latlon ... --replay` |
+
+`S` is the spec; the driver is usually the same spec as the initial condition. Every run
+also takes `--driver-target-dir DIR`, where the initial condition (about 9 GB) and the
+driver's 8 x 8-block means are written; a rerun reuses them. So far (2026-11) replayed
+windows and a free global run have run this way; global replayed runs have run from
+driver stores only.
+
+### 4. Run
+
+A replayed 24 h window over Hurricane Helene from the HRES forecast of 2024-09-25
+12 UTC (the spec above as `hres_helene.json`; `--region 3,10,14,7,11` is a 4 x 4-tile
+window over the Gulf of Mexico), on one node of 8 GPUs:
 
 ```bash
-torchrun --nproc_per_node=4 scripts/ace/run_screamcast_nudged.py \
-  --run-name maria_2017091400 \
+torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \
+  --run-name helene_replay \
   --checkpoint $AUX_DATA_ROOT/checkpoints/strata_v1.pth \
-  --ic-store "$WORK/ics/scream_hiccup_ne1024pg2_2017091400.zarr" \
-  --forecast-model screamcast --correction none --n-steps 2 \
+  --ic-onthefly hres_helene.json \
+  --driver-onthefly hres_helene.json --driver-target-dir "$WORK/targets/helene" \
+  --region 3,10,14,7,11 --replay \
+  --forecast-model screamcast --correction none --n-steps 144 --output-steps 6 \
   --tile-size 128 --halo-width 16 --halo-adjoint --no-halo-adjoint-cross-face \
-  --tile-jitter 4 --tile-jitter-mode cycle16 --sht-omega-lmax 3 \
-  --inference-batch-size 1 --no-zarr-output \
+  --tile-jitter 4 --tile-jitter-mode cycle16 --inference-batch-size 1 \
+  --output-variables T_2m ps U V qv omega precip_liq_surf_mass_flux \
+  --output-levels 19,24,31 \
   $OUTPUT
 ```
 
-[`docs/initial_conditions.md`](docs/initial_conditions.md) has the downloads,
-the map build, the Docker command, the HRES path and the validation.
+It takes about 5 minutes, start-up and the initial condition included. For the other
+cells of the table, change the flags it names; on the globe add `--sht-omega-lmax 3` and
+run on more GPUs (`srun --nodes=2 --ntasks-per-node=8 python ...`). The output is laid
+out as in [Forecast output](#forecast-output), with NaN outside a window (whose regional
+means are off unless `--regional-averages` is given); the log has one line per analysis
+with the size of the increment.
+
+Building full-resolution stores instead (`--ic-store`, `--driver-stores`) is for
+sources the run cannot read itself, such as the HRES analyses every 6 h of 2016-2022 in
+WeatherBench2's `hres_t0` (`hres_ic.py`); see the docs below. The data keep their own
+licences: credit ECMWF or Copernicus as [License](#license) says.
+
+More in `docs/`: [initial_conditions.md](docs/initial_conditions.md) (inputs, the
+HICCUP port and its validation), [regional_window.md](docs/regional_window.md)
+(choosing a window, the boundary) and [replay.md](docs/replay.md) (the method, the
+on-the-fly build, timings, limitations). No forecast skill has been measured yet.
 
 ## Training
 
@@ -396,6 +465,35 @@ checks locally, install Python 3.12 and run `make install-linters` first.
 - SCREAM data (raw output and the `nvidia/STRATA-SCREAM-*` Zarr stores):
   CC BY 4.0, as E3SM model output (see the
   [E3SM data documentation](https://docs.e3sm.org/e3sm_data_docs/_build/html/index.html)).
+- Analysis and forecast data the code downloads when it runs are not part of this
+  repository and keep their own licences. Credit them in work that uses them,
+  including initial conditions, replay targets, forecasts and figures made from them:
+  - ECMWF IFS HRES (ECMWF open data, and WeatherBench2's `hres` and `hres_t0`
+    stores): [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) under the
+    [ECMWF terms of use](https://apps.ecmwf.int/datasets/licences/general/), which
+    ask for
+    - the copyright statement "© [year] European Centre for Medium-Range Weather
+      Forecasts (ECMWF)" with the source www.ecmwf.int (for a service built on the
+      data: "This service is based on data and products of the European Centre for
+      Medium-Range Weather Forecasts (ECMWF)");
+    - the licence statement "This data is published under a Creative Commons
+      Attribution 4.0 International (CC BY 4.0).
+      https://creativecommons.org/licenses/by/4.0/";
+    - the disclaimer "ECMWF does not accept any liability whatsoever for any error or
+      omission in the data, their availability, or for any loss or damage arising from
+      their use.";
+    - a note that the data were modified: a STRATA initial condition or replay target
+      is HRES remapped to the SCREAM grid, and a forecast from it is model output.
+  - ERA5 (read from Google's ARCO-ERA5 copy):
+    [CC BY 4.0](https://cds.climate.copernicus.eu/licences/cc-by) on the Copernicus
+    Climate Data Store; the ARCO-ERA5 README still refers to the earlier Copernicus
+    licence. Credit it with "Contains modified Copernicus Climate Change Service
+    information [year]" and "Neither the European Commission nor ECMWF is responsible
+    for any use that may be made of the Copernicus information or data it contains",
+    cite Hersbach et al. (2020, [doi:10.1002/qj.3803](https://doi.org/10.1002/qj.3803)),
+    and cite ARCO-ERA5 (Carver and Merose, 2023; see its
+    [README](https://github.com/google-research/arco-era5#how-to-cite-this-work)) when
+    the data came from that copy.
 
 ## Disclaimer
 

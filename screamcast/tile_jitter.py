@@ -33,7 +33,9 @@ rotated and accumulates as 45-degree stripes (base-adaLN, 12 h: anti-corner
 measure). The default ``mode="cycle16"`` visits all J*J offsets (``ox = t mod
 J``, ``oy = (t // J) mod J``) and cancels all four exactly every J*J steps.
 ``mode="random"`` has no blind spot but only reaches the ~1/sqrt(N) random-walk
-floor; a 2-phase {0,1} set cannot cancel the fundamental at all.
+floor; a 2-phase {0,1} set cannot cancel the fundamental at all. In every mode the
+offset is a function of ``(seed, step)``, so setting ``step`` back (a replay rewind)
+repeats the offsets of the first pass.
 
 The shift is global per step (the same offset for every tile in the batch):
 each 128 core is predicted by exactly one tile, and with a shared offset the
@@ -85,7 +87,7 @@ class JitteredModel:
         self.jitter = int(jitter)
         self.mode = mode
         self.fill = fill
-        self.rng = np.random.default_rng(seed)
+        self.seed = int(seed)
         self.step = 0
         self.last_shift: tuple[int, int] | None = None
         self._net_size: tuple[int, int] | None = None
@@ -122,7 +124,8 @@ class JitteredModel:
             return s, s
         if self.mode == "cycle16":
             return t % j, (t // j) % j
-        return int(self.rng.integers(0, j)), int(self.rng.integers(0, j))
+        ox, oy = np.random.default_rng((self.seed, t)).integers(0, j, size=2)
+        return int(ox), int(oy)
 
     def __call__(self, x: torch.Tensor, coords: OrderedDict):
         if self.jitter == 0:
