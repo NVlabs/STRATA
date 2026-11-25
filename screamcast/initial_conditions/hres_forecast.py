@@ -30,7 +30,8 @@ The forecast comes from ECMWF open data (``--archive opendata``, the default: 00
 12 UTC runs from 2024-03-05 12 UTC, every 3 h to +144 h then every 6 h to +240 h) or
 from WeatherBench2's ``hres`` store (``--archive wb2``: 00 and 12 UTC runs from 2016 to
 2023-01-10 12 UTC, every 6 h to +240 h, no ``--cache``; see ``hres_ic``). Both are
-ECMWF data under CC BY 4.0: credit ECMWF when you use them.
+ECMWF data under CC BY 4.0: credit ECMWF when you use them, as the README's License
+section says.
 """
 
 from __future__ import annotations

@@ -248,7 +248,8 @@ levels from 50 to 1000 hPa) for the whole globe. It runs on one GPU, or with
   0.25 deg files without four of the levels and omega until 2024-03-05 00 UTC) is
   refused.
 - **Licence.** The HRES data, from WeatherBench2 and from open data, are ECMWF's
-  under CC BY 4.0; credit ECMWF in work that uses them.
+  under CC BY 4.0; credit ECMWF in work that uses them, with the wording the
+  [README](../README.md#license) gives.
 
 Run it in the STRATA Docker image as for `fast_ic` (it imports torch):
 

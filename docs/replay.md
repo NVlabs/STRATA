@@ -163,7 +163,8 @@ at 0.4 deg (9 levels, no `w`) are not a source.
 
 The HRES data, from open data and from WeatherBench2, are ECMWF's under CC BY 4.0;
 ERA5 is under the Copernicus licence. Both ask you to credit the source in work that
-uses them.
+uses them, replayed runs included: the [README](../README.md#license) gives the
+wording each asks for.
 
 ```bash
 torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \

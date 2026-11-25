@@ -30,7 +30,8 @@ WeatherBench2's ``hres`` store holds the HRES forecasts themselves: the 00 and 1
 from 2016-01-01 to 2023-01-10 12 UTC, every 6 h to +240 h, on the same grid and levels
 (``fetch_hres_forecast``; ``hres_forecast --archive wb2`` and the ``wb2_hres`` source of
 ``screamcast.replay_targets`` read it). Lead 0 of a forecast is its ``hres_t0`` time.
-WeatherBench2's HRES data are ECMWF's, under CC BY 4.0: credit ECMWF when you use them.
+WeatherBench2's HRES data are ECMWF's, under CC BY 4.0: credit ECMWF when you use them, as
+the README's License section says.
 
 Every output field is HRES. Above HRES's 50 hPa top HICCUP holds the 50 hPa values up to the
 model top, so the five output levels above 50 hPa (L128 3-19) are not physical (PotentialTemperature

@@ -427,6 +427,30 @@ checks locally, install Python 3.12 and run `make install-linters` first.
 - SCREAM data (raw output and the `nvidia/STRATA-SCREAM-*` Zarr stores):
   CC BY 4.0, as E3SM model output (see the
   [E3SM data documentation](https://docs.e3sm.org/e3sm_data_docs/_build/html/index.html)).
+- Analysis and forecast data the code downloads when it runs are not part of this
+  repository and keep their own licences. Credit them in work that uses them,
+  including initial conditions, replay targets, forecasts and figures made from them:
+  - ECMWF IFS HRES (ECMWF open data, and WeatherBench2's `hres` and `hres_t0`
+    stores): [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) under the
+    [ECMWF terms of use](https://apps.ecmwf.int/datasets/licences/general/), which
+    ask for
+    - the copyright statement "© [year] European Centre for Medium-Range Weather
+      Forecasts (ECMWF)" with the source www.ecmwf.int (for a service built on the
+      data: "This service is based on data and products of the European Centre for
+      Medium-Range Weather Forecasts (ECMWF)");
+    - the licence statement "This data is published under a Creative Commons
+      Attribution 4.0 International (CC BY 4.0).
+      https://creativecommons.org/licenses/by/4.0/";
+    - the disclaimer "ECMWF does not accept any liability whatsoever for any error or
+      omission in the data, their availability, or for any loss or damage arising from
+      their use.";
+    - a note that the data were modified: a STRATA initial condition or replay target
+      is HRES remapped to the SCREAM grid, and a forecast from it is model output.
+  - ERA5 (from the ARCO-ERA5 store): the
+    [Copernicus licence](https://apps.ecmwf.int/datasets/licences/copernicus/), which
+    asks for "Contains modified Copernicus Climate Change Service information [year]"
+    and a statement that neither the European Commission nor ECMWF is responsible for
+    any use made of the Copernicus information or data it contains.
 
 ## Disclaimer
 
