@@ -165,7 +165,7 @@ the hours the source has; the ring's driver hours must all be there. The 2023 HR
 at 0.4 deg (9 levels, no `w`) are not a source.
 
 The HRES data, from open data and from WeatherBench2, are ECMWF's under CC BY 4.0;
-ERA5 is under the Copernicus licence. Both ask you to credit the source in work that
+ERA5 is under CC BY 4.0 on the Copernicus Climate Data Store. Both ask you to credit the source in work that
 uses them, replayed runs included: the [README](../README.md#license) gives the
 wording each asks for.
 

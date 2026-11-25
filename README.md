@@ -484,11 +484,16 @@ checks locally, install Python 3.12 and run `make install-linters` first.
       their use.";
     - a note that the data were modified: a STRATA initial condition or replay target
       is HRES remapped to the SCREAM grid, and a forecast from it is model output.
-  - ERA5 (from the ARCO-ERA5 store): the
-    [Copernicus licence](https://apps.ecmwf.int/datasets/licences/copernicus/), which
-    asks for "Contains modified Copernicus Climate Change Service information [year]"
-    and a statement that neither the European Commission nor ECMWF is responsible for
-    any use made of the Copernicus information or data it contains.
+  - ERA5 (read from Google's ARCO-ERA5 copy):
+    [CC BY 4.0](https://cds.climate.copernicus.eu/licences/cc-by) on the Copernicus
+    Climate Data Store; the ARCO-ERA5 README still refers to the earlier Copernicus
+    licence. Credit it with "Contains modified Copernicus Climate Change Service
+    information [year]" and "Neither the European Commission nor ECMWF is responsible
+    for any use that may be made of the Copernicus information or data it contains",
+    cite Hersbach et al. (2020, [doi:10.1002/qj.3803](https://doi.org/10.1002/qj.3803)),
+    and cite ARCO-ERA5 (Carver and Merose, 2023; see its
+    [README](https://github.com/google-research/arco-era5#how-to-cite-this-work)) when
+    the data came from that copy.
 
 ## Disclaimer
 
