@@ -22,7 +22,7 @@ SCREAM-specific pieces around it: spherical tile geometry, tile-local wind
 rotation, data pipelines, training configs, rollout/inference tooling
 (see `screamcast/strata_wrappers.py`), and a pipeline that builds SCREAM
 initial conditions from ERA5 or the ECMWF HRES analysis
-(see [Initial conditions](#initial-conditions-from-era5-or-ecmwf-hres)).
+(see [Forecasts from ERA5 or ECMWF HRES](#forecasts-from-era5-or-ecmwf-hres)).
 
 The public release is named *Strata*, but the Python package, command-line
 scripts, and environment variables keep the project's original name: you import
@@ -250,113 +250,129 @@ check with the same model settings (eager, regional means only; setup in
 `--n-steps` and drop `--no-zarr-output`.
 `python3 scripts/ace/run_screamcast_nudged.py --help` lists all options.
 
-## Initial conditions from ERA5 or ECMWF HRES
+## Forecasts from ERA5 or ECMWF HRES
 
-`screamcast.initial_conditions` builds STRATA initial conditions (ICs) on the
-SCREAM ne1024pg2 physics grid with the E3SM L128 vertical grid, for any hour of
-ERA5 or of the ECMWF HRES analysis (2016-2022). It follows the E3SM
-[HICCUP](https://github.com/E3SM-Project/HICCUP) steps: conservative
-horizontal remap, surface-pressure adjustment to the SCREAM topography,
-vertical remap to L128, supersaturation removal, then potential temperature
-and hydrostatic heights.
+STRATA can also forecast real weather. At start-up the run builds a SCREAM initial
+condition from ERA5 or the ECMWF HRES analysis; it can run on the globe or on a
+regional window; and it can run freely or keep its large scales on a driver forecast
+(*replay*). Nothing has to be prepared per case: four choices and one command make a
+run.
 
-- `fast_ic.py` is a torch port of those steps (HICCUP is BSD-3-licensed; its
-  notice is kept in the file). It reads ERA5 from the public ARCO store and
-  builds one IC in about 80 s on one GPU. Its output matched HICCUP itself bit
-  for bit on ten cases, apart from last-bit differences in a few values.
-- `hres_ic.py` does the same from the WeatherBench2 HRES `hres_t0` store.
+### One-time setup
 
-Each IC is a one-frame Zarr store with flat `ncol` and the 32 model levels
-STRATA uses. They are STRATA inputs, not ICs EAMxx can start from (EAMxx reads
-its ICs on the np4 GLL grid).
+The initial condition follows the E3SM [HICCUP](https://github.com/E3SM-Project/HICCUP)
+steps (conservative remap, surface pressure adjusted to the SCREAM topography, vertical
+remap to L128); `screamcast/initial_conditions/fast_ic.py` is a torch port of them
+(HICCUP is BSD-3-licensed; its notice is kept in the file) that matched HICCUP bit for
+bit on ten cases apart from last-bit differences, and builds one in about 80 s on one
+GPU. It needs, once:
 
-One-time inputs: the SCREAM `phis`, `sgh30` and `landfrac` arrays from the
-`nvidia/STRATA-SCREAM-sdy1` dataset, the L128 coordinate file from HICCUP,
-and the ERA5 to ne1024pg2 remap map. `build_map.py` builds the map (3.2 GB)
-in about 30 min on 72 cores; it needs conda-forge `nco` and `tempest-remap`.
+- the SCREAM `phis`, `sgh30` and `landfrac` arrays from `nvidia/STRATA-SCREAM-sdy1`
+  (about 60 MB);
+- the L128 coordinate file from HICCUP (8 KB);
+- the ERA5 to ne1024pg2 remap map (3.2 GB): `build_map.py` builds it in about 30 min on
+  72 cores and needs conda-forge `nco` and `tempest-remap`.
 
-With those, a forecast builds its own initial condition at start-up
-(`--ic-onthefly`): a JSON spec names the source and the inputs, and rank 0 builds
-the IC into `--driver-target-dir` before the model loads (about 80 s on one GPU,
-plus the download); a rerun reuses it. A one-frame IC has no later truth, so
-`--correction none` is required:
+[`docs/initial_conditions.md`](docs/initial_conditions.md#inputs) has the commands.
+
+### 1. Date and data source
+
+A JSON spec names the source and the one-time inputs:
 
 ```json
-{"source": "era5",
+{"source": "hres", "init": "2024-09-25T12", "cache": "/path/to/grib-cache",
  "map": "/path/to/map_721x1440_to_ne1024pg2.nc", "phis": "/path/to/scream_phis.zarr",
  "vert": "/path/to/vert_coord_E3SM_L128.nc",
  "latlon": "/path/to/latlon_ne1024pg2.nc", "scream_ref": "/path/to/scream_static"}
 ```
 
+| `source` | Dates | Initial condition | Driver at +6 h, +12 h, ... |
+|---|---|---|---|
+| `hres` | 00 and 12 UTC forecasts from 2024-03-05 12 UTC (ECMWF open data) | the HRES analysis at `init` (lead 0 of the forecast) | the same forecast's +6 h, +12 h, ... leads |
+| `wb2_hres` | 00 and 12 UTC forecasts, 2016-01-01 to 2023-01-10 12 UTC (WeatherBench2) | the same | the same |
+| `era5` | any hour (ARCO ERA5); give `--initial-time` | ERA5 at that hour | ERA5 at those hours |
+
+An HRES run starts at `init` and uses nothing known after it: it is a forecast, the HRES
+forecast downscaled by STRATA. An ERA5 driver is reanalysis, so a replay to it is a
+hindcast pulled toward the observed weather. `cache` (`hres` only) is where the GRIB
+files are kept; if the AWS bucket answers HTTP 503, add
+`"opendata_root": "https://storage.googleapis.com/ecmwf-open-data"`.
+
+### 2. Domain: the globe or a window
+
+- **Globe**: all 1,536 tiles. Add `--sht-omega-lmax 3`. A 24 h run takes about 1 to
+  1.5 h on two nodes of 8 H100 GPUs (87 min replayed).
+- **Window**: `--region-latlon LAT0,LAT1,LON0,LON1` predicts only the smallest window of
+  128-px tiles that holds the box with a tile to spare; 24 h take 4 to 8 minutes on one
+  node of 8 H100 GPUs (4 x 4 to 8 x 8 tiles, about 2,500 to 5,000 km). The box runs
+  east from `LON0` to `LON1`; write a southern box with `=`
+  (`--region-latlon=-40,-20,140,160`). The window's edge is a one-tile ring that follows
+  the driver's large-scale change, so a window always needs a driver
+  (`--driver-onthefly`). `python -m screamcast.regional --latlon-box 8,18,-91,-79
+  --world-size 8 --latlon $AUX_DATA_ROOT/latlon_ne1024pg2.nc` prints the window
+  (`--region face,i0,i1,j0,j1`) first. Windows can cross cube-face edges and touch cube
+  corners.
+
+### 3. Free rollout or replay
+
+- **Free**: after the initial condition STRATA runs on its own (in a window, only the
+  ring is driven).
+- **Replay** (`--replay`): every 6 hours the scales above about 250 km are pulled to the
+  driver and the scales below stay STRATA's. The difference between the driver and the
+  run, averaged on 40 km blocks and low-passed on the sphere, is added over the 6 hours
+  centred on that time (an incremental analysis update). A 24 h run is replayed at +6,
+  +12 and +18 h; run 27 h (`--n-steps 162`) to replay at +24 h too. Tuning:
+  `--replay-every-hours` (6), `--replay-ell-half` (160, the scale where the increment is
+  halved, about 250 km), `--replay-vars` (default all seven model inputs) and
+  `--replay-level-ramp 800,900` (leave the boundary layer free).
+
+| | Globe | Window |
+|---|---|---|
+| Free | `--ic-onthefly S` | `--ic-onthefly S --driver-onthefly S --region-latlon ...` |
+| Replay | `--ic-onthefly S --driver-onthefly S --replay` | `--ic-onthefly S --driver-onthefly S --region-latlon ... --replay` |
+
+`S` is the spec; the driver is usually the same spec as the initial condition. Every run
+also takes `--driver-target-dir DIR`, where the initial condition (about 9 GB) and the
+driver's 8 x 8-block means are written; a rerun reuses them. So far (2026-11) replayed
+windows have run this way; global replayed runs have run from driver stores only.
+
+### 4. Run
+
+A replayed 24 h window over Hurricane Helene from the HRES forecast of 2024-09-25
+12 UTC (the spec above as `hres_helene.json`; `--region 3,10,14,7,11` is a 4 x 4-tile
+window over the Gulf of Mexico), on one node of 8 GPUs:
+
 ```bash
-torchrun --nproc_per_node=4 scripts/ace/run_screamcast_nudged.py \
-  --run-name maria_2017091400 \
+torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \
+  --run-name helene_replay \
   --checkpoint $AUX_DATA_ROOT/checkpoints/strata_v1.pth \
-  --ic-onthefly era5.json --driver-target-dir "$WORK/ics" \
-  --initial-time 2017-09-14T00 \
-  --forecast-model screamcast --correction none --n-steps 2 \
+  --ic-onthefly hres_helene.json \
+  --driver-onthefly hres_helene.json --driver-target-dir "$WORK/targets/helene" \
+  --region 3,10,14,7,11 --replay \
+  --forecast-model screamcast --correction none --n-steps 144 --output-steps 6 \
   --tile-size 128 --halo-width 16 --halo-adjoint --no-halo-adjoint-cross-face \
-  --tile-jitter 4 --tile-jitter-mode cycle16 --sht-omega-lmax 3 \
-  --inference-batch-size 1 --no-zarr-output \
+  --tile-jitter 4 --tile-jitter-mode cycle16 --inference-batch-size 1 \
+  --output-variables T_2m ps U V qv omega precip_liq_surf_mass_flux \
+  --output-levels 19,24,31 \
   $OUTPUT
 ```
 
-`{"source": "hres", "init": ..., "cache": ...}` starts from the ECMWF HRES analysis
-at `init` (lead 0 of the HRES forecast started then) in open data (00 and 12 UTC from
-2024-03-05 12 UTC), and `"wb2_hres"` from one in WeatherBench2 (00 and 12 UTC, 2016
-to 2023-01-10); `--initial-time` then defaults to `init`
-([docs/replay.md](docs/replay.md#sources)).
+It takes about 5 minutes, start-up and the initial condition included. For the other
+cells of the table, change the flags it names; on the globe add `--sht-omega-lmax 3` and
+run on more GPUs (`srun --nodes=2 --ntasks-per-node=8 python ...`). The output is laid
+out as in [Forecast output](#forecast-output), with NaN outside a window (whose regional
+means are off unless `--regional-averages` is given); the log has one line per analysis
+with the size of the increment.
 
-`fast_ic` and `hres_ic` (the HRES analyses every 6 h of 2016-2022 in WeatherBench2's
-`hres_t0`) build the same IC as a store, which `--ic-store` takes in place of
-`--ic-onthefly`:
+Building full-resolution stores instead (`--ic-store`, `--driver-stores`) is for
+sources the run cannot read itself, such as the HRES analyses every 6 h of 2016-2022 in
+WeatherBench2's `hres_t0` (`hres_ic.py`); see the docs below. The data keep their own
+licences: credit ECMWF or Copernicus as [License](#license) says.
 
-```bash
-python -m screamcast.initial_conditions.fast_ic \
-  --timestamp 2017-09-14T00 \
-  --out-dir "$WORK/ics" \
-  --map "$WORK/map/map_721x1440_to_ne1024pg2.nc" \
-  --phis "$WORK/scream_phis.zarr" \
-  --latlon "$AUX_DATA_ROOT/latlon_ne1024pg2.nc" --scream-ref "$WORK/scream_static" \
-  --vert "$WORK/vert_coord_E3SM_L128.nc"
-```
-
-[`docs/initial_conditions.md`](docs/initial_conditions.md) has the downloads,
-the map build, the Docker command, the HRES path and the validation.
-
-## Regional windows
-
-`--region face,i0,i1,j0,j1` runs STRATA on a window of tiles instead of the whole
-globe; on one node of 8 H100 GPUs an 8 x 8-tile window (about 5,000 km across) runs
-24 h in about 8 minutes and a 4 x 4-tile window (about 2,500 km) in about 4. The
-window's edge is the initial state plus the large-scale change of a driver, for example
-an ECMWF HRES forecast, and STRATA runs freely inside. The run builds the initial
-condition and the driver's block means itself from a JSON spec (`--ic-onthefly`,
-`--driver-onthefly`); full-resolution driver stores (`--driver-stores`) also work. `--region-latlon LAT0,LAT1,LON0,LON1` instead picks the smallest window
-that holds a lat/lon box with a tile to spare (`--region-margin-tiles`); `python -m
-screamcast.regional --latlon-box .. --world-size 8 --latlon
-$AUX_DATA_ROOT/latlon_ne1024pg2.nc` prints the same window, and `--lat .. --lon ..
---tiles 8` one around a point. With `--region` the regional means are off unless
-`--regional-averages` is given.
-[`docs/regional_window.md`](docs/regional_window.md) has the commands and the
-limitations.
-
-## Replay to a driver forecast
-
-`--replay` keeps a run's large scales on a driver forecast and leaves the scales below
-about 250 km to STRATA: every 6 hours the low-passed difference between the driver and
-the run is added over the 6 hours centred on that time, re-running each window. The
-driver is an ECMWF HRES forecast (open data from 2024-03, WeatherBench2 for 2016-2022):
-the run starts from its analysis (lead 0) and is replayed to its +6 h, +12 h, ...
-leads, so it uses nothing known after the start and is a forecast. ERA5 can be the
-driver too; replaying to reanalysis makes a hindcast. Either is named in a JSON spec: the run builds its initial condition (`--ic-onthefly`)
-and the driver's block means for the replay and a window's ring (`--driver-onthefly`)
-itself, with nothing to prepare. It works for global runs and for regional windows; a
-replayed 4 x 4-tile window runs 24 h in about 5 minutes on one node of 8 H100 GPUs,
-initial condition included. A window's increment is normalized at its edge, and
-`--replay-level-ramp` can leave the boundary layer free. Other drivers can be given as
-full-resolution stores (`--driver-stores`). [`docs/replay.md`](docs/replay.md) has the
-command, the method and the limitations.
+More in `docs/`: [initial_conditions.md](docs/initial_conditions.md) (inputs, the
+HICCUP port and its validation), [regional_window.md](docs/regional_window.md)
+(choosing a window, the boundary) and [replay.md](docs/replay.md) (the method, the
+on-the-fly build, timings, limitations). No forecast skill has been measured yet.
 
 ## Training
 

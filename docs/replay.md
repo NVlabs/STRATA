@@ -9,68 +9,13 @@ its 5 km, 10-minute grid. It works for global runs and for regional windows
 
 ## Run
 
-Apart from the one-time `fast_ic` inputs, a replayed run needs nothing built
-beforehand. A JSON spec names the driver forecast and those inputs, and the run builds
-its initial condition and its driver targets itself while it goes:
-
-```json
-{"source": "hres", "init": "2024-09-25T12", "cache": "/path/to/grib-cache",
- "map": "/path/to/map_721x1440_to_ne1024pg2.nc", "phis": "/path/to/scream_phis.zarr",
- "vert": "/path/to/vert_coord_E3SM_L128.nc",
- "latlon": "/path/to/latlon_ne1024pg2.nc", "scream_ref": "/path/to/scream_static"}
-```
-
-`map`, `phis`, `vert`, `latlon` and `scream_ref` are the inputs of `fast_ic`, downloaded
-or built once ([initial_conditions.md](initial_conditions.md#inputs)). A replayed 24 h
-window over
-Hurricane Helene, driven by the HRES forecast of 2024-09-25 12 UTC:
-
-```bash
-torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \
-  --run-name helene_window_replay \
-  --checkpoint $AUX_DATA_ROOT/checkpoints/strata_v1.pth \
-  --ic-onthefly hres_helene.json \
-  --driver-onthefly hres_helene.json --driver-target-dir "$WORK/targets/helene" \
-  --region 3,10,14,7,11 --replay \
-  --forecast-model screamcast --correction none --n-steps 144 --output-steps 6 \
-  --tile-size 128 --halo-width 16 --halo-adjoint --no-halo-adjoint-cross-face \
-  --tile-jitter 4 --tile-jitter-mode cycle16 --inference-batch-size 1 \
-  --output-variables T_2m ps U V qv omega precip_liq_surf_mass_flux \
-  --output-levels 19,24,31 \
-  $OUTPUT
-```
-
-At start-up rank 0 builds the initial condition from the forecast's analysis (lead 0)
-into `$WORK/targets/helene`. While the model runs, a producer process on rank 0's GPU
-builds the driver targets: the 8 x 8-block means of the window at the analysis hours,
-and of the window's anchored ring at the driver hours. A rerun with the same spec builds
-nothing again. On one node of 8 H100 GPUs the whole run, initial condition included,
-takes about 5 minutes ([Resources](#resources)).
-
-- `"source": "wb2_hres"` takes an HRES forecast from 2016 to 2023-01-10 from
-  WeatherBench2 instead, and `"source": "era5"` takes ERA5 at any hour (with
-  `--initial-time`); see [Sources](#sources).
-- `--region-latlon=20,35,-100,-80` chooses the window by latitude and longitude instead
-  of by tiles ([regional_window.md](regional_window.md)).
-
-A replayed global run drops `--region` and adds `--sht-omega-lmax 3`, as the README's
-global command has. It needs more GPUs; on two nodes, one task per GPU:
-
-```bash
-srun --nodes=2 --ntasks-per-node=8 python scripts/ace/run_screamcast_nudged.py \
-  --run-name helene_global_replay \
-  --checkpoint $AUX_DATA_ROOT/checkpoints/strata_v1.pth \
-  --ic-onthefly hres_helene.json \
-  --driver-onthefly hres_helene.json --driver-target-dir "$WORK/targets/helene" \
-  --replay --sht-omega-lmax 3 \
-  ... (the other options of the window command above)
-```
-
-A global run with on-the-fly drivers has not been tried yet; the global timing in
-[Resources](#resources) is from driver stores ([Driver stores](#driver-stores)).
-
-The log has one line per analysis and variable with the root-mean-square of the block
-increment and of its low-passed part (`replay +6 h U_24: increment rms ...`).
+The README's [Forecasts from ERA5 or ECMWF HRES](../README.md#forecasts-from-era5-or-ecmwf-hres) has the spec
+and the command: a replayed run adds `--replay` and `--driver-onthefly SPEC.json` (with
+`--driver-target-dir DIR`), on the globe or on a window, and usually builds its initial
+condition from the same spec (`--ic-onthefly`). The log has one line per analysis and
+variable with the root-mean-square of the block increment and of its low-passed part
+(`replay +6 h U_24: increment rms ...`). Global runs with drivers built on the fly have
+not been run yet; the global timing in [Resources](#resources) is from driver stores.
 
 ## How it works
 
@@ -249,7 +194,7 @@ torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \
   --ic-store "$WORK/ics/scream_hiccup_ne1024pg2_helene_f000.zarr" \
   --driver-stores "$WORK"/ics/scream_hiccup_ne1024pg2_helene_f0*.zarr \
   --region 3,10,14,7,11 --replay \
-  ... (the other options of the window command above)
+  ... (the other options of the README's command)
 ```
 
 The initial condition and the drivers are chosen apart: `--ic-store` also combines with

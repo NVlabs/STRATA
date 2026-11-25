@@ -13,51 +13,15 @@ about 8 minutes, and a 4 x 4-tile window (about 2,500 km) in about 4 minutes (se
 
 ## Run
 
-Apart from the one-time `fast_ic` inputs
-([initial_conditions.md](initial_conditions.md#inputs)), a window needs nothing built
-beforehand. A JSON spec names the driver forecast and those inputs, and the run builds
-its initial condition and the ring's driver itself while it goes. Hurricane Erin
-from the HRES forecast of 2025-08-15 12 UTC, in an 8 x 8-tile window around 25 N 70 W:
-
-```json
-{"source": "hres", "init": "2025-08-15T12", "cache": "/path/to/grib-cache",
- "map": "/path/to/map_721x1440_to_ne1024pg2.nc", "phis": "/path/to/scream_phis.zarr",
- "vert": "/path/to/vert_coord_E3SM_L128.nc",
- "latlon": "/path/to/latlon_ne1024pg2.nc", "scream_ref": "/path/to/scream_static"}
-```
-
-```bash
-torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \
-  --run-name erin_window \
-  --checkpoint $AUX_DATA_ROOT/checkpoints/strata_v1.pth \
-  --ic-onthefly hres_erin.json \
-  --driver-onthefly hres_erin.json --driver-target-dir "$WORK/targets/erin" \
-  --region "$(python -m screamcast.regional --lat 25 --lon -70 --tiles 8 \
-      --latlon $AUX_DATA_ROOT/latlon_ne1024pg2.nc | head -1)" \
-  --forecast-model screamcast --correction none --n-steps 144 \
-  --tile-size 128 --halo-width 16 --halo-adjoint --no-halo-adjoint-cross-face \
-  --tile-jitter 4 --tile-jitter-mode cycle16 --inference-batch-size 1 \
-  --output-variables T_2m ps U V qv omega precip_liq_surf_mass_flux \
-  --output-levels 13,18,24,25,29,30 \
-  $OUTPUT
-```
-
-At start-up rank 0 builds the initial condition from the forecast's analysis (lead 0).
-A producer process on its GPU then builds the 8 x 8-block means of the window and its
-ring at every driver hour (every 6 h, to the first at or after the last step), and the
-ring follows them ([The boundary](#the-boundary)). A rerun with the same spec builds
-nothing again. [replay.md](replay.md#drivers-built-on-the-fly) has the details.
-
-- `--replay` also keeps the window's large scales on the forecast inside
-  ([replay.md](replay.md)).
-- `"source": "wb2_hres"` takes an HRES forecast from 2016 to 2023-01-10 from
-  WeatherBench2, and `"source": "era5"` takes ERA5 at any hour (with `--initial-time`);
-  see [replay.md](replay.md#sources).
-- If the open-data bucket on AWS answers HTTP 503 (`SlowDown`), add
-  `"opendata_root": "https://storage.googleapis.com/ecmwf-open-data"` (ECMWF's Google
-  Cloud mirror) to the spec.
-- `--region-latlon LAT0,LAT1,LON0,LON1` lets the runner choose the window around a box
-  ([below](#a-window-from-a-latlon-box)).
+The README's [Forecasts from ERA5 or ECMWF HRES](../README.md#forecasts-from-era5-or-ecmwf-hres) has the spec
+and the command. A window takes `--region-latlon LAT0,LAT1,LON0,LON1` or `--region
+face,i0,i1,j0,j1` ([Choose a window](#choose-a-window)) and a driver for its ring:
+`--driver-onthefly SPEC.json` builds the 8 x 8-block means of the window and its ring
+at every driver hour (every 6 h, to the first at or after the last step) while the run
+goes ([replay.md](replay.md#drivers-built-on-the-fly)), or `--driver-stores` takes
+full-resolution stores ([Driver stores](#driver-stores)). Without `--replay` STRATA
+runs freely inside; with it the window's large scales are also replayed to the driver
+([replay.md](replay.md)).
 
 ## Choose a window
 
@@ -209,7 +173,7 @@ torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \
   --driver-stores "$WORK"/ics/scream_hiccup_ne1024pg2_erin_f0*.zarr \
   --region "$(python -m screamcast.regional --lat 25 --lon -70 --tiles 8 \
       --latlon $AUX_DATA_ROOT/latlon_ne1024pg2.nc | head -1)" \
-  ... (the other options of the command in Run)
+  ... (the other options of the README's command)
 ```
 
 The drivers must cover the run: the last step reads the ring at `(n_steps - 1) x 10`
