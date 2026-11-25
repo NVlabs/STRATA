@@ -217,19 +217,6 @@ Each step logs the global-mean liquid and ice precipitation in mm/day. Ice
 precipitation reads `0.000` with this checkpoint (a known limitation); it is a
 diagnostic output and does not feed back into the forecast.
 
-### A window driven by SCREAM
-
-The same command runs on a regional window when `--region face,i0,i1,j0,j1` or
-`--region-latlon LAT0,LAT1,LON0,LON1` is added (one node of 8 GPUs is enough for a
-4 x 4-tile window; a window switches `--sht-omega-lmax` off). The window's
-one-tile ring then follows the SCREAM run itself, read every `--driver-every-hours`
-(default 6) from `SCREAM_MAIN_ZARR_PATH`. Adding `--replay` also pulls the window's
-large scales to SCREAM every 6 hours and leaves the smaller scales to STRATA. No
-initial-condition or driver options are needed, and the output can be scored against
-the same SCREAM store. A 24 h run needs SCREAM to +24 h, so start by 2020-10-14 00 UTC.
-[Forecasts from ERA5 or ECMWF HRES](#forecasts-from-era5-or-ecmwf-hres) explains
-windows and replay.
-
 ### Forecast output
 
 The forecast is written to the Zarr store `$OUTPUT`, and area-weighted
