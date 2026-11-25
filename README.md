@@ -1,4 +1,4 @@
-# Strata
+# STRATA
 
 [![Paper](https://img.shields.io/badge/Paper-NeurIPS%202026-b31b1b?logo=arxiv&logoColor=white)](https://arxiv.org/abs/2606.31248)
 [![Project page](https://img.shields.io/badge/Project-page-76b900?logo=nvidia&logoColor=white)](https://research.nvidia.com/labs/climate/strata/)
@@ -9,12 +9,12 @@
 Code for *Scaling Storm-Resolving Atmospheric AI Simulation to the Entire
 Planet* (NeurIPS 2026, Main Track).
 
-Strata is a deep-learning weather emulator for the
+STRATA is a deep-learning weather emulator for the
 [SCREAM](https://e3sm.org/scream/) global atmosphere model. It trains
 transformer-based neural networks to emulate SCREAM atmospheric physics on
 the cubed-sphere grid and supports multi-day global forecasting.
 
-The Strata architecture (a two-stage 3D neighborhood-attention transformer
+The STRATA architecture (a two-stage 3D neighborhood-attention transformer
 with stereographic rotary position embeddings) lives in
 [NVIDIA PhysicsNeMo](https://github.com/NVIDIA/physicsnemo) as
 `physicsnemo.experimental.models.strata`. This repository adds the
@@ -24,10 +24,10 @@ rotation, data pipelines, training configs, rollout/inference tooling
 initial conditions from ERA5 or the ECMWF HRES analysis
 (see [Forecasts from ERA5 or ECMWF HRES](#forecasts-from-era5-or-ecmwf-hres)).
 
-The public release is named *Strata*, but the Python package, command-line
+The public release is named *STRATA*, but the Python package, command-line
 scripts, and environment variables keep the project's original name: you import
 `screamcast`, run the `screamcast`-prefixed entry points, and configure
-`SCREAM_*` variables. *Strata* and *screamcast* refer to the same project.
+`SCREAM_*` variables. *STRATA* and *screamcast* refer to the same project.
 
 > This code is provided for research and development purposes only.
 
@@ -48,7 +48,7 @@ Build the training/inference image from the repository root:
 The image contains the complete environment, including NATTEN built from
 source for Ada and Hopper GPUs (pass `--build-arg CUDA_ARCH=8.0` for A100; see
 [`docker/build_natten.sh`](docker/build_natten.sh)) and PhysicsNeMo pinned to a
-commit that includes the Strata models. It does not contain this repository;
+commit that includes the STRATA models. It does not contain this repository;
 mount it at run time.
 
 ### pip install (plain PyPI environment)
