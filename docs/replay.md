@@ -7,6 +7,70 @@ a few hundred kilometres to STRATA. STRATA then downscales the forecast dynamica
 its 5 km, 10-minute grid. It works for global runs and for regional windows
 ([regional_window.md](regional_window.md)).
 
+## Run
+
+A replayed run needs nothing built beforehand. A JSON spec names the driver forecast and
+the `fast_ic` inputs, and the run builds its initial condition and its driver targets
+itself while it goes:
+
+```json
+{"source": "hres", "init": "2024-09-25T12", "cache": "/path/to/grib-cache",
+ "map": "/path/to/map_721x1440_to_ne1024pg2.nc", "phis": "/path/to/scream_phis.zarr",
+ "vert": "/path/to/vert_coord_E3SM_L128.nc",
+ "latlon": "/path/to/latlon_ne1024pg2.nc", "scream_ref": "/path/to/scream_static"}
+```
+
+`map`, `phis`, `vert`, `latlon` and `scream_ref` are the inputs of `fast_ic`
+([initial_conditions.md](initial_conditions.md#inputs)). A replayed 24 h window over
+Hurricane Helene, driven by the HRES forecast of 2024-09-25 12 UTC:
+
+```bash
+torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \
+  --run-name helene_window_replay \
+  --checkpoint $AUX_DATA_ROOT/checkpoints/strata_v1.pth \
+  --ic-onthefly hres_helene.json \
+  --driver-onthefly hres_helene.json --driver-target-dir "$WORK/targets/helene" \
+  --region 3,10,14,7,11 --replay \
+  --forecast-model screamcast --correction none --n-steps 144 --output-steps 6 \
+  --tile-size 128 --halo-width 16 --halo-adjoint --no-halo-adjoint-cross-face \
+  --tile-jitter 4 --tile-jitter-mode cycle16 --inference-batch-size 1 \
+  --output-variables T_2m ps U V qv omega precip_liq_surf_mass_flux \
+  --output-levels 19,24,31 \
+  $OUTPUT
+```
+
+At start-up rank 0 builds the initial condition from the forecast's analysis (lead 0)
+into `$WORK/targets/helene`. While the model runs, a producer process on rank 0's GPU
+builds the driver targets: the 8 x 8-block means of the window at the analysis hours,
+and of the window's anchored ring at the driver hours. A rerun with the same spec builds
+nothing again. On one node of 8 H100 GPUs the whole run, initial condition included,
+takes about 5 minutes ([Resources](#resources)).
+
+- `"source": "wb2_hres"` takes an HRES forecast from 2016 to 2023-01-10 from
+  WeatherBench2 instead, and `"source": "era5"` takes ERA5 at any hour (with
+  `--initial-time`); see [Sources](#sources).
+- `--region-latlon=20,35,-100,-80` chooses the window by latitude and longitude instead
+  of by tiles ([regional_window.md](regional_window.md)).
+
+A replayed global run drops `--region` and adds `--sht-omega-lmax 3`, as the README's
+global command has. It needs more GPUs; on two nodes, one task per GPU:
+
+```bash
+srun --nodes=2 --ntasks-per-node=8 python scripts/ace/run_screamcast_nudged.py \
+  --run-name helene_global_replay \
+  --checkpoint $AUX_DATA_ROOT/checkpoints/strata_v1.pth \
+  --ic-onthefly hres_helene.json \
+  --driver-onthefly hres_helene.json --driver-target-dir "$WORK/targets/helene" \
+  --replay --sht-omega-lmax 3 \
+  ... (the other options of the window command above)
+```
+
+A global run with on-the-fly drivers has not been tried yet; the global timing in
+[Resources](#resources) is from driver stores ([Driver stores](#driver-stores)).
+
+The log has one line per analysis and variable with the root-mean-square of the block
+increment and of its low-passed part (`replay +6 h U_24: increment rms ...`).
+
 ## How it works
 
 Every `--replay-every-hours` (default 6) hours, at a time `t` where a driver state
@@ -34,7 +98,8 @@ and scales below the taper stay STRATA's own throughout.
   the driver in every input variable.
 - An analysis at `t` needs a driver at `t` and `t + every/2` within the run. A 24 h run
   with drivers every 6 h to +24 h is replayed at +6, +12 and +18 h; the last 3 hours are
-  a free forecast. Build drivers to +30 h and run 27 h or more to replay at +24 h too.
+  a free forecast. Run 27 h or more (`--n-steps 162`) to replay at +24 h too (from
+  stores, build them to +30 h).
 - Only the final trajectory is written: every output hour once, in order. The predictor
   windows that are re-run are not written.
 - Each analysis re-runs 3 hours, so a 24 h run replayed at +6, +12 and +18 h costs 33
@@ -48,7 +113,7 @@ and scales below the taper stay STRATA's own throughout.
   indicator, `K*(m delta) / K*(m)` (`--replay-region-edge normalized`, the default): a
   uniform difference is added whole up to the edge, and away from the edge the
   increment is the global one. `--replay-region-edge zero` keeps the share. The
-  window's ring is the anchored boundary, from the same driver stores.
+  window's ring is the anchored boundary, from the same driver.
 - `--replay-level-ramp PFULL,PZERO` (e.g. `800,900`) leaves the boundary layer to
   STRATA: the increment of each level is weighted 1 at reference pressures up to PFULL
   hPa, 0 from PZERO hPa down, linear between. The reference pressure is
@@ -61,92 +126,75 @@ Each rank analyses its own blocks and the spherical-harmonic coefficients are
 all-reduced (`lmax` 414 at the default taper), then each rank evaluates them on its own
 pixels.
 
-## Run
-
-Build the driver stores from an HRES forecast as for a window (the lead-0 store is the
-initial condition; see
-[regional_window.md](regional_window.md#drive-a-window-with-an-ecmwf-hres-forecast)):
-
-```bash
-python -m screamcast.initial_conditions.hres_forecast \
-  --init 2024-09-25T12 --leads 0 6 12 18 24 --tag-prefix helene \
-  --out-dir "$WORK/ics" --cache "$WORK/grib" \
-  --opendata-root https://storage.googleapis.com/ecmwf-open-data \
-  --map "$WORK/map/map_721x1440_to_ne1024pg2.nc" --phis "$WORK/scream_phis.zarr" \
-  --latlon "$AUX_DATA_ROOT/latlon_ne1024pg2.nc" --scream-ref "$WORK/scream_static" \
-  --vert "$WORK/vert_coord_E3SM_L128.nc"
-```
-
-A replayed window adds `--replay` to the window command:
-
-```bash
-torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \
-  --run-name helene_window_replay \
-  --checkpoint $AUX_DATA_ROOT/checkpoints/strata_v1.pth \
-  --ic-store "$WORK/ics/scream_hiccup_ne1024pg2_helene_f000.zarr" \
-  --driver-stores "$WORK"/ics/scream_hiccup_ne1024pg2_helene_f0*.zarr \
-  --region 3,10,14,7,11 --replay \
-  --forecast-model screamcast --correction none --n-steps 144 --output-steps 6 \
-  --tile-size 128 --halo-width 16 --halo-adjoint --no-halo-adjoint-cross-face \
-  --tile-jitter 4 --tile-jitter-mode cycle16 --inference-batch-size 1 \
-  --output-variables T_2m ps U V qv omega precip_liq_surf_mass_flux \
-  --output-levels 19,24,31 \
-  $OUTPUT
-```
-
-A replayed global run is the README's global command with `--ic-store`,
-`--driver-stores` and `--replay`. It needs more GPUs; on two nodes, one task per GPU:
-
-```bash
-srun --nodes=2 --ntasks-per-node=8 python scripts/ace/run_screamcast_nudged.py \
-  --run-name helene_global_replay \
-  --checkpoint $AUX_DATA_ROOT/checkpoints/strata_v1.pth \
-  --ic-store "$WORK/ics/scream_hiccup_ne1024pg2_helene_f000.zarr" \
-  --driver-stores "$WORK"/ics/scream_hiccup_ne1024pg2_helene_f0*.zarr \
-  --replay --sht-omega-lmax 3 \
-  --forecast-model screamcast --correction none --n-steps 144 --output-steps 6 \
-  --tile-size 128 --halo-width 16 --halo-adjoint --no-halo-adjoint-cross-face \
-  --tile-jitter 4 --tile-jitter-mode cycle16 --inference-batch-size 1 \
-  --output-variables T_2m ps U V qv omega precip_liq_surf_mass_flux \
-  --output-levels 19,24,31 \
-  $OUTPUT
-```
-
-The log has one line per analysis and variable with the root-mean-square of the block
-increment and of its low-passed part (`replay +6 h U_24: increment rms ...`).
-
-Without `--driver-stores` and without `--ic-store`, the driver is the SCREAM run in
-`SCREAM_MAIN_ZARR_PATH` every `--driver-every-hours`: a replay toward a known truth.
-
 ## Drivers built on the fly
 
 The replay uses the driver only as 8 x 8-block means at its analysis hours, and the
 anchored ring of a window only as the 8 x 8-block means of the window and its ring at the
-driver hours (its `smooth`, `--boundary-block 8`). Instead of building full-resolution
-driver stores first (about 9 GB each), the run can build these targets while it goes:
-`--driver-onthefly SPEC.json --driver-target-dir DIR` replaces `--driver-stores` and
-starts a producer process on rank 0's GPU (`screamcast/replay_targets.py`). For each
-hour the run needs, it fetches the source state, runs `fast_ic.build_ic` on it 2^21
-columns at a time, and writes the block means to `DIR/blocks_<YYYYMMDDHH>.zarr` (about
-600 MB for the globe, 6 MB for a 4 x 4-tile window, 14 MB with its ring). A window's
-producer builds only the window's columns, and its ring's when the ring is anchored.
-Each rank reads the blocks it needs on a background thread. The fine state never goes
-to disk. The initial condition comes from a store (`--ic-store`, e.g. the lead-0 store
-of `hres_forecast`) or is built at start-up (`--ic-onthefly`, below).
+driver hours (its `smooth`, `--boundary-block 8`). So `--driver-onthefly SPEC.json
+--driver-target-dir DIR` builds only those: it starts a producer process on rank 0's GPU
+(`screamcast/replay_targets.py`). For each hour the run needs, the producer fetches the
+source state, runs `fast_ic.build_ic` on it 2^21 columns at a time, and writes the block
+means to `DIR/blocks_<YYYYMMDDHH>.zarr` (about 600 MB for the globe, 6 MB for a 4 x 4-tile
+window, 14 MB with its ring). A window's producer builds only the window's columns, and
+its ring's when the ring is anchored. Each rank reads the blocks it needs on a background
+thread. The fine state never goes to disk.
 
 - With `--replay` the targets are at the analysis hours; with an anchored ring also at
   every `--driver-every-hours` (default 6) from 0 to the first at or after the last step.
   A window can use them without `--replay` too: then they drive the ring alone.
 - The ring takes every input variable from the targets; the replay takes
   `--replay-vars`.
+- `--driver-producer gated` (default) builds the targets the run needs before its first
+  analysis at once (the ring's +0 and +6 h, the first analysis) and each later one when
+  the run begins the last analysis before it needs that target; rank 0 empties its CUDA
+  cache first, so the build does not meet STRATA's peak memory of start-up and
+  compilation. A window without `--replay` has no analyses and is not gated. `ahead`
+  builds every target as early as it can. A rank that needs a target not yet built asks
+  for it, and a gated producer then builds it without waiting for its gate. The next
+  source state is fetched while the GPU builds the current one. On the 4 x 4-tile Helene
+  window (H100, 2026-11-19) a target took about 7 s (2.6 s to read the cached GRIB, 2 s
+  on the GPU).
+- A target is written under `.partial<pid>` and renamed, so a rank never reads half a
+  store. Each run has its own directory `DIR/runs/<run-name>-<time>-<pid>`: there the
+  producer writes `FAILED` (with the traceback) or `DONE` and its `producer.log`, and
+  the run its markers, so runs that share `DIR` do not disturb each other. A rank that
+  waits longer than `--driver-target-timeout` seconds (default 3600) for a target fails.
+- The directory must be on a file system every rank sees. Each target records its
+  origin: the source (the ERA5 store, or the HRES forecast's init) and the absolute
+  paths of `map`, `phis` and `vert`. A target already there is used only if it has this
+  run's origin and holds its channels and tiles, so a rerun builds nothing; any other
+  target with the name of one the run needs (say, from another HRES forecast) stops the
+  run, in the producer and in every rank, before it is used.
+- Relative paths, in the options and in the spec, are taken from the run's working
+  directory, also by the producer.
+- `python -m screamcast.replay_targets produce --spec SPEC.json --out-dir DIR
+  --run-init 2024-09-25T12 --hours 6 12 18 [--region R --tile-size 128 [--ring]]`
+  builds targets ahead of a run, for example on a node that can reach the source when
+  the compute nodes cannot; the run then reuses them.
 
-The spec names the source and the `fast_ic` inputs:
+### The initial condition
 
-```json
-{"source": "hres", "init": "2024-09-25T12", "cache": "/path/to/grib-cache",
- "map": "/path/to/map_721x1440_to_ne1024pg2.nc", "phis": "/path/to/scream_phis.zarr",
- "vert": "/path/to/vert_coord_E3SM_L128.nc"}
-```
+`--ic-onthefly SPEC.json` (with `--driver-target-dir DIR`): at start-up, before the model
+loads, rank 0 builds the full initial condition from the spec's source with
+`fast_ic.build_ic` (the steps of `fast_ic`, `hres_ic` and `hres_forecast`) into
+`DIR/ic_<YYYYMMDDHH>.zarr` (about 9 GB). The spec may be the driver's; it also needs the
+statics `latlon` (the `lat`/`lon` NetCDF) and `scream_ref` (the directory with
+`sgh30.zarr` and `landfrac.zarr`), as `fast_ic` does. The initial time is
+`--initial-time`, by default the forecast's `init` for `hres` and `wb2_hres`; `era5`
+needs `--initial-time`.
+
+- Like a target, the store is written under `.partial<pid>` and renamed, and records
+  its origin (the targets' origin, its time, and the absolute paths of `latlon` and
+  `scream_ref`). A store already there is used if it has this run's origin, so a rerun
+  builds nothing; one with another origin stops the run.
+- The other ranks wait for rank 0's `IC_READY` (the store's path) or `FAILED` (with
+  the traceback) in the run's directory, up to `--driver-target-timeout` seconds. They
+  do not wait in a collective, so a build longer than the NCCL timeout does not fail
+  the run.
+- A `fast_ic` build of the globe takes about 80 s on one GPU, plus reading the source
+  state.
+
+### Sources
 
 `"source": "era5"` reads ERA5 from the public ARCO store (`era5_zarr` to use another),
 which has every hour. `"hres"` reads the ECMWF HRES forecast `init` from the open-data
@@ -166,100 +214,62 @@ ERA5 is under the Copernicus licence. Both ask you to credit the source in work 
 uses them, replayed runs included: the [README](../README.md#license) gives the
 wording each asks for.
 
+## Driver stores
+
+A source the producer does not read (another model, the 2023 HRES files) can drive a run
+as full-resolution stores instead: `--ic-store` and `--driver-stores` take the place of
+`--ic-onthefly` and `--driver-onthefly`. `hres_forecast` builds one store per lead from
+an HRES forecast (about 9 GB each; the lead-0 store is the initial condition; see
+[regional_window.md](regional_window.md#drive-a-window-with-an-ecmwf-hres-forecast)):
+
+```bash
+python -m screamcast.initial_conditions.hres_forecast \
+  --init 2024-09-25T12 --leads 0 6 12 18 24 --tag-prefix helene \
+  --out-dir "$WORK/ics" --cache "$WORK/grib" \
+  --opendata-root https://storage.googleapis.com/ecmwf-open-data \
+  --map "$WORK/map/map_721x1440_to_ne1024pg2.nc" --phis "$WORK/scream_phis.zarr" \
+  --latlon "$AUX_DATA_ROOT/latlon_ne1024pg2.nc" --scream-ref "$WORK/scream_static" \
+  --vert "$WORK/vert_coord_E3SM_L128.nc"
+```
+
 ```bash
 torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \
-  --run-name helene_window_replay_onthefly \
+  --run-name helene_window_replay_stores \
   --checkpoint $AUX_DATA_ROOT/checkpoints/strata_v1.pth \
   --ic-store "$WORK/ics/scream_hiccup_ne1024pg2_helene_f000.zarr" \
+  --driver-stores "$WORK"/ics/scream_hiccup_ne1024pg2_helene_f0*.zarr \
   --region 3,10,14,7,11 --replay \
-  --driver-onthefly hres_helene.json --driver-target-dir "$WORK/targets/helene" \
-  ... (the other options of the window command above, without --driver-stores)
-```
-
-- `--driver-producer gated` (default) builds the targets the run needs before its first
-  analysis at once (the ring's +0 and +6 h, the first analysis) and each later one when
-  the run begins the last analysis before it needs that target; rank 0 empties its CUDA
-  cache first, so the build does not meet STRATA's peak memory of start-up and
-  compilation. A window without `--replay` has no analyses and is not gated. `ahead`
-  builds every target as early as it can. A rank that needs a target not yet built asks
-  for it, and a gated producer then builds it without waiting for its gate. The next
-  source state is fetched while the GPU builds the current one.
-- A target is written under `.partial<pid>` and renamed, so a rank never reads half a
-  store. Each run has its own directory `DIR/runs/<run-name>-<time>-<pid>`: there the
-  producer writes `FAILED` (with the traceback) or `DONE` and its `producer.log`, and
-  the run its markers, so runs that share `DIR` do not disturb each other. A rank that
-  waits longer than `--driver-target-timeout` seconds (default 3600) for a target fails.
-- The directory must be on a file system every rank sees. Each target records its
-  origin: the source (the ERA5 store, or the HRES forecast's init) and the absolute
-  paths of `map`, `phis` and `vert`. A target already there is used only if it has this
-  run's origin and holds its channels and tiles, so a rerun builds nothing; any other
-  target with the name of one the run needs (say, from another HRES forecast) stops the
-  run, in the producer and in every rank, before it is used.
-- Relative paths, in the options and in the spec, are taken from the run's working
-  directory, also by the producer.
-- `python -m screamcast.replay_targets produce --spec SPEC.json --out-dir DIR
-  --run-init 2024-09-25T12 --hours 6 12 18 [--region R --tile-size 128 [--ring]]`
-  builds targets ahead of a run, for example on a node that can reach the source when
-  the compute nodes cannot; the run then reuses them.
-
-On the 4 x 4-tile Helene window (H100, 2026-11-19) a target took about 7 s to build
-(2.6 s to read the cached GRIB, 2 s on the GPU) and the replayed 24 h run took as long as
-with stores (327 s). Its targets were bitwise equal to the block means of the stores
-built from the same forecast; the run itself is not bitwise reproducible on GPU (two
-runs from stores differ by 0.8 m/s in `U` at +24 h), and the on-the-fly run differed
-from the stores run by as much. With the anchored ring also built on the fly (5 targets
-of window and ring, 193 channels, no driver stores) the replayed run took 299 s and stayed
-within the same run-to-run noise of the stores run; a rerun reused all 5 targets. No
-global on-the-fly run yet; a `fast_ic` build of the globe
-takes about 80 s on one GPU.
-
-### The initial condition on the fly
-
-`--ic-onthefly SPEC.json` (with `--driver-target-dir DIR`) replaces `--ic-store`: at
-start-up, before the model loads, rank 0 builds the full initial condition from the
-spec's source with `fast_ic.build_ic` (the steps of `fast_ic`, `hres_ic` and
-`hres_forecast`) into `DIR/ic_<YYYYMMDDHH>.zarr`, a store like the ones `--ic-store`
-takes (about 9 GB). The spec may be the driver's; it also needs the statics `latlon`
-(the `lat`/`lon` NetCDF) and `scream_ref` (the directory with `sgh30.zarr` and
-`landfrac.zarr`), as `fast_ic` does. The initial time is `--initial-time`, by default
-the forecast's `init` for `hres` and `wb2_hres`; `era5` needs `--initial-time`.
-
-- Like a target, the store is written under `.partial<pid>` and renamed, and records
-  its origin (the targets' origin, its time, and the absolute paths of `latlon` and
-  `scream_ref`). A store already there is used if it has this run's origin, so a rerun
-  builds nothing; one with another origin stops the run.
-- The other ranks wait for rank 0's `IC_READY` (the store's path) or `FAILED` (with
-  the traceback) in the run's directory, up to `--driver-target-timeout` seconds. They
-  do not wait in a collective, so a build longer than the NCCL timeout does not fail
-  the run.
-- A `fast_ic` build of the globe takes about 80 s on one GPU, plus reading the source
-  state.
-
-A replayed window of a 2020 hurricane, all on the fly from the WeatherBench2 HRES
-forecast:
-
-```json
-{"source": "wb2_hres", "init": "2020-08-26T00",
- "map": "/path/to/map_721x1440_to_ne1024pg2.nc", "phis": "/path/to/scream_phis.zarr",
- "vert": "/path/to/vert_coord_E3SM_L128.nc",
- "latlon": "/path/to/latlon_ne1024pg2.nc", "scream_ref": "/path/to/scream_static"}
-```
-
-```bash
-torchrun --nproc_per_node=8 scripts/ace/run_screamcast_nudged.py \
-  --run-name laura_window_replay_onthefly \
-  --checkpoint $AUX_DATA_ROOT/checkpoints/strata_v1.pth \
-  --ic-onthefly hres_laura.json \
-  --region-latlon=20,35,-100,-80 --replay \
-  --driver-onthefly hres_laura.json --driver-target-dir "$WORK/targets/laura" \
   ... (the other options of the window command above)
 ```
 
+The initial condition and the drivers are chosen apart: `--ic-store` also combines with
+`--driver-onthefly`, and `--ic-onthefly` with `--driver-stores`. With none of the four
+options, the run starts from and is driven by the SCREAM run in
+`SCREAM_MAIN_ZARR_PATH`, every `--driver-every-hours`: a replay toward a known truth.
+
+On the Helene window (H100, 2026-11-19) the on-the-fly targets were bitwise equal to
+the block means of the stores built from the same forecast. The run itself is not
+bitwise reproducible on GPU (two runs from stores differ by 0.8 m/s in `U` at +24 h),
+and the on-the-fly run differed from the stores run by as much, also with the anchored
+ring built on the fly.
+
 ## Resources
 
-Measured on NVIDIA H100 80 GB nodes (2026-11-17) with `torch.compile`, Hurricane Helene
-replayed to the HRES forecast of 2024-09-25 12 UTC (5 driver stores, +0 to +24 h; analyses
-at +6, +12 and +18 h):
+Measured on one node of 8 NVIDIA H100 80 GB GPUs (2026-11-24) with `torch.compile`,
+everything on the fly (initial condition, replay targets and anchored ring), 24 h
+replayed at +6, +12 and +18 h with hourly output; the whole run, start-up included:
+
+| Window | Driver | Tiles | Whole run |
+|---|---|---|---|
+| Helene, `3,10,14,7,11` | HRES open data, 2024-09-25 12 UTC | 16 | 5 min 15 s |
+| Iota, `3,8,12,7,11` | WeatherBench2 HRES, 2020-11-16 12 UTC | 16 | 5 min 15 s |
+| Kirk across a face edge, `3,10,15,12,20` | HRES open data, 2024-10-02 12 UTC | 40 | 8 min 9 s |
+| Kirk at a cube corner, `3,12,20,12,16` | HRES open data, 2024-10-06 00 UTC | 32 | 7 min 18 s |
+
+The Iota run was bitwise equal through +18 h to an earlier 48 h run of the same case from
+driver stores; they part at +24 h, where the 48 h run is already in its +24 h analysis.
+
+With driver stores (2026-11-17, Helene, 5 stores from +0 to +24 h):
 
 | Step | 4 x 4-tile window, 1 node (8 GPUs) | Global, 2 nodes (16 GPUs) |
 |---|---|---|
@@ -285,3 +295,4 @@ every rank evaluates about 172,000 spherical-harmonic modes on its 1.6 million p
   2024-03-05 12 UTC) or WeatherBench2's HRES forecasts (2016-01-01 to 2023-01-10
   12 UTC) only; other sources (the 2023 HRES files at 0.4 deg, other models) need
   stores.
+- Global runs with drivers built on the fly have not been run yet.

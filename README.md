@@ -325,17 +325,18 @@ limitations.
 
 ## Replay to a driver forecast
 
-`--replay` keeps a run's large scales on the driver (`--driver-stores`, for example
-the HRES forecast stores) and leaves the scales below about 250 km to STRATA: every
-6 hours the low-passed difference between the driver and the run is added over the
-6 hours centred on that time, re-running each window. It works for global runs and for
-regional windows; a replayed 4 x 4-tile window runs 24 h in about 5 minutes on one
-node of 8 H100 GPUs. A window's increment is normalized at its edge, and
-`--replay-level-ramp` can leave the boundary layer free. Instead of driver stores, the
-driver can be built while the run goes from ERA5 or an ECMWF HRES forecast (open
-data from 2024-03, WeatherBench2 for 2016-2022), for the replay and for a window's ring
-(`--driver-onthefly`), and so can the initial condition (`--ic-onthefly`).
-[`docs/replay.md`](docs/replay.md) has the method, the commands and the limitations.
+`--replay` keeps a run's large scales on a driver forecast and leaves the scales below
+about 250 km to STRATA: every 6 hours the low-passed difference between the driver and
+the run is added over the 6 hours centred on that time, re-running each window. The
+driver is an ECMWF HRES forecast (open data from 2024-03, WeatherBench2 for 2016-2022)
+or ERA5, named in a JSON spec: the run builds its initial condition (`--ic-onthefly`)
+and the driver's block means for the replay and a window's ring (`--driver-onthefly`)
+itself, with nothing to prepare. It works for global runs and for regional windows; a
+replayed 4 x 4-tile window runs 24 h in about 5 minutes on one node of 8 H100 GPUs,
+initial condition included. A window's increment is normalized at its edge, and
+`--replay-level-ramp` can leave the boundary layer free. Other drivers can be given as
+full-resolution stores (`--driver-stores`). [`docs/replay.md`](docs/replay.md) has the
+command, the method and the limitations.
 
 ## Training
 
