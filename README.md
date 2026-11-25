@@ -334,7 +334,8 @@ files are kept; if the AWS bucket answers HTTP 503, add
 `S` is the spec; the driver is usually the same spec as the initial condition. Every run
 also takes `--driver-target-dir DIR`, where the initial condition (about 9 GB) and the
 driver's 8 x 8-block means are written; a rerun reuses them. So far (2026-11) replayed
-windows have run this way; global replayed runs have run from driver stores only.
+windows and a free global run have run this way; global replayed runs have run from
+driver stores only.
 
 ### 4. Run
 
